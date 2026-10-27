@@ -1,0 +1,129 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "启动后端 server",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "start:dev"],
+      "cwd": "${workspaceFolder}/server",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": ["<node_internals>/**"],
+      "restart": true,
+      "presentation": { "group": "1_运行", "order": 2 }
+    },
+    {
+      "name": "启动前端 admin-vue3",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "cwd": "${workspaceFolder}/admin-vue3",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": ["<node_internals>/**"],
+      "presentation": { "group": "1_运行", "order": 3 }
+    },
+    {
+      "name": "停止 8080/8888",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "powershell",
+      "runtimeArgs": [
+        "-NoProfile",
+        "-Command",
+        "$ports=8080,8888; foreach($p in $ports){ Get-NetTCPConnection -LocalPort $p -State Listen -EA SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -EA SilentlyContinue; Write-Host \"stopped $($_.OwningProcess) on $p\" } }; Write-Host done; Start-Sleep -Seconds 1"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "presentation": { "group": "1_运行", "order": 4 }
+    },
+    {
+      "name": "打生产包",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "build:prod"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": ["<node_internals>/**"],
+      "presentation": { "group": "1_运行", "order": 5 }
+    },
+    {
+      "name": "打测试包",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "build:test"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": ["<node_internals>/**"],
+      "presentation": { "group": "1_运行", "order": 6 }
+    },
+    {
+      "name": "打前端生产包",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "build:prod"],
+      "cwd": "${workspaceFolder}/admin-vue3",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": ["<node_internals>/**"],
+      "presentation": { "group": "2_前端", "order": 1 }
+    },
+    {
+      "name": "打前端测试包",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "build:stage"],
+      "cwd": "${workspaceFolder}/admin-vue3",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": ["<node_internals>/**"],
+      "presentation": { "group": "2_前端", "order": 2 }
+    },
+    {
+      "name": "打后端生产包",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "build:prod"],
+      "cwd": "${workspaceFolder}/server",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": ["<node_internals>/**"],
+      "presentation": { "group": "3_后端", "order": 1 }
+    },
+    {
+      "name": "打后端测试包",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "build:test"],
+      "cwd": "${workspaceFolder}/server",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": ["<node_internals>/**"],
+      "presentation": { "group": "3_后端", "order": 2 }
+    }
+  ],
+  "compounds": [
+    {
+      "name": "启动前后端",
+      "configurations": ["启动后端 server", "启动前端 admin-vue3"],
+      "stopAll": true,
+      "presentation": {
+        "group": "1_运行",
+        "order": 1,
+        "hidden": false
+      }
+    }
+  ]
+}

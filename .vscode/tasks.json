@@ -1,0 +1,94 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "运行: 启动后端 (server)",
+      "type": "npm",
+      "script": "start:dev",
+      "path": "server/",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "run" },
+      "isBackground": true
+    },
+    {
+      "label": "运行: 启动前端 (admin-vue3)",
+      "type": "npm",
+      "script": "dev",
+      "path": "admin-vue3/",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "run" },
+      "isBackground": true
+    },
+    {
+      "label": "运行: 启动前后端",
+      "dependsOn": ["运行: 启动后端 (server)", "运行: 启动前端 (admin-vue3)"],
+      "dependsOrder": "parallel",
+      "problemMatcher": []
+    },
+    {
+      "label": "运行: 打生产包",
+      "type": "npm",
+      "script": "build:prod",
+      "problemMatcher": [],
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "run" }
+    },
+    {
+      "label": "运行: 打测试包",
+      "type": "npm",
+      "script": "build:test",
+      "problemMatcher": [],
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "run" }
+    },
+    {
+      "label": "前端: 打生产包",
+      "type": "npm",
+      "script": "build:prod",
+      "path": "admin-vue3/",
+      "problemMatcher": [],
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "frontend" }
+    },
+    {
+      "label": "前端: 打测试包",
+      "type": "npm",
+      "script": "build:stage",
+      "path": "admin-vue3/",
+      "problemMatcher": [],
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "frontend" }
+    },
+    {
+      "label": "后端: 打生产包",
+      "type": "npm",
+      "script": "build:prod",
+      "path": "server/",
+      "problemMatcher": [],
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "backend" }
+    },
+    {
+      "label": "后端: 打测试包",
+      "type": "npm",
+      "script": "build:test",
+      "path": "server/",
+      "problemMatcher": [],
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "backend" }
+    },
+    {
+      "label": "运行: 停止 8080/8888",
+      "type": "shell",
+      "command": "$ports = 8080,8888; foreach ($p in $ports) { Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue; Write-Host \"stopped PID $($_.OwningProcess) on $p\" } }; Write-Host done",
+      "options": {
+        "shell": {
+          "executable": "powershell.exe",
+          "args": ["-NoProfile", "-Command"]
+        }
+      },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    }
+  ]
+}

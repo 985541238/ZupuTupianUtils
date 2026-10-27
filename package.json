@@ -1,0 +1,17 @@
+{
+  "name": "nest-admin-framework",
+  "private": true,
+  "version": "1.0.0",
+  "description": "本地直接运行；打包仅用于生产/测试环境",
+  "scripts": {
+    "dev:server": "npm --prefix server run start:dev",
+    "dev:admin": "npm --prefix admin-web run dev",
+    "build:prod": "npm run build:server:prod && npm run build:admin:prod",
+    "build:test": "npm run build:server:test && npm run build:admin:test",
+    "build:server:prod": "npm --prefix server run build:prod",
+    "build:server:test": "npm --prefix server run build:test",
+    "build:admin:prod": "npm --prefix admin-web run build",
+    "build:admin:test": "npm --prefix admin-web run build",
+    "start:prod": "npm --prefix server run start:prod"
+  }
+}

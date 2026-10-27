@@ -1,0 +1,147 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --apple-bg: #F5F5F7;
+    --apple-card: #FFFFFF;
+    --apple-blue: #0071E3;
+    --apple-blue-hover: #0077ED;
+    --apple-subtle: #86868B;
+    --apple-border: rgba(0, 0, 0, 0.08);
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Plus Jakarta Sans", system-ui, sans-serif;
+    background-color: var(--apple-bg);
+    color: #1D1D1F;
+    overflow: hidden;
+    user-select: none;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+/* Apple Pro Scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.28);
+}
+
+/* Apple Light Studio Canvas */
+.apple-studio-canvas {
+  background-color: #EBEBEF;
+  background-image: 
+    radial-gradient(circle at 50% 40%, rgba(255, 255, 255, 0.8) 0%, rgba(235, 235, 239, 0.3) 100%),
+    linear-gradient(rgba(0, 0, 0, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 0, 0, 0.02) 1px, transparent 1px);
+  background-size: 100% 100%, 24px 24px, 24px 24px;
+}
+
+/* Document Shadow for Physical Paper Presence */
+.apple-doc-shadow {
+  box-shadow: 0 10px 40px -10px rgba(0, 0, 0, 0.14), 
+              0 0 1px 1px rgba(0, 0, 0, 0.06),
+              0 24px 64px -12px rgba(0, 0, 0, 0.08);
+}
+
+/* Apple iOS Range Sliders */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: #E5E5EA;
+  border-radius: 9999px;
+  height: 6px;
+  outline: none;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #FFFFFF;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18), 0 0 0 1px rgba(0, 0, 0, 0.04);
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.12);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(0, 0, 0, 0.08);
+}
+
+input[type="range"]::-webkit-slider-thumb:active {
+  transform: scale(1.02);
+  background: #F8F8FA;
+}
+
+/* Apple Frosted Glass */
+.apple-glass {
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+}
+
+.apple-glass-heavy {
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(30px) saturate(190%);
+  -webkit-backdrop-filter: blur(30px) saturate(190%);
+}
+
+/* Keyframes for subtle Apple-like pulse */
+@keyframes appleFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes floatOrb1 {
+  0%, 100% {
+    transform: translate(0px, 0px) scale(1);
+  }
+  50% {
+    transform: translate(30px, -20px) scale(1.08);
+  }
+}
+
+@keyframes floatOrb2 {
+  0%, 100% {
+    transform: translate(0px, 0px) scale(1);
+  }
+  50% {
+    transform: translate(-25px, 25px) scale(0.95);
+  }
+}
+
+.animate-apple-in {
+  animation: appleFadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-float-1 {
+  animation: floatOrb1 10s ease-in-out infinite;
+}
+
+.animate-float-2 {
+  animation: floatOrb2 12s ease-in-out infinite;
+}
+
