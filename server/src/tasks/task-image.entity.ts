@@ -42,6 +42,9 @@ export class TaskImage {
   @Column({ name: 'error_message', type: 'text', nullable: true })
   errorMessage: string | null;
 
+  @Column({ name: 'processing_time_ms', type: 'int', nullable: true })
+  processingTimeMs: number | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

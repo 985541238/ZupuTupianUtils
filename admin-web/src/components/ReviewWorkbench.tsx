@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Task, ScanItem, ProcessParams, CropRect } from '../types';
 import { api, previewImageBlob } from '../api/client';
 import { buildPreviewBody, nestCropToUi } from '../api/params';
-import { mapImage } from '../api/mappers';
+import { mapImage, formatProcessingTime } from '../api/mappers';
 import {
   ChevronLeft,
   ChevronRight,
@@ -22,6 +22,8 @@ import {
   ArrowRight,
   X,
   XCircle,
+  Clock,
+  Image as ImageIcon,
 } from 'lucide-react';
 
 interface ReviewWorkbenchProps {
@@ -103,7 +105,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   const thumbListRef = useRef<HTMLDivElement>(null);
   const [thumbScrollTop, setThumbScrollTop] = useState(0);
   const [thumbViewportH, setThumbViewportH] = useState(600);
-  const THUMB_ROW_H = 68;
+  const THUMB_ROW_H = 78;
   const THUMB_OVERSCAN = 8;
 
   const [showToast, setShowToast] = useState(false);
@@ -281,7 +283,9 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
           // Never clear previewDataUrl → would fall back to item.processedUrl (full page).
         }
         const pageIdAtStart = item.id;
+        const previewStartedAt = performance.now();
         const blob = await previewImageBlob(task.id, pageIdAtStart, body);
+        const clientPreviewMs = Math.round(performance.now() - previewStartedAt);
         // Always stash under the page that requested preview (even if user navigated away).
         const url = URL.createObjectURL(blob);
         const prevSess = pageSessionRef.current.get(pageIdAtStart);
@@ -308,6 +312,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
         /* PERSIST_SYNC_AFTER_PREVIEW */
         // Sync params/crop/resultUrl into task state (Nest already wrote disk+DB in preview)
         // IMPORTANT: this must NOT mark dirty or trigger another preview.
+        let syncedProcessingMs: number | undefined;
         try {
           const meta = await api.getTaskImage(task.id, pageIdAtStart);
           const pageNum =
@@ -325,6 +330,9 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
               clean: mapped.processedUrl,
               original: mapped.originalUrl || item.originalUrl,
             });
+          }
+          if (mapped.stats?.processingTimeMs != null) {
+            syncedProcessingMs = mapped.stats.processingTimeMs;
           }
           onUpdateTaskItemRef.current(task.id, mapped);
         } catch (syncErr) {
@@ -352,9 +360,10 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
         previewUrlRef.current = url;
         setPreviewDataUrl(url);
         setCurrentStats({
-          backgroundWhiteness: 99.5,
-          inkRetention: 96.0,
-          processingTimeMs: 0,
+          processingTimeMs:
+            syncedProcessingMs != null && Number.isFinite(syncedProcessingMs)
+              ? syncedProcessingMs
+              : clientPreviewMs,
         });
       } catch (err: any) {
         console.error('Preview failed:', err);
@@ -417,6 +426,9 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
       mapped.params = { ...localParamsRef.current };
       mapped.cropBoxRaw = saved?.cropBox ?? null;
       onUpdateTaskItem(task.id, mapped);
+      if (mapped.stats?.processingTimeMs != null) {
+        setCurrentStats(mapped.stats);
+      }
       const kept = nestCropToUi(
         saved?.cropBox ?? null,
         mapped.originalWidth,
@@ -946,24 +958,44 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                         {item.pageNumber}
                       </div>
                     </div>
-                    <div className="flex-1 min-w-0 text-left">
-                      <div className="text-xs font-semibold text-[#1D1D1F] truncate">
+                    <div className="flex-1 min-w-0 text-left py-0.5">
+                      <div className="text-xs font-semibold text-[#1D1D1F] truncate leading-tight">
                         {item.fileName}
                       </div>
-                      <div className="flex items-center gap-1 mt-1">
+                      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 mt-1">
                         {isPassed ? (
-                          <span className="text-[10px] text-[#34C759] font-medium flex items-center gap-1">
+                          <span className="inline-flex items-center gap-0.5 text-[10px] text-[#34C759] font-medium">
                             <CheckCircle2 className="w-3 h-3" />
-                            <span>已通过</span>
+                            已通过
                           </span>
                         ) : isFailed ? (
-                          <span className="text-[10px] text-[#FF3B30] font-medium flex items-center gap-1">
+                          <span className="inline-flex items-center gap-0.5 text-[10px] text-[#FF3B30] font-medium">
                             <XCircle className="w-3 h-3" />
-                            <span>未通过</span>
+                            未通过
                           </span>
+                        ) : item.processedUrl ? (
+                          <span className="text-[10px] text-[#0071E3] font-medium">待审阅</span>
                         ) : (
                           <span className="text-[10px] text-[#86868B]">未处理</span>
                         )}
+                        {formatProcessingTime(item.stats?.processingTimeMs) ? (
+                          <>
+                            <span className="text-black/15 text-[10px]">·</span>
+                            <span className="inline-flex items-center gap-0.5 text-[10px] text-[#86868B] tabular-nums">
+                              <Clock className="w-2.5 h-2.5 opacity-70" />
+                              {formatProcessingTime(item.stats?.processingTimeMs)}
+                            </span>
+                          </>
+                        ) : null}
+                        {item.processedUrl ? (
+                          <>
+                            <span className="text-black/15 text-[10px]">·</span>
+                            <span className="inline-flex items-center gap-0.5 text-[10px] text-[#6E6E73]">
+                              <ImageIcon className="w-2.5 h-2.5 opacity-70" />
+                              已出图
+                            </span>
+                          </>
+                        ) : null}
                       </div>
                     </div>
                   </div>
@@ -1548,23 +1580,29 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                 <div className="text-[11px] font-semibold text-[#86868B] flex items-center justify-between">
                   <span>还原指标</span>
                   <span className="font-mono text-[#0071E3] font-semibold">
-                    {currentStats.processingTimeMs}ms
+                    {formatProcessingTime(currentStats.processingTimeMs) || '—'}
                   </span>
                 </div>
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  <div className="p-2 bg-[#F5F5F7] rounded-xl">
-                    <span className="text-[#86868B] text-[10px] block">底色纯白度</span>
-                    <div className="font-mono font-bold text-[#34C759] text-sm mt-0.5">
-                      {currentStats.backgroundWhiteness}%
-                    </div>
+                {(currentStats.backgroundWhiteness != null || currentStats.inkRetention != null) && (
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    {currentStats.backgroundWhiteness != null && (
+                      <div className="p-2 bg-[#F5F5F7] rounded-xl">
+                        <span className="text-[#86868B] text-[10px] block">底色纯白度</span>
+                        <div className="font-mono font-bold text-[#34C759] text-sm mt-0.5">
+                          {currentStats.backgroundWhiteness}%
+                        </div>
+                      </div>
+                    )}
+                    {currentStats.inkRetention != null && (
+                      <div className="p-2 bg-[#F5F5F7] rounded-xl">
+                        <span className="text-[#86868B] text-[10px] block">墨迹保留率</span>
+                        <div className="font-mono font-bold text-[#1D1D1F] text-sm mt-0.5">
+                          {currentStats.inkRetention}%
+                        </div>
+                      </div>
+                    )}
                   </div>
-                  <div className="p-2 bg-[#F5F5F7] rounded-xl">
-                    <span className="text-[#86868B] text-[10px] block">油墨保留率</span>
-                    <div className="font-mono font-bold text-[#1D1D1F] text-sm mt-0.5">
-                      {currentStats.inkRetention}%
-                    </div>
-                  </div>
-                </div>
+                )}
               </div>
             )}
           </div>

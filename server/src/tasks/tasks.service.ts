@@ -235,6 +235,8 @@ export class TasksService implements OnModuleInit {
 
     const DONE_OK = new Set(['ready', 'confirmed']);
     let imgs: TaskImage[] = [];
+    // Wall-clock for this batch; on cancel we still persist elapsed so far
+    const batchStartedAt = Date.now();
 
     try {
       imgs = await this.images.find({
@@ -262,6 +264,10 @@ export class TasksService implements OnModuleInit {
       for (const img of imgs) {
         if (this.cancelled.has(taskId)) {
           this.logger.warn(`Task ${taskId} cancelled during processing`);
+          // Persist elapsed wall-clock even on cancel (not a full successful batch)
+          task.processingTimeMs = Date.now() - batchStartedAt;
+          task.updatedAt = new Date();
+          await this.tasks.save(task);
           return;
         }
         if (DONE_OK.has(img.status)) {
@@ -286,6 +292,7 @@ export class TasksService implements OnModuleInit {
             this.safeName(img.fileName) + '.jpg',
           );
 
+          const imgStartedAt = Date.now();
           const size = await this.processor.processToFile(
             img.sourcePath,
             resultPath,
@@ -293,6 +300,7 @@ export class TasksService implements OnModuleInit {
             crop,
           );
           await this.processor.makeThumb(resultPath, thumbPath);
+          img.processingTimeMs = Date.now() - imgStartedAt;
 
           img.resultPath = resultPath;
           img.thumbPath = thumbPath;
@@ -326,6 +334,9 @@ export class TasksService implements OnModuleInit {
       }
 
       if (this.cancelled.has(taskId)) {
+        task.processingTimeMs = Date.now() - batchStartedAt;
+        task.updatedAt = new Date();
+        await this.tasks.save(task);
         return;
       }
 
@@ -340,6 +351,7 @@ export class TasksService implements OnModuleInit {
         task.errorMessage = failed ? `${failed} 张失败，其余已就绪` : null;
       }
       task.doneCount = ok;
+      task.processingTimeMs = Date.now() - batchStartedAt;
       task.updatedAt = new Date();
       await this.tasks.save(task);
       this.logger.log(
@@ -518,6 +530,8 @@ export class TasksService implements OnModuleInit {
       this.safeName(img.fileName) + '.jpg',
     );
     // Clean/result is the cropped processed image; source stays full original
+    // Single-image reprocess only updates this image's timing; task.processingTimeMs stays last batch wall-clock
+    const imgStartedAt = Date.now();
     const size = await this.processor.processToFile(
       img.sourcePath,
       resultPath,
@@ -525,6 +539,7 @@ export class TasksService implements OnModuleInit {
       processCrop,
     );
     await this.processor.makeThumb(resultPath, thumbPath);
+    img.processingTimeMs = Date.now() - imgStartedAt;
 
     img.params = JSON.stringify(params);
     img.resultPath = resultPath;
@@ -596,6 +611,7 @@ export class TasksService implements OnModuleInit {
       'thumbs',
       this.safeName(img.fileName) + '.jpg',
     );
+    const imgStartedAt = Date.now();
     const size = await this.processor.processToFile(
       img.sourcePath,
       resultPath,
@@ -603,6 +619,7 @@ export class TasksService implements OnModuleInit {
       processCrop,
     );
     await this.processor.makeThumb(resultPath, thumbPath);
+    img.processingTimeMs = Date.now() - imgStartedAt;
 
     img.params = JSON.stringify(params);
     img.resultPath = resultPath;

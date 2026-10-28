@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { Task, ScanItem } from '../types';
 import { api, downloadUrl } from '../api/client';
+import { formatProcessingTime } from '../api/mappers';
 import {
   Play,
   Download,
@@ -472,6 +473,14 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                           <Clock className="w-3 h-3 opacity-70" />
                           {task.createdAt}
                         </span>
+                        {formatProcessingTime(task.processingTimeMs) ? (
+                          <>
+                            <span className="text-black/15">·</span>
+                            <span className="inline-flex items-center gap-1 tabular-nums text-[#0071E3]">
+                              处理 {formatProcessingTime(task.processingTimeMs)}
+                            </span>
+                          </>
+                        ) : null}
                         <span className="text-black/15">·</span>
                         <span className="tabular-nums">共 {task.totalPages} 页</span>
                         {isProcessing ? (

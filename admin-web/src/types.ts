@@ -20,8 +20,8 @@ export interface ProcessParams {
 }
 
 export interface PageStats {
-  backgroundWhiteness: number;
-  inkRetention: number;
+  backgroundWhiteness?: number;
+  inkRetention?: number;
   processingTimeMs: number;
 }
 
@@ -62,4 +62,6 @@ export interface Task {
   items: ScanItem[];
   doneCount?: number;
   confirmedCount?: number;
+  /** Last batch wall-clock ms from server; undefined for legacy rows */
+  processingTimeMs?: number;
 }

@@ -51,6 +51,10 @@ export class Task {
   @Column({ name: 'default_params', type: 'text', nullable: true })
   defaultParams: string | null;
 
+  /** Last batch runProcess wall-clock ms; cancel mid-loop writes elapsed so far */
+  @Column({ name: 'processing_time_ms', type: 'int', nullable: true })
+  processingTimeMs: number | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

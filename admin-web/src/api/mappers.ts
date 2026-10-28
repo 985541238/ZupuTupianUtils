@@ -2,6 +2,21 @@ import { ScanItem, Task, User } from '../types';
 import { authImageUrl } from './client';
 import { DEFAULT_UI_PARAMS, nestToUiParams } from './params';
 
+/** Friendly duration: 320ms / 1.2s / 12.3s / 1分05秒; empty when missing */
+export function formatProcessingTime(ms?: number | null): string {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return '';
+  const n = Math.round(ms);
+  if (n < 1000) return n + 'ms';
+  if (n < 60000) {
+    const sec = n / 1000;
+    const text = sec >= 10 ? sec.toFixed(1) : sec.toFixed(1);
+    return text.replace(/\.0$/, '') + 's';
+  }
+  const mins = Math.floor(n / 60000);
+  const secs = Math.floor((n % 60000) / 1000);
+  return mins + '分' + String(secs).padStart(2, '0') + '秒';
+}
+
 function formatTime(t?: string) {
   if (!t) return '';
   try {
@@ -58,6 +73,11 @@ export function mapImage(raw: any, taskId: string | number, pageNumber: number):
     originalHeight: h,
     nestStatus: raw.status,
     cropBoxRaw: raw.cropBox,
+    ...(function () {
+      const pt = raw.processingTimeMs ?? raw.processing_time_ms;
+      if (pt == null || !Number.isFinite(Number(pt))) return {};
+      return { stats: { processingTimeMs: Number(pt) } };
+    })(),
   } as ScanItem;
 }
 
@@ -84,5 +104,9 @@ export function mapTask(raw: any, images?: any[]): Task {
     items,
     doneCount: raw.doneCount,
     confirmedCount: raw.confirmedCount,
+    processingTimeMs: (() => {
+      const pt = raw.processingTimeMs ?? raw.processing_time_ms;
+      return pt == null || !Number.isFinite(Number(pt)) ? undefined : Number(pt);
+    })(),
   } as Task;
 }
