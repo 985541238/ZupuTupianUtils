@@ -5,6 +5,8 @@ import { TopNav, MainViewTab } from './components/TopNav';
 import { TaskCenterView } from './components/TaskCenterView';
 import { ReviewWorkbench } from './components/ReviewWorkbench';
 import { SettingsView } from './components/SettingsView';
+import { AiSetupWizard } from './components/AiSetupWizard';
+import { AiProblemDialog, AiProblem, inferErrorCode } from './components/AiProblemDialog';
 import { api, clearAuth, getStoredUser, getToken } from './api/client';
 import { mapTask, mapUser } from './api/mappers';
 
@@ -39,6 +41,24 @@ export default function App() {
   const [tasksLoading, setTasksLoading] = useState(false);
 
   const [processingTaskId, setProcessingTaskId] = useState<string | null>(null);
+  // 大模型出错时的说明弹窗 / 引导配置弹窗
+  const [aiProblem, setAiProblem] = useState<AiProblem | null>(null);
+  const [setup, setSetup] = useState<{ platform: string | null; step?: 1 | 2 | 3; onDone?: () => void } | null>(null);
+  const openSetup = useCallback((platform: string | null = null, step?: 1 | 2 | 3, onDone?: () => void) => {
+    setAiProblem(null);
+    setSetup({ platform, step, onDone });
+  }, []);
+  /** 任务因大模型问题暂停时，弹窗说明原因和处理办法 */
+  const showTaskProblem = useCallback((t: Task) => {
+    if (!t.errorMessage) return;
+    setAiProblem({
+      taskId: t.id,
+      taskName: t.name,
+      message: t.errorMessage,
+      errorCode: t.errorCode || inferErrorCode(t.errorMessage),
+      readyPages: t.doneCount || 0,
+    });
+  }, []);
   const [processingProgress, setProcessingProgress] = useState<number>(0);
   const [processingStatusText, setProcessingStatusText] = useState<string>('');
   const pollRef = useRef<number | null>(null);
@@ -206,6 +226,7 @@ export default function App() {
       setProcessingProgress(35);
       setProcessingStatusText('正在执行局域自适应二值化与去褶皱消除...');
 
+      let finalTask: any = null;
       await new Promise<void>((resolve, reject) => {
         let tries = 0;
         stopPoll();
@@ -223,6 +244,7 @@ export default function App() {
                 : '首批净图生成就绪，正在载入审阅工作台...'
             );
             if (t.status !== 'processing') {
+              finalTask = t;
               stopPoll();
               resolve();
             } else if (tries > 240) {
@@ -236,6 +258,17 @@ export default function App() {
         }, 1500) as unknown as number;
       });
 
+      // 处理被暂停（如大模型欠费、Key 无效）：留在列表并弹窗说明，不进入审核页
+      if (finalTask && finalTask.status === 'failed') {
+        setProcessingTaskId(null);
+        setProcessingProgress(0);
+        await loadTasks();
+        const mapped = mapTask(finalTask);
+        if (mapped.errorMessage) showTaskProblem(mapped);
+        else alert('处理失败，请稍后重试');
+        return;
+      }
+
       setProcessingProgress(100);
       await loadTaskDetail(taskId);
       setActiveTaskId(taskId);
@@ -244,8 +277,14 @@ export default function App() {
       pushReviewUrl(taskId);
     } catch (e: any) {
       console.error(e);
-      alert(e?.message || '开始处理失败');
       setProcessingTaskId(null);
+      if (e?.errorCode) {
+        // 开始前的检查没通过（如没填 Key），直接说明并给出处理入口
+        const t = tasks.find((x) => x.id === taskId);
+        setAiProblem({ taskId, taskName: t?.name, message: e.message, errorCode: e.errorCode });
+      } else {
+        alert(e?.message || '开始处理失败');
+      }
       await loadTasks();
     }
   };
@@ -385,6 +424,8 @@ export default function App() {
             processingStatusText={processingStatusText}
             loading={tasksLoading}
             onRefresh={loadTasks}
+            onShowProblem={showTaskProblem}
+            onOpenSetup={openSetup}
           />
         )}
 
@@ -401,6 +442,30 @@ export default function App() {
           />
         )}
       </main>
+
+      <AiProblemDialog
+        problem={aiProblem}
+        onClose={() => setAiProblem(null)}
+        onOpenSetup={(platform, step) => openSetup(platform, step)}
+        onRetry={(taskId) => {
+          setAiProblem(null);
+          void handleStartProcessing(taskId);
+        }}
+        onReviewAnyway={(taskId) => {
+          setAiProblem(null);
+          void openReview(taskId, true);
+        }}
+      />
+      <AiSetupWizard
+        open={!!setup}
+        initialPlatform={setup?.platform}
+        initialStep={setup?.step}
+        onClose={() => setSetup(null)}
+        onDone={() => {
+          setup?.onDone?.();
+          void loadTasks();
+        }}
+      />
     </div>
   );
 }

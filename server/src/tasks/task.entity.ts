@@ -66,6 +66,10 @@ export class Task {
   @Column({ name: 'clean_model_id', type: 'bigint', unsigned: true, nullable: true })
   cleanModelId: number | null;
 
+  /** 出错类型:平台，如 arrears:ark，前端据此显示「去充值 / 重新填 Key」等按钮 */
+  @Column({ name: 'error_code', length: 64, nullable: true })
+  errorCode: string | null;
+
   @Column({ name: 'estimated_cost', type: 'decimal', precision: 12, scale: 4, nullable: true })
   estimatedCost: string | null;
 

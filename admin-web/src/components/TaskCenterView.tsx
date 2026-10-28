@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { Task, ScanItem } from '../types';
 import { api, downloadUrl } from '../api/client';
 import { formatProcessingTime } from '../api/mappers';
+import { inferErrorCode } from './AiProblemDialog';
 import {
   Play,
   Download,
@@ -32,6 +33,10 @@ interface TaskCenterViewProps {
   processingStatusText: string;
   loading?: boolean;
   onRefresh?: () => void;
+  /** 大模型出错的任务：弹窗说明原因和处理办法 */
+  onShowProblem?: (task: Task) => void;
+  /** 打开引导配置；onDone 在配置完成后回调 */
+  onOpenSetup?: (platform?: string | null, step?: 1 | 2 | 3, onDone?: () => void) => void;
 }
 
 type TimeFilterType = 'all' | 'today' | 'week' | 'month';
@@ -47,6 +52,8 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   processingStatusText: _processingStatusText,
   loading,
   onRefresh,
+  onShowProblem,
+  onOpenSetup,
 }) => {
   // Filters: Status, Time, Search
   const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'reviewing' | 'completed'>('all');
@@ -657,11 +664,20 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
 
                       {!isProcessing && task.errorMessage ? (
                         <div
-                          className={`text-[11px] leading-relaxed max-w-xl ${
+                          className={`flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] leading-relaxed max-w-xl ${
                             task.nestStatus === 'failed' ? 'text-[#C62828]' : 'text-[#C93400]'
                           }`}
                         >
-                          {task.errorMessage}
+                          <span>{task.errorMessage.split('\n详情：')[0]}</span>
+                          {onShowProblem && (task.errorCode || inferErrorCode(task.errorMessage)) ? (
+                            <button
+                              type="button"
+                              onClick={() => onShowProblem(task)}
+                              className="px-2 py-0.5 rounded-full bg-white border border-current/30 font-semibold cursor-pointer hover:bg-[#FFF2F2]"
+                            >
+                              怎么处理？
+                            </button>
+                          ) : null}
                         </div>
                       ) : null}
 
@@ -685,7 +701,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         className="h-9 px-4 text-xs font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
                       >
                         <Play className="w-3 h-3 fill-current" />
-                        <span>开始处理</span>
+                        <span>{task.nestStatus === 'failed' && task.doneCount ? '继续处理' : '开始处理'}</span>
                       </button>
                     )}
 
@@ -891,7 +907,19 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                     <span className="block text-[11px] text-[#86868B] mt-0.5 leading-relaxed">
                       {cleanModels.length
                         ? '勾选后整本不再用现有算法，每页完全由所选大模型处理成白底黑字；不勾选则用现有算法。审核页可对单页改用大模型。'
-                        : '尚未配置图片处理模型，请先到右上角「模型配置」添加（平台账号里填好 Key）。'}
+                        : '还没有配置图片处理大模型。'}
+                      {!cleanModels.length && onOpenSetup ? (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            onOpenSetup(null, undefined, () => void loadCleanModels());
+                          }}
+                          className="ml-1 text-[#0071E3] font-semibold underline cursor-pointer"
+                        >
+                          引导配置（约 3 分钟）
+                        </button>
+                      ) : null}
                     </span>
                   </span>
                 </label>

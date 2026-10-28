@@ -34,8 +34,74 @@ export interface Usage {
   images: number;
 }
 
-/** 让调用方区分“配置问题”（不用重试）和“临时失败” */
-export class AiConfigError extends Error {}
+/**
+ * 错误类型（给前端决定显示哪个处理按钮）：
+ * arrears 欠费/余额不足 · auth Key 无效 · model 模型不存在或未开通 · quota 限流
+ * param 参数被拒 · noimage 没返回图片 · config 其他配置问题
+ */
+export type AiErrorKind = 'arrears' | 'auth' | 'model' | 'quota' | 'param' | 'noimage' | 'config';
+
+/** 让调用方区分“配置问题”（整本暂停、不用重试）和“临时失败” */
+export class AiConfigError extends Error {
+  constructor(
+    message: string,
+    public kind: AiErrorKind = 'config',
+    public platform: string | null = null,
+    /** 平台返回的原始信息，只放在「技术详情」里 */
+    public detail = '',
+  ) {
+    super(message);
+  }
+}
+
+/** 把平台的报错翻译成普通用户能看懂、知道下一步怎么做的话 */
+export function classifyAiError(status: number, code: string, rawMsg: string, platform: string | null): Error {
+  const name = getPlatformDef(platform)?.name || '模型平台';
+  const detail = [status ? `HTTP ${status}` : '', code, rawMsg].filter(Boolean).join(' · ').slice(0, 400);
+  const all = `${code} ${rawMsg}`.toLowerCase();
+  if (/overdue|arrear|欠费|余额不足|insufficient[ _-]?(balance|fund|quota)|account.{0,20}(suspend|frozen|disabled)|balance is not enough|账户.{0,6}(冻结|停用)/i.test(all)) {
+    return new AiConfigError(
+      `${name}账户余额不足或已欠费，平台拒绝处理。请到${name}控制台充值，充值后回到这里点「继续处理」，已处理好的页不会重复处理。`,
+      'arrears', platform, detail,
+    );
+  }
+  if (status === 401 || /invalid.?api.?key|incorrect api key|unauthori[sz]ed|authentication|api key.{0,20}(invalid|not valid|expired)/i.test(all)) {
+    return new AiConfigError(
+      `${name}的 API Key 不对或已失效。请到「模型配置 → 平台账号」重新填写 Key（可点「引导配置」按步骤操作）。`,
+      'auth', platform, detail,
+    );
+  }
+  if (status === 404 || /model.{0,30}(not.?found|not.?exist|does not exist|not.?open|not.?activat|未开通|不存在)|modelnotopen|modelnotfound|endpoint.{0,10}not.?found/i.test(all)) {
+    return new AiConfigError(
+      `${name}上没有找到这个模型，或者模型还没开通。请到${name}控制台开通该模型，或在「引导配置」里换一个推荐模型。`,
+      'model', platform, detail,
+    );
+  }
+  if (status === 403) {
+    return new AiConfigError(
+      `${name}拒绝了这次调用（没有权限）。常见原因：模型没开通、Key 没有该模型的权限、账户欠费。请到${name}控制台检查，或用「引导配置」重新设置。`,
+      'auth', platform, detail,
+    );
+  }
+  if (status === 429 || /rate.?limit|throttl|too many requests|请求过于频繁|qps/i.test(all)) {
+    return new AiConfigError(
+      `${name}提示调用太频繁（限流）。请稍等几分钟再点「继续处理」，或到「平台账号 → 通用设置」把同时处理页数调小。`,
+      'quota', platform, detail,
+    );
+  }
+  if (/datainspection|sensitive|content.?(policy|moderation|filter)|审核|违规|risk/i.test(all)) {
+    // 单页问题：只让这一页失败，不暂停整本
+    return new Error(`这一页被${name}的内容安全审核拦截了，可以换个平台的模型处理这一页，或改用算法处理。`);
+  }
+  if (status === 400) {
+    return new AiConfigError(
+      `${name}不接受这次请求的参数（多为图片尺寸或格式不符合要求）。可在模型设置里填写「输出尺寸」后重试，或换一个推荐模型。`,
+      'param', platform, detail,
+    );
+  }
+  if (status >= 500) return new Error(`${name}服务暂时出错（HTTP ${status}），稍后重试即可。`);
+  return new Error(`${name}返回错误：${detail || '未知错误'}`);
+}
 
 @Injectable()
 export class AliyunService {
@@ -53,8 +119,10 @@ export class AliyunService {
       const name = getPlatformDef(creds.platform)?.name;
       throw new AiConfigError(
         name
-          ? `还没有填写${name}的 API Key，请到「模型配置 → 平台账号」填写`
-          : '还没有填写 API Key，请到「模型配置」填写',
+          ? `还没有填写${name}的 API Key。请到「模型配置」点「引导配置」按步骤填写。`
+          : '还没有填写 API Key。请到「模型配置」点「引导配置」按步骤填写。',
+        'auth',
+        creds.platform,
       );
     }
     return creds;
@@ -133,7 +201,7 @@ export class AliyunService {
     return { ok: true, ms: Date.now() - t, reply: content.slice(0, 50), usage };
   }
 
-  private async streamChat(cfg: AliyunConfig, body: any): Promise<{ content: string; usage: Usage }> {
+  private async streamChat(cfg: AliyunConfig & { platform?: string | null }, body: any): Promise<{ content: string; usage: Usage }> {
     const url = cfg.baseUrl + '/chat/completions';
     const res = await this.fetchWithTimeout(
       url,
@@ -144,7 +212,7 @@ export class AliyunService {
       },
       cfg.timeoutSec * 1000,
     );
-    if (!res.ok) throw await this.httpError(res);
+    if (!res.ok) throw await this.httpError(res, cfg.platform || null);
     let content = '';
     const usage: Usage = { tokensIn: 0, tokensOut: 0, images: 0 };
     const reader = (res.body as any).getReader();
@@ -423,21 +491,22 @@ export class AliyunService {
         },
         cfg.timeoutSec * 1000,
       );
-      if (!res.ok) throw await this.httpError(res);
+      if (!res.ok) throw await this.httpError(res, platform);
       const data: any = await res.json();
-      if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+      if (data.error) {
+        throw classifyAiError(0, String(data.error.code || ''), String(data.error.message || JSON.stringify(data.error)), platform);
+      }
       if (data.code && !data.data && !data.output) {
-        const msg = String(data.code) + ': ' + (data.message || '');
-        if (/InvalidApiKey|Unauthorized|AccessDenied|ModelNotFound|InvalidParameter/i.test(String(data.code))) {
-          throw new AiConfigError(msg);
-        }
-        throw new Error(msg);
+        throw classifyAiError(0, String(data.code), String(data.message || ''), platform);
       }
       const imageUrl = this.extractEditedImage(data);
       if (!imageUrl) {
         this.logger.warn('cleanImage 无结果图 model=' + model.model + ' keys=' + JSON.stringify(Object.keys(data || {})));
         throw new AiConfigError(
-          `模型「${model.model}」没有返回图片：可能不是图生图模型，或接口返回格式异常。请在配置页检查模型代码。`,
+          `模型「${model.model}」没有返回图片：它可能不是图生图模型。请在「引导配置」里换一个推荐的图片处理模型。`,
+          'noimage',
+          platform,
+          JSON.stringify(Object.keys(data || {})),
         );
       }
       let buf: Buffer;
@@ -483,15 +552,7 @@ export class AliyunService {
     const apiKey = (override?.apiKey || saved?.values.apiKey || '').trim();
     const base = String(override?.baseUrl || saved?.baseUrl || def.defaultBaseUrl).trim().replace(/\/+$/, '');
     if (!apiKey) throw new AiConfigError('请先填写 API Key');
-    let modelsUrl: string;
-    try {
-      const u = new URL(base);
-      if (def.code === 'aliyun') modelsUrl = u.origin + '/compatible-mode/v1/models';
-      else if (def.code === 'ark') modelsUrl = u.origin + '/api/v3/models';
-      else modelsUrl = base.replace(/\/(images\/(generations|edits)|chat\/completions)$/i, '') + '/models';
-    } catch {
-      throw new AiConfigError('服务地址无效：' + base);
-    }
+    const modelsUrl = this.modelsUrlFor(def.code, base);
     const t = Date.now();
     const res = await this.fetchWithTimeout(
       modelsUrl,
@@ -499,7 +560,7 @@ export class AliyunService {
       30 * 1000,
     );
     const ms = Date.now() - t;
-    if (res.status === 401 || res.status === 403) throw await this.httpError(res);
+    if (res.status === 401 || res.status === 403) throw await this.httpError(res, def.code);
     if (!res.ok) {
       return { ok: true, ms, reply: `服务可达（HTTP ${res.status}），该平台不支持用模型列表验证 Key，请处理一页试试` };
     }
@@ -510,6 +571,67 @@ export class AliyunService {
       return { ok: true, ms, reply: hit ? `Key 有效，模型 ${modelCode} 可用` : `Key 有效（未在模型列表中找到 ${modelCode}，可能需在控制台开通）` };
     }
     return { ok: true, ms, reply: list.length ? `Key 有效（${list.length} 个模型）` : 'Key 有效' };
+  }
+
+  private modelsUrlFor(code: string, base: string): string {
+    try {
+      const u = new URL(base);
+      if (code === 'aliyun') return u.origin + '/compatible-mode/v1/models';
+      if (code === 'ark') return u.origin + '/api/v3/models';
+      return base.replace(/\/(images\/(generations|edits)|chat\/completions)$/i, '') + '/models';
+    } catch {
+      throw new AiConfigError('服务地址无效：' + base, 'config', code);
+    }
+  }
+
+  /**
+   * 拉取平台的模型列表，供用户直接选择（不用手抄模型代码）。
+   * 平台不提供列表接口时，返回内置推荐模型。列表里有，不代表账号已开通，需以控制台为准。
+   */
+  async listPlatformModels(
+    code: string,
+    override?: { apiKey?: string; baseUrl?: string },
+  ): Promise<{ source: 'api' | 'suggested'; note: string; models: { id: string; image: boolean; suggested: boolean }[] }> {
+    const def = getPlatformDef(code);
+    if (!def) throw new AiConfigError('未知平台');
+    const suggested = def.imageEdit.suggestedModels || [];
+    const fallback = (note: string) => ({
+      source: 'suggested' as const,
+      note,
+      models: suggested.map((id) => ({ id, image: true, suggested: true })),
+    });
+    if (this.mock) return fallback('当前为 AI_MOCK，列出的是推荐模型');
+    const saved = await this.settings.getPlatformSecrets(def.code);
+    const apiKey = (override?.apiKey || saved?.values.apiKey || '').trim();
+    const base = String(override?.baseUrl || saved?.baseUrl || def.defaultBaseUrl).trim().replace(/\/+$/, '');
+    if (!apiKey) throw new AiConfigError('请先填写 API Key', 'auth', def.code);
+    const res = await this.fetchWithTimeout(
+      this.modelsUrlFor(def.code, base),
+      { method: 'GET', headers: { Authorization: 'Bearer ' + apiKey } },
+      30 * 1000,
+    );
+    if (res.status === 401 || res.status === 403) throw await this.httpError(res, def.code);
+    if (!res.ok) return fallback(`${def.name}没有提供模型列表接口，下面是推荐的图片处理模型`);
+    const data: any = await res.json().catch(() => ({}));
+    const raw: any[] = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
+    const seen = new Set<string>();
+    const models: { id: string; image: boolean; suggested: boolean }[] = [];
+    for (const m of raw) {
+      const id = String(m?.id || m?.name || m?.model || '').trim();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const meta = `${id} ${m?.task_type || ''} ${m?.domain || ''} ${m?.type || ''} ${(m?.modalities || []).join?.(' ') || ''}`;
+      const image = /seedream|seededit|image[-_ ]?(gen|edit)|imagegeneration|qwen-image|wanx|wan2\.\d.*(i2i|image)|hy-image|hunyuan.*image|flux|cogview|text_to_image|image_to_image/i.test(meta);
+      models.push({ id, image, suggested: suggested.includes(id) });
+    }
+    // 推荐的放最前；列表里没有的推荐模型也补上（可能是列表接口没返回出图模型）
+    for (const id of suggested) if (!seen.has(id)) models.push({ id, image: true, suggested: true });
+    models.sort((a, b) => Number(b.suggested) - Number(a.suggested) || Number(b.image) - Number(a.image) || a.id.localeCompare(b.id));
+    return {
+      source: 'api',
+      note: `已从${def.name}拉取 ${raw.length} 个模型；能做图片处理的排在前面。列表里有不代表已开通，请以控制台为准`,
+      models,
+    };
   }
 
   /** 图片处理模型的「测试连接」：用该模型的凭证测平台，不出图、不扣费 */
@@ -542,28 +664,30 @@ export class AliyunService {
     try {
       return await fetch(url, { ...init, signal: ctrl.signal });
     } catch (e: any) {
-      if (e?.name === 'AbortError') throw new Error(`调用模型超时（>${Math.round(ms / 1000)} 秒）`);
-      throw new Error('连接模型服务失败：' + (e?.cause?.message || e?.message || e));
+      if (e?.name === 'AbortError') {
+        throw new Error(`模型处理超时（超过 ${Math.round(ms / 1000)} 秒）。可稍后重试，或到「平台账号 → 通用设置」把超时时间调大。`);
+      }
+      throw new Error('连不上模型服务，请检查服务器网络后重试（' + (e?.cause?.message || e?.message || e) + '）');
     } finally {
       clearTimeout(timer);
     }
   }
 
-  private async httpError(res: Response) {
+  private async httpError(res: Response, platform: string | null = null) {
     let text = '';
     try {
       text = await res.text();
     } catch {}
     let msg = text;
+    let code = '';
     try {
       const j = JSON.parse(text);
-      msg = j?.error?.message || j?.message || text;
+      msg = j?.error?.message || j?.message || j?.msg || j?.Response?.Error?.Message || text;
+      code = String(j?.error?.code || j?.code || j?.error_code || j?.Response?.Error?.Code || '');
     } catch {}
-    if (res.status === 401 || res.status === 403) return new AiConfigError(`模型服务拒绝访问（${res.status}）：请检查 API Key 和 Base URL。${msg}`);
-    if (res.status === 404) return new AiConfigError(`接口或模型不存在（404）：请检查模型名和地址。${msg}`);
-    if (res.status === 400) return new AiConfigError(`请求被拒绝（400）：${msg}`);
-    return new Error(`模型服务返回 HTTP ${res.status}：${msg.slice(0, 300)}`);
+    return classifyAiError(res.status, code, String(msg || '').slice(0, 400), platform);
   }
+
 
   private async mockOcr(imagePath: string) {
     const meta = await sharp(imagePath).metadata();

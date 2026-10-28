@@ -74,6 +74,8 @@ export interface Task {
   estimatedCost?: number | null;
   actualCost?: number;
   errorMessage?: string | null;
+  /** 出错类型:平台，如 arrears:ark */
+  errorCode?: string | null;
   status: 'pending' | 'reviewing' | 'completed';
   /** Original Nest status */
   nestStatus?: string;

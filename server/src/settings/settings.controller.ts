@@ -49,6 +49,20 @@ export class SettingsController {
     return this.settings.savePlatform(code, body || {});
   }
 
+  /** 拉取平台模型列表：可带弹窗里尚未保存的 Key / 地址 */
+  @Post('platforms/:code/models')
+  async platformModels(@Param('code') code: string, @Body() body: { apiKey?: string; baseUrl?: string }) {
+    try {
+      const r = await this.aliyun.listPlatformModels(code, {
+        apiKey: String(body?.apiKey || '').trim() || undefined,
+        baseUrl: String(body?.baseUrl || '').trim() || undefined,
+      });
+      return { ok: true, ...r };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e), kind: e?.kind || null, models: [] };
+    }
+  }
+
   /** 测试平台 Key：可带弹窗里尚未保存的 Key / 地址 */
   @Post('platforms/:code/test')
   async testPlatform(@Param('code') code: string, @Body() body: { apiKey?: string; baseUrl?: string }) {
@@ -60,7 +74,7 @@ export class SettingsController {
       });
       return { ok: true, ms: r.ms, reply: r.reply };
     } catch (e: any) {
-      return { ok: false, error: e?.message || String(e) };
+      return { ok: false, error: e?.message || String(e), kind: e?.kind || null, detail: e?.detail || '' };
     }
   }
 
@@ -149,7 +163,7 @@ export class SettingsController {
         : await this.aliyun.ping(probe, { apiKey, baseUrl: resolvedBase });
       return { ok: true, ms: r.ms, model: modelCode, reply: r.reply };
     } catch (e: any) {
-      return { ok: false, model: modelCode, error: e?.message || String(e) };
+      return { ok: false, model: modelCode, error: e?.message || String(e), kind: e?.kind || null, detail: e?.detail || '' };
     }
   }
 

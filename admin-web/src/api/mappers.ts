@@ -116,6 +116,7 @@ export function mapTask(raw: any, images?: any[]): Task {
     cleanModelId: raw.cleanModelId != null ? Number(raw.cleanModelId) : null,
     actualCost: raw.actualCost != null ? Number(raw.actualCost) || 0 : 0,
     errorMessage: raw.errorMessage || null,
+    errorCode: raw.errorCode || null,
     estimatedCost: raw.estimatedCost != null ? Number(raw.estimatedCost) : null,
     status: mapTaskStatus(raw.status),
     nestStatus: raw.status,

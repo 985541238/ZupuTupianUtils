@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client';
 import { parseCurlExample } from '../utils/parseCurlExample';
+import { AiSetupWizard } from './AiSetupWizard';
 import { Plus, Save, Trash2, RefreshCw, ScanText, Wand2, CheckCircle2, AlertCircle, X, KeyRound, ExternalLink } from 'lucide-react';
 
 type AiModel = {
@@ -35,6 +36,8 @@ type PlatformField = {
   set: boolean;
   value: string;
   masked: string;
+  link?: string;
+  howTo?: string;
 };
 
 type Platform = {
@@ -43,6 +46,8 @@ type Platform = {
   defaultBaseUrl: string;
   docsUrl: string;
   consoleUrl: string;
+  baseUrlHelp?: string;
+  modelsUrl?: string;
   baseUrl: string;
   imageTransport: 'base64' | 'url';
   fields: PlatformField[];
@@ -317,6 +322,14 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
   const [general, setGeneral] = useState<GeneralCfg>({ concurrency: 3, timeoutSec: 300, publicBaseUrl: '' });
   const [generalMsg, setGeneralMsg] = useState('');
   const [pEditing, setPEditing] = useState<PlatformDraft | null>(null);
+  const [wizardOpen, setWizardOpen] = useState(false);
+  // 模型弹窗：从平台拉取的模型列表
+  const [remoteModels, setRemoteModels] = useState<{
+    loading: boolean;
+    note: string;
+    error: string;
+    list: { id: string; image: boolean; suggested: boolean }[];
+  } | null>(null);
   const [testMsg, setTestMsg] = useState('');
   const [testOk, setTestOk] = useState<boolean | null>(null);
 
@@ -344,6 +357,7 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
   const platformName = (code?: string | null) => platformDef(code)?.name || '';
 
   const openNew = (purpose: 'ocr' | 'clean') => {
+    setRemoteModels(null);
     setTestMsg('');
     setTestOk(null);
     setErr('');
@@ -397,6 +411,7 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
   };
 
   const openEdit = (m: AiModel) => {
+    setRemoteModels(null);
     setTestMsg('');
     setTestOk(null);
     setErr('');
@@ -411,11 +426,27 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
     });
   };
 
+  const fetchModels = async () => {
+    if (!editing?.platform) return;
+    setRemoteModels({ loading: true, note: '', error: '', list: [] });
+    try {
+      const r = await api.listPlatformModels(editing.platform, {
+        apiKey: String(editing.apiKey || '').trim() || undefined,
+        baseUrl: editing.purpose === 'clean' ? String(editing.baseUrl || '').trim() || undefined : undefined,
+      });
+      if (!r.ok) setRemoteModels({ loading: false, note: '', error: r.error || '拉取失败', list: [] });
+      else setRemoteModels({ loading: false, note: r.note || '', error: '', list: r.models || [] });
+    } catch (e: any) {
+      setRemoteModels({ loading: false, note: '', error: e?.message || '拉取失败', list: [] });
+    }
+  };
+
   /** 弹窗里切换所属平台：新建时顺带换推荐模型与名称 */
   const changePlatform = (code: string) => {
     if (!editing) return;
     const p = platformDef(code);
     const next: ModelDraft = { ...editing, platform: code };
+    setRemoteModels(null);
     if (editing.purpose === 'clean') {
       const allSuggested = platforms.flatMap((x) => x.imageEdit.suggestedModels || []);
       if (!String(editing.model || '').trim() || allSuggested.includes(String(editing.model))) {
@@ -645,14 +676,25 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
               {mock ? '（当前 AI_MOCK=1，测试不会真实连通）' : ''}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => void load()}
-            className="px-3 py-2 text-xs font-semibold rounded-xl border border-black/[0.08] bg-white hover:bg-[#F5F5F7] text-[#1D1D1F] cursor-pointer flex items-center gap-1.5"
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-            刷新
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setWizardOpen(true)}
+              className="px-3 py-2 text-xs font-semibold bg-[#0071E3] text-white rounded-xl cursor-pointer flex items-center gap-1.5"
+              title="不熟悉各平台控制台？按步骤配置图片处理大模型"
+            >
+              <Wand2 className="w-3.5 h-3.5" />
+              引导配置
+            </button>
+            <button
+              type="button"
+              onClick={() => void load()}
+              className="px-3 py-2 text-xs font-semibold rounded-xl border border-black/[0.08] bg-white hover:bg-[#F5F5F7] text-[#1D1D1F] cursor-pointer flex items-center gap-1.5"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              刷新
+            </button>
+          </div>
         </div>
 
         {err && (
@@ -747,7 +789,7 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
                 icon={<Wand2 className="w-4 h-4" />}
                 iconTone="bg-[#AF52DE]/12 text-[#8944AB]"
                 models={cleanModels}
-                emptyText="暂无图片处理模型。可添加火山方舟 Seedream、阿里云 qwen-image 等图生图模型。"
+                emptyText="暂无图片处理模型。点右上角「引导配置」按步骤添加，或点「添加」手动填写。"
                 onAdd={() => openNew('clean')}
                 onEdit={openEdit}
                 onRemove={(id) => void removeModel(id)}
@@ -913,7 +955,60 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
             />
           </div>
           <div>
-            <label className="block text-xs font-semibold mb-1">模型代码</label>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <label className="block text-xs font-semibold">模型代码</label>
+              <div className="flex items-center gap-2">
+                {editingPlatform?.modelsUrl ? (
+                  <a
+                    href={editingPlatform.modelsUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[11px] text-[#0071E3] inline-flex items-center gap-0.5 hover:underline"
+                  >
+                    开通模型 <ExternalLink className="w-3 h-3" />
+                  </a>
+                ) : null}
+                <button
+                  type="button"
+                  disabled={!editing.platform || remoteModels?.loading}
+                  onClick={() => void fetchModels()}
+                  className="px-2.5 py-1 text-[11px] font-semibold rounded-lg bg-white border border-black/[0.08] cursor-pointer hover:bg-[#F5F5F7] disabled:opacity-60"
+                  title="用当前填写的 Key（或平台账号的 Key）向平台查询可用模型"
+                >
+                  {remoteModels?.loading ? '拉取中…' : '从平台拉取模型'}
+                </button>
+              </div>
+            </div>
+            {remoteModels && !remoteModels.loading ? (
+              <div className="mb-1.5 p-2.5 rounded-xl bg-[#F5F5F7]/90 border border-black/[0.05] space-y-1.5">
+                {remoteModels.error ? (
+                  <p className="text-[11px] text-[#C62828]">{remoteModels.error}</p>
+                ) : (
+                  <>
+                    {remoteModels.note ? <p className="text-[11px] text-[#86868B]">{remoteModels.note}</p> : null}
+                    <div className="flex flex-wrap gap-1.5 max-h-[120px] overflow-y-auto">
+                      {remoteModels.list
+                        .filter((m) => (editingIsOcr ? !m.image : m.image || m.suggested))
+                        .map((m) => (
+                          <button
+                            key={m.id}
+                            type="button"
+                            onClick={() => setEditing({ ...editing, model: m.id })}
+                            className={`px-2 py-1 text-[11px] font-mono rounded-lg border cursor-pointer ${
+                              editing.model === m.id
+                                ? 'border-[#0071E3] bg-[#0071E3]/8 text-[#0071E3]'
+                                : 'border-black/[0.08] bg-white text-[#1D1D1F] hover:bg-[#F5F5F7]'
+                            }`}
+                          >
+                            {m.id}
+                            {m.suggested ? ' · 推荐' : ''}
+                          </button>
+                        ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            ) : null}
             <input
               value={editing.model || ''}
               onChange={(e) => setEditing({ ...editing, model: e.target.value })}
@@ -1119,6 +1214,8 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
         </ModalShell>
       )}
 
+      <AiSetupWizard open={wizardOpen} onClose={() => setWizardOpen(false)} onDone={() => void load()} />
+
       {pEditing && pDef && (
         <ModalShell
           title={`${pDef.name} · 平台账号`}
@@ -1156,6 +1253,11 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
             <a href={pDef.consoleUrl} target="_blank" rel="noreferrer" className="text-[#0071E3] inline-flex items-center gap-1 hover:underline">
               控制台 <ExternalLink className="w-3 h-3" />
             </a>
+            {pDef.modelsUrl ? (
+              <a href={pDef.modelsUrl} target="_blank" rel="noreferrer" className="text-[#0071E3] inline-flex items-center gap-1 hover:underline">
+                开通 / 管理模型 <ExternalLink className="w-3 h-3" />
+              </a>
+            ) : null}
           </div>
           {!pDef.imageEdit.supported ? (
             <div className="flex items-start gap-2 p-3 rounded-2xl bg-[#F5F5F7] border border-black/[0.04] text-[11px] text-[#6E6E73]">
@@ -1173,6 +1275,7 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
               className={`${inputCls} font-mono`}
               placeholder={pDef.defaultBaseUrl}
             />
+            {pDef.baseUrlHelp ? <p className="text-[11px] text-[#86868B] mt-1">{pDef.baseUrlHelp}</p> : null}
           </div>
           {[...pDef.fields.filter((f) => f.scope === 'general'), ...pDef.fields.filter((f) => f.scope === 'ocr')].map((f, idx, arr) => {
             const cleared = pEditing.clear.includes(f.key);
@@ -1224,6 +1327,21 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
                     ) : null}
                   </div>
                   {cleared ? <p className="text-[11px] text-[#C93400] mt-1">保存后将清除该项</p> : null}
+                  {f.howTo || f.link ? (
+                    <p className="text-[11px] text-[#86868B] mt-1 leading-relaxed">
+                      {f.howTo ? <>在哪里找：{f.howTo}</> : null}
+                      {f.link ? (
+                        <a
+                          href={f.link}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="ml-1.5 text-[#0071E3] font-semibold inline-flex items-center gap-0.5 hover:underline"
+                        >
+                          直达获取页 <ExternalLink className="w-3 h-3" />
+                        </a>
+                      ) : null}
+                    </p>
+                  ) : null}
                   {f.help ? <p className="text-[11px] text-[#86868B] mt-1">{f.help}</p> : null}
                 </div>
                 {f.key === 'apiKey' && pDef.imageEdit.supported ? (

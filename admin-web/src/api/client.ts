@@ -41,15 +41,20 @@ async function request<T = any>(path: string, options: RequestInit = {}): Promis
   }
   if (!res.ok) {
     let msg = '请求失败';
+    let errorCode: string | undefined;
     try {
       const data = await res.json();
       msg = data?.message || msg;
+      errorCode = data?.errorCode || undefined;
     } catch {
       try {
         msg = (await res.text()) || msg;
       } catch {}
     }
-    throw new Error(typeof msg === 'string' ? msg : '请求失败');
+    const err: Error & { errorCode?: string } = new Error(typeof msg === 'string' ? msg : '请求失败');
+    // 大模型相关错误带类型（如 arrears:ark），前端据此给出「去充值 / 重新填 Key」等按钮
+    if (errorCode) err.errorCode = errorCode;
+    throw err;
   }
   if (res.status === 204) return undefined as T;
   const ct = res.headers.get('content-type') || '';
@@ -119,6 +124,16 @@ export const api = {
     code: string,
     body: { baseUrl?: string; imageTransport?: 'base64' | 'url'; values?: Record<string, string>; clear?: string[] },
   ) => request<any>('/settings/platforms/' + code, { method: 'PUT', body: JSON.stringify(body || {}) }),
+  /** 从平台拉取模型列表（Key 可用弹窗里尚未保存的） */
+  listPlatformModels: (code: string, body: { apiKey?: string; baseUrl?: string } = {}) =>
+    request<{
+      ok: boolean;
+      error?: string;
+      kind?: string | null;
+      source?: 'api' | 'suggested';
+      note?: string;
+      models: { id: string; image: boolean; suggested: boolean }[];
+    }>('/settings/platforms/' + code + '/models', { method: 'POST', body: JSON.stringify(body || {}) }),
   testPlatform: (code: string, body: { apiKey?: string; baseUrl?: string }) =>
     request<any>('/settings/platforms/' + code + '/test', { method: 'POST', body: JSON.stringify(body || {}) }),
   testModel: (body: { id?: number; purpose?: 'ocr' | 'clean'; platform?: string; baseUrl?: string; apiKey?: string; model?: string }) =>

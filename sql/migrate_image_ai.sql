@@ -106,6 +106,16 @@ SET @sql := (
 PREPARE s FROM @sql; EXECUTE s; DEALLOCATE PREPARE s;
 
 -- 本次新增
+SET @sql := (
+  SELECT IF(
+    (SELECT COUNT(*) FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA=@db AND TABLE_NAME='tasks' AND COLUMN_NAME='error_code')=0,
+    'ALTER TABLE `tasks` ADD COLUMN `error_code` VARCHAR(64) NULL COMMENT ''出错类型:平台，如 arrears:ark''',
+    'SELECT 1'
+  )
+);
+PREPARE s FROM @sql; EXECUTE s; DEALLOCATE PREPARE s;
+
 
 SET @sql := (
   SELECT IF(

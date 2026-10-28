@@ -22,6 +22,7 @@ import {
 import { SettingsService } from '../settings/settings.service';
 import { AliyunService, AiConfigError } from '../ai/aliyun.service';
 import { AiModel } from '../settings/ai-model.entity';
+import { getPlatformDef } from '../settings/platforms';
 
 const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp']);
 
@@ -272,8 +273,27 @@ export class TasksService implements OnModuleInit {
       this.logger.warn(`Task ${id} marked processing but no live job — resuming`);
     }
 
+    // 选了大模型：先做不花钱的检查（模型还在、Key 已填），有问题直接告诉用户，不进入处理
+    if (task.cleanModelId && process.env.AI_MOCK !== '1') {
+      const m = await this.settings.getModel(task.cleanModelId);
+      if (!m || !m.enabled || m.purpose !== 'clean') {
+        throw new BadRequestException({
+          message: '这本书选用的图片处理模型已被删除或停用。请到「模型配置」点「引导配置」重新设置。',
+          errorCode: 'model:',
+        });
+      }
+      const creds = await this.settings.resolveCredentials(m);
+      if (!creds.apiKey) {
+        throw new BadRequestException({
+          message: `还没有填写${this.platformName(creds.platform)}的 API Key。请到「模型配置」点「引导配置」按步骤填写。`,
+          errorCode: 'auth:' + (creds.platform || ''),
+        });
+      }
+    }
+
     task.status = 'processing';
     task.errorMessage = null;
+    task.errorCode = null;
     task.updatedAt = new Date();
     await this.tasks.save(task);
 
@@ -333,7 +353,7 @@ export class TasksService implements OnModuleInit {
 
       const queue = imgs.filter((i) => !DONE_OK.has(i.status));
       const concurrency = cleanModel ? (await this.settings.getGeneral()).concurrency : 1;
-      let stopReason: string | null = null;
+      let stopReason: AiConfigError | null = null;
 
       const finishOne = async () => {
         const finished = imgs.filter((i) => DONE_OK.has(i.status) || i.status === 'failed').length;
@@ -372,7 +392,7 @@ export class TasksService implements OnModuleInit {
           } catch (e: any) {
             if (e instanceof AiConfigError) {
               // 配置问题（Key 错、模型不存在…）：整本停下，本页退回待处理，修好配置后继续
-              stopReason = e.message;
+              if (!stopReason) stopReason = e;
               img.status = 'pending';
               img.errorMessage = null;
             } else {
@@ -388,12 +408,11 @@ export class TasksService implements OnModuleInit {
       };
       await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, queue.length)) }, () => worker()));
 
-      if (stopReason) {
+      const stop = stopReason as AiConfigError | null;
+      if (stop) {
         task.status = 'failed';
-        task.errorMessage =
-          '图片处理模型配置有误，已暂停：' +
-          stopReason +
-          '。修改配置后点「开始处理」继续，已完成的页不会重复处理。';
+        task.errorMessage = '已暂停处理：' + stop.message + (stop.detail ? '\n详情：' + stop.detail : '');
+        task.errorCode = `${stop.kind}:${stop.platform || ''}`;
         task.processingTimeMs = Date.now() - batchStartedAt;
         task.updatedAt = new Date();
         await this.tasks.save(task);
@@ -611,6 +630,10 @@ export class TasksService implements OnModuleInit {
       hasAiResult: !!(aiResultPath && fs.existsSync(aiResultPath)),
       aiModelName: aiModel ? aiModel.displayName : undefined,
     };
+  }
+
+  private platformName(code?: string | null) {
+    return getPlatformDef(code)?.name || '模型平台';
   }
 
   private algoPath(task: Task, img: TaskImage) {
