@@ -8,7 +8,6 @@ import os
 import sys
 import tempfile
 import time
-from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -17,29 +16,19 @@ import cv2
 import numpy as np
 
 from scanwash.classify import classify
-from scanwash.composite import apply_gutter, composite, refine_thin_strokes
-from scanwash.geometry import correct, crop_text_block
-from scanwash.mask import build_mask
-from scanwash.paper import normalize
-from scanwash.stain import destain_gray_with_color
-from scanwash.pipeline import imread, imwrite_gray
+from scanwash.inkrender import InkParams
+from scanwash.pipeline import imread, imwrite_gray, process_page
 from scanwash.presets import PRESETS
-from scanwash.qa import evaluate
 
 
-def map_overrides(
-    base,
-    threshold: float,
-    denoise: float,
-    contrast: float,
-    auto_crop: bool,
-    stain: float | None = None,
-    yellow_b: float | None = None,
-):
-    """审阅页滑块 → ScanWash Preset（含去渍 stain_strength）。
+def map_overrides(threshold: float, denoise: float, contrast: float, stain: float | None = None) -> InkParams:
+    """审阅页滑块 → 墨迹提取参数。推荐档（threshold 60% / denoise 55% / sharpen 35% / stain 40%）
+    落在各参数的中点 0.5 附近，两端拉开，拖动时差异明显。
 
-    UI 推荐档（约 denoise 55% / threshold 60% / sharpen 35% / stain 40%）仍落在族谱复印常用区间；
-    两端故意拉得很开，拖动时预览差异明显。
+    - 油墨阈值：越往左越敏感（多留淡墨细笔），越往右越干净（只留浓墨）
+    - 去噪：最小连通域与淡污渍块剔除力度
+    - 锐度：墨色映射陡峭程度
+    - 去渍：彩色（黄/褐/霉）污渍抑制比例
     """
 
     def through_mid(x: float, x_mid: float, y0: float, y_mid: float, y1: float) -> float:
@@ -50,46 +39,15 @@ def map_overrides(
         t = ((x - x_mid) / (1.0 - x_mid)) if x_mid < 1.0 else 1.0
         return y_mid + t * (y1 - y_mid)
 
-    # Nest spans (matches admin-web uiToNestParams): threshold 60–240, denoise 0–16, contrast 0.4–3.6
-    t = float(np.clip(threshold, 60, 240))
-    t_norm = (t - 60.0) / 180.0  # UI 0–100; recommended 60% → 0.60
-
-    # 油墨阈值：左淡墨多留灰 → 右高黑二值。推荐 60% → keep_dark≈55（近 aged）
-    keep_dark = through_mid(t_norm, 0.60, 98.0, 55.0, 10.0)
-    bh = through_mid(t_norm, 0.60, 82.0, 96.0, 99.0)
-
-    d = float(np.clip(denoise, 0, 16))
-    d_norm = d / 16.0  # recommended 55% → 0.55
-    # 去渍：左几乎不动纸面 → 右强闭运算+高 k。推荐 → close≈0.055 / k≈0.19
-    close_frac = through_mid(d_norm, 0.55, 0.004, 0.055, 0.22)
-    sauvola_k = through_mid(d_norm, 0.55, 0.05, 0.19, 0.45)
-
-    c = float(np.clip(contrast, 0.4, 3.6))
-    c_norm = (c - 0.4) / 3.2  # recommended 35% → 0.35
-    # 锐度：左近原迹 → 右高锐利。推荐 → sharpen≈0.60（近 clean）
-    sharpen = through_mid(c_norm, 0.35, 0.0, 0.60, 2.4)
-
-    # stain: Nest/CLI 0~1; missing → keep preset default (mild).
-    if stain is None:
-        stain_strength = float(getattr(base, "stain_strength", 0.4))
-    else:
-        stain_strength = float(np.clip(stain, 0.0, 1.0))
-    # Auto: very yellow pages get a mild bump (skipped when stain~0 for regression).
-    if stain_strength > 0.02 and yellow_b is not None:
-        if yellow_b >= 140:
-            stain_strength = float(np.clip(stain_strength + 0.08, 0.0, 1.0))
-        elif yellow_b >= 132:
-            stain_strength = float(np.clip(stain_strength + 0.04, 0.0, 1.0))
-
-    return replace(
-        base,
-        keep_dark_pct=float(np.clip(keep_dark, 8, 99)),
-        close_frac=float(np.clip(close_frac, 0.003, 0.25)),
-        sharpen=float(np.clip(sharpen, 0.0, 2.5)),
-        sauvola_k=float(np.clip(sauvola_k, 0.04, 0.48)),
-        bh_percentile=float(np.clip(bh, 80.0, 99.5)),
-        crop_text_block=bool(auto_crop),
-        stain_strength=stain_strength,
+    t_norm = (float(np.clip(threshold, 60, 240)) - 60.0) / 180.0
+    d_norm = float(np.clip(denoise, 0, 16)) / 16.0
+    c_norm = (float(np.clip(contrast, 0.4, 3.6)) - 0.4) / 3.2
+    s = 0.4 if stain is None else float(np.clip(stain, 0.0, 1.0))
+    return InkParams(
+        sensitivity=through_mid(t_norm, 0.60, 0.95, 0.5, 0.2),
+        denoise=through_mid(d_norm, 0.55, 0.0, 0.5, 1.0),
+        sharpen=through_mid(c_norm, 0.35, 0.0, 0.5, 1.0),
+        stain=through_mid(s, 0.40, 0.0, 0.55, 1.0),
     )
 
 
@@ -114,54 +72,16 @@ def run_page_overridden(
     else:
         raise ValueError(f"未知预设: {preset_name}")
 
-    yellow_b = None
-    if feature_dict:
-        yellow_b = feature_dict.get("yellow_b")
-    preset = map_overrides(
-        PRESETS[tier], threshold, denoise, contrast, auto_crop, stain=stain, yellow_b=yellow_b
-    )
-    geometry = correct(source, tier)
-    gray0 = destain_gray_with_color(geometry.gray, geometry.bgr, preset.stain_strength)
-    gray = normalize(gray0, preset)
-    ink = build_mask(gray, preset)
-    warnings = list(geometry.warnings)
-
-    if preset.crop_text_block:
-        gray, cropped, loss = crop_text_block(gray, ink.mask, ink.stroke)
-        ink.mask = cropped
-        if loss:
-            warnings.append("text_loss_risk")
-
-    image, alpha = composite(gray, ink.mask, ink.cut, preset.sharpen)
-    gutter = False
-    if preset.keep_gutter:
-        image, gutter = apply_gutter(image, alpha, ink.peaks, ink.spacing)
-
-    metrics = evaluate(image, ink.mask, alpha, tier, warnings)
-    png = np.clip(np.rint(image), 0, 255).astype(np.uint8)
-    png = refine_thin_strokes(png)
+    params = map_overrides(threshold, denoise, contrast, stain=stain)
+    png, page_meta = process_page(source, tier, params, auto_crop)
     out_h, out_w = png.shape
     meta = {
         "tier": tier,
-        "warnings": warnings,
         "size_in": [int(src_w), int(src_h)],
         "size_out": [int(out_w), int(out_h)],
-        "paper_p50": metrics["paper_p50"],
-        "ink_p50": metrics["ink_p50"],
-        "mask_ratio": metrics["mask_ratio"],
-        "angle_deg": round(float(geometry.angle), 2),
-        "gutter": gutter,
-        "review": metrics["review"],
+        **page_meta,
         "ms": int((time.perf_counter() - started) * 1000),
         "features": feature_dict,
-        "overrides": {
-            "keep_dark_pct": preset.keep_dark_pct,
-            "close_frac": preset.close_frac,
-            "sharpen": preset.sharpen,
-            "sauvola_k": preset.sauvola_k,
-            "crop_text_block": preset.crop_text_block,
-            "stain_strength": preset.stain_strength,
-        },
     }
     return png, meta
 

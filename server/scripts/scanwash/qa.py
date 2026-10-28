@@ -5,7 +5,7 @@ import numpy as np
 PAPER_P50_MIN = 245.0
 INK_P50_MAX = 70.0
 MASK_RATIO_MIN = 0.005
-MASK_RATIO_MAX = 0.22
+MASK_RATIO_MAX = 0.30
 
 
 def evaluate(

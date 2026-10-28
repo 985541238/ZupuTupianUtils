@@ -1,4 +1,4 @@
-"""把分档、拉正、纸色、掩膜、合成和验收串成一页。"""
+"""把分档、拉正、墨迹提取和验收串成一页。"""
 
 import time
 from pathlib import Path
@@ -6,12 +6,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from dataclasses import asdict
+
 from scanwash.classify import classify
-from scanwash.composite import apply_gutter, composite, refine_thin_strokes
 from scanwash.geometry import correct, crop_text_block
-from scanwash.mask import build_mask
-from scanwash.paper import normalize
-from scanwash.stain import destain_gray_with_color
+from scanwash.inkrender import InkParams, extract
 from scanwash.presets import PRESETS
 from scanwash.qa import evaluate
 
@@ -32,6 +31,36 @@ def imwrite_gray(path: Path, gray: np.ndarray) -> None:
     encoded.tofile(str(path))
 
 
+def process_page(source: np.ndarray, tier: str, params: InkParams, auto_crop: bool = False) -> tuple[np.ndarray, dict]:
+    """拉正 → 墨迹提取（掩膜严格约束成品）→ 可选裁文字块 → 验收。"""
+    geometry = correct(source, tier)
+    work = geometry.bgr if geometry.bgr is not None else cv2.cvtColor(geometry.gray, cv2.COLOR_GRAY2BGR)
+    result = extract(work, params)
+    image, mask = result.image, result.mask
+    warnings = list(geometry.warnings)
+    if auto_crop:
+        image, mask, loss = crop_text_block(image, mask, mask)
+        if loss:
+            warnings.append("text_loss_risk")
+    alpha = 1.0 - image.astype(np.float32) / 255.0
+    metrics = evaluate(image.astype(np.float32), mask, alpha, tier, warnings)
+    meta = {
+        "warnings": warnings,
+        "paper_p50": metrics["paper_p50"],
+        "ink_p50": metrics["ink_p50"],
+        "mask_ratio": metrics["mask_ratio"],
+        "angle_deg": round(float(geometry.angle), 2),
+        "outside_ratio": round(float(geometry.outside_ratio), 4),
+        "review": metrics["review"],
+        "scale": result.scale,
+        "stroke_width": round(result.stroke_width, 2),
+        "t_high": round(result.t_high, 3),
+        "t_low": round(result.t_low, 3),
+        "ink_params": asdict(params),
+    }
+    return image, meta
+
+
 def run_page(path: Path, preset_name: str = "auto") -> tuple[np.ndarray, dict]:
     started = time.perf_counter()
     source = imread(path)
@@ -46,42 +75,15 @@ def run_page(path: Path, preset_name: str = "auto") -> tuple[np.ndarray, dict]:
         raise ValueError(f"未知预设: {preset_name}")
 
     preset = PRESETS[tier]
-    geometry = correct(source, tier)
-    gray0 = destain_gray_with_color(geometry.gray, geometry.bgr, preset.stain_strength)
-    gray = normalize(gray0, preset)
-    ink = build_mask(gray, preset)
-    warnings = list(geometry.warnings)
-
-    if preset.crop_text_block:
-        gray, cropped, loss = crop_text_block(gray, ink.mask, ink.stroke)
-        ink.mask = cropped
-        if loss:
-            warnings.append("text_loss_risk")
-
-    image, alpha = composite(gray, ink.mask, ink.cut, preset.sharpen)
-    gutter = False
-    if preset.keep_gutter:
-        image, gutter = apply_gutter(image, alpha, ink.peaks, ink.spacing)
-
-    metrics = evaluate(image, ink.mask, alpha, tier, warnings)
-    png = np.clip(np.rint(image), 0, 255).astype(np.uint8)
-    png = refine_thin_strokes(png)
+    png, page_meta = process_page(source, tier, InkParams(stain=preset.stain_strength + 0.15), preset.crop_text_block)
     out_h, out_w = png.shape
     meta = {
         "source": path.name,
         "tier": tier,
-        "warnings": warnings,
         "size_in": [int(src_w), int(src_h)],
         "size_out": [int(out_w), int(out_h)],
-        "paper_p50": metrics["paper_p50"],
-        "ink_p50": metrics["ink_p50"],
-        "mask_ratio": metrics["mask_ratio"],
-        "angle_deg": round(float(geometry.angle), 2),
-        "gutter": gutter,
-        "outside_ratio": round(float(geometry.outside_ratio), 4),
-        "review": metrics["review"],
+        **page_meta,
         "ms": int((time.perf_counter() - started) * 1000),
-        "preset": preset.to_dict(),
         "features": feature_dict,
     }
     return png, meta
