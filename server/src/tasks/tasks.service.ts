@@ -19,6 +19,8 @@ import {
   ProcessParams,
   CropBox,
 } from './image-process.service';
+import { SettingsService } from '../settings/settings.service';
+import { AliyunService, AiConfigError } from '../ai/aliyun.service';
 
 const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp']);
 
@@ -34,6 +36,8 @@ export class TasksService implements OnModuleInit {
     @InjectRepository(Task) private readonly tasks: Repository<Task>,
     @InjectRepository(TaskImage) private readonly images: Repository<TaskImage>,
     private readonly processor: ImageProcessService,
+    private readonly settings: SettingsService,
+    private readonly aliyun: AliyunService,
   ) {}
 
   async onModuleInit() {
@@ -92,6 +96,12 @@ export class TasksService implements OnModuleInit {
       sourceFolder: string;
       description?: string;
       genealogyNote?: string;
+      surname?: string;
+      useAi?: boolean;
+      ocrModelId?: number | null;
+      useAiClean?: boolean;
+      cleanModelId?: number | null;
+      estimatedCost?: number | null;
     },
   ) {
     const name = dto.name;
@@ -100,10 +110,17 @@ export class TasksService implements OnModuleInit {
       dto.description != null && String(dto.description).trim()
         ? String(dto.description).trim()
         : '旧族谱复印页去污去褶皱清晰化，供后续 OCR 识别与数据化';
-    const genealogyNote =
-      dto.genealogyNote != null && String(dto.genealogyNote).trim()
-        ? String(dto.genealogyNote).trim()
-        : null;
+    const surname =
+      dto.surname != null && String(dto.surname).trim()
+        ? String(dto.surname).trim()
+        : dto.genealogyNote != null && String(dto.genealogyNote).trim()
+          ? String(dto.genealogyNote).trim()
+          : '';
+    if (!surname) throw new BadRequestException('请填写姓氏');
+    const genealogyNote = surname;
+    let ocrModelId: number | null = null;
+    let cleanModelId: number | null = null;
+    let estimatedCost: string | null = null;
     const folder = path.resolve(sourceFolder);
     if (!fs.existsSync(folder) || !fs.statSync(folder).isDirectory()) {
       throw new BadRequestException('图片文件夹不存在: ' + folder);
@@ -113,6 +130,36 @@ export class TasksService implements OnModuleInit {
       .filter((f) => IMAGE_EXT.has(path.extname(f).toLowerCase()))
       .sort((a, b) => a.localeCompare(b, 'zh'));
     if (!files.length) throw new BadRequestException('文件夹内没有图片');
+
+    if (dto.useAi) {
+      const modelId = Number(dto.ocrModelId);
+      if (!modelId) throw new BadRequestException('请选择识别模型');
+      const model = await this.settings.getModel(modelId);
+      if (!model || !model.enabled || model.purpose !== 'ocr') {
+        throw new BadRequestException('所选识别模型不可用，请先到「模型配置」添加');
+      }
+      ocrModelId = Number(model.id);
+      const est = this.settings.estimateCost(model, files.length);
+      estimatedCost =
+        est != null ? String(est) : dto.estimatedCost != null ? String(dto.estimatedCost) : null;
+    }
+
+    if (dto.useAiClean) {
+      const modelId = Number(dto.cleanModelId);
+      if (!modelId) throw new BadRequestException('请选择图片处理模型');
+      const model = await this.settings.getModel(modelId);
+      if (!model || !model.enabled || model.purpose !== 'clean') {
+        throw new BadRequestException('所选图片处理模型不可用，请先到「模型配置」添加');
+      }
+      cleanModelId = Number(model.id);
+      const est = this.settings.estimateCost(model, files.length);
+      if (est != null) {
+        const prev = estimatedCost != null ? Number(estimatedCost) || 0 : 0;
+        estimatedCost = String(prev + est);
+      } else if (estimatedCost == null && dto.estimatedCost != null) {
+        estimatedCost = String(dto.estimatedCost);
+      }
+    }
 
     const outputRoot = process.env.OUTPUT_ROOT || path.join(process.cwd(), '..', 'data', 'output');
     const stamp = Date.now();
@@ -127,6 +174,11 @@ export class TasksService implements OnModuleInit {
       name: name || path.basename(folder),
       description,
       genealogyNote,
+      surname,
+      ocrModelId,
+      cleanModelId,
+      estimatedCost,
+      actualCost: '0',
       sourceFolder: folder,
       outputFolder,
       status: 'pending',
@@ -293,13 +345,31 @@ export class TasksService implements OnModuleInit {
           );
 
           const imgStartedAt = Date.now();
-          const size = await this.processor.processToFile(
-            img.sourcePath,
-            resultPath,
-            params,
-            crop,
-          );
-          await this.processor.makeThumb(resultPath, thumbPath);
+          let size: { width: number; height: number };
+          if (task.cleanModelId) {
+            const cleanModel = await this.settings.getModel(task.cleanModelId);
+            if (!cleanModel || !cleanModel.enabled || cleanModel.purpose !== 'clean') {
+              throw new BadRequestException('任务绑定的图片处理模型不可用，请到「模型配置」检查');
+            }
+            // AI 图片处理：不走本地 ScanWash
+            const { usage } = await this.aliyun.cleanImage(img.sourcePath, resultPath, cleanModel);
+            const cost = this.aliyun.cost(cleanModel, usage);
+            if (cost != null) {
+              const prev = Number(task.actualCost || 0) || 0;
+              task.actualCost = String(prev + cost);
+            }
+            const meta = await sharp(resultPath, { failOn: 'none' }).metadata();
+            size = { width: meta.width || 0, height: meta.height || 0 };
+            await this.processor.makeThumb(resultPath, thumbPath);
+          } else {
+            size = await this.processor.processToFile(
+              img.sourcePath,
+              resultPath,
+              params,
+              crop,
+            );
+            await this.processor.makeThumb(resultPath, thumbPath);
+          }
           img.processingTimeMs = Date.now() - imgStartedAt;
 
           img.resultPath = resultPath;
@@ -312,6 +382,20 @@ export class TasksService implements OnModuleInit {
           img.errorMessage = null;
           img.params = JSON.stringify(params);
           img.updatedAt = new Date();
+
+          if (task.ocrModelId) {
+            try {
+              await this.runOcrOnImage(task, img, resultPath);
+            } catch (ocrErr: any) {
+              this.logger.warn(`Task ${taskId} image ${img.id} OCR failed: ${ocrErr?.message || ocrErr}`);
+              const msg = ocrErr instanceof AiConfigError
+                ? ocrErr.message
+                : 'AI识别失败: ' + (ocrErr?.message || ocrErr);
+              img.errorMessage = (img.errorMessage ? img.errorMessage + '; ' : '') + msg;
+              if (ocrErr instanceof AiConfigError) task.errorMessage = ocrErr.message;
+            }
+          }
+
           await this.images.save(img);
           success++;
         } catch (e: any) {
@@ -383,6 +467,127 @@ export class TasksService implements OnModuleInit {
         this.logger.error(`runProcess cleanup failed: ${inner}`);
       }
     }
+  }
+
+  private async runOcrOnImage(task: Task, img: TaskImage, imagePath: string) {
+    const model = await this.settings.getModel(task.ocrModelId);
+    if (!model) throw new BadRequestException('识别模型不存在');
+    const target = imagePath && fs.existsSync(imagePath) ? imagePath : img.sourcePath;
+    const { result, usage, raw } = await this.aliyun.ocr(target, model);
+    const cost = this.aliyun.cost(model, usage);
+    img.ocrModelId = Number(model.id);
+    img.ocrJson = JSON.stringify({ result, raw: raw?.slice?.(0, 20000) });
+    img.tokensIn = usage.tokensIn || 0;
+    img.tokensOut = usage.tokensOut || 0;
+    img.cost = cost != null ? String(cost) : '0';
+    await this.settings.learnTokens(Number(model.id), usage.tokensIn, usage.tokensOut);
+    const prev = Number(task.actualCost || 0) || 0;
+    task.actualCost = String(prev + (cost || 0));
+    await this.tasks.save(task);
+  }
+
+  async aiProcessImage(userId: number, taskId: number, imageId: number, body?: { modelId?: number }) {
+    const task = await this.get(userId, taskId);
+    const img = await this.getImage(userId, taskId, imageId);
+    let modelId = Number(body?.modelId || task.cleanModelId || 0);
+    let model = modelId ? await this.settings.getModel(modelId) : null;
+    if (!model || !model.enabled || model.purpose !== 'clean') {
+      model = await this.settings.defaultModel('clean');
+    }
+    if (!model) throw new BadRequestException('请先在「模型配置」添加并启用图片处理模型');
+    if (!img.sourcePath || !fs.existsSync(img.sourcePath)) {
+      throw new BadRequestException('当前页原图不存在');
+    }
+    const resultPath = path.join(
+      task.outputFolder,
+      'results',
+      this.safeName(img.fileName) + '.png',
+    );
+    const thumbPath = path.join(
+      task.outputFolder,
+      'thumbs',
+      this.safeName(img.fileName) + '.jpg',
+    );
+    fs.mkdirSync(path.dirname(resultPath), { recursive: true });
+    fs.mkdirSync(path.dirname(thumbPath), { recursive: true });
+    const started = Date.now();
+    try {
+      const { usage } = await this.aliyun.cleanImage(img.sourcePath, resultPath, model);
+      const cost = this.aliyun.cost(model, usage);
+      await this.processor.makeThumb(resultPath, thumbPath);
+      img.resultPath = resultPath;
+      img.thumbPath = thumbPath;
+      img.processingTimeMs = Date.now() - started;
+      img.status = 'ready';
+      img.errorMessage = null;
+      img.updatedAt = new Date();
+      if (cost != null) {
+        img.cost = String((Number(img.cost || 0) || 0) + cost);
+        const prev = Number(task.actualCost || 0) || 0;
+        task.actualCost = String(prev + cost);
+      }
+      task.cleanModelId = Number(model.id);
+      task.updatedAt = new Date();
+      await this.tasks.save(task);
+      await this.images.save(img);
+    } catch (e: any) {
+      if (e instanceof AiConfigError || e instanceof BadRequestException) {
+        throw e instanceof BadRequestException ? e : new BadRequestException(e.message);
+      }
+      throw new BadRequestException(e?.message || 'AI图片处理失败');
+    }
+    const bust = '?t=' + Date.now();
+    return {
+      imageId: img.id,
+      model: { id: model.id, displayName: model.displayName, model: model.model },
+      cost: img.cost,
+      processingTimeMs: img.processingTimeMs,
+      resultUrl: this.fileUrl(img.resultPath) + bust,
+      thumbUrl: this.fileUrl(img.thumbPath) + bust,
+      sourceUrl: this.fileUrl(img.sourcePath),
+    };
+  }
+
+  async aiRecognizeImage(userId: number, taskId: number, imageId: number, body?: { modelId?: number }) {
+    const task = await this.get(userId, taskId);
+    const img = await this.getImage(userId, taskId, imageId);
+    let modelId = Number(body?.modelId || task.ocrModelId || 0);
+    let model = modelId ? await this.settings.getModel(modelId) : null;
+    if (!model || !model.enabled || model.purpose !== 'ocr') {
+      model = await this.settings.defaultModel('ocr');
+    }
+    if (!model) throw new BadRequestException('请先在「模型配置」添加并启用识别模型');
+    const imagePath =
+      img.resultPath && fs.existsSync(img.resultPath) ? img.resultPath : img.sourcePath;
+    if (!imagePath || !fs.existsSync(imagePath)) {
+      throw new BadRequestException('当前页图片不存在');
+    }
+    task.ocrModelId = Number(model.id);
+    try {
+      await this.runOcrOnImage(task, img, imagePath);
+    } catch (e: any) {
+      // AiConfigError is a plain Error; Nest would otherwise return opaque 500
+      if (e instanceof AiConfigError || e instanceof BadRequestException) {
+        throw e instanceof BadRequestException ? e : new BadRequestException(e.message);
+      }
+      throw new BadRequestException(e?.message || 'AI识别失败');
+    }
+    await this.images.save(img);
+    let parsed: any = null;
+    try {
+      parsed = img.ocrJson ? JSON.parse(img.ocrJson) : null;
+    } catch {
+      parsed = null;
+    }
+    return {
+      imageId: img.id,
+      model: { id: model.id, displayName: model.displayName, model: model.model },
+      cost: img.cost,
+      tokensIn: img.tokensIn,
+      tokensOut: img.tokensOut,
+      result: parsed?.result || null,
+      ocrJson: img.ocrJson,
+    };
   }
 
 

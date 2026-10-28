@@ -1,12 +1,15 @@
-import { Module } from '@nestjs/common';
+﻿import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { TasksModule } from './tasks/tasks.module';
 import { FilesModule } from './files/files.module';
+import { SettingsModule } from './settings/settings.module';
 import { User } from './users/user.entity';
 import { Task } from './tasks/task.entity';
 import { TaskImage } from './tasks/task-image.entity';
+import { Setting } from './settings/setting.entity';
+import { AiModel } from './settings/ai-model.entity';
 
 @Module({
   imports: [
@@ -17,7 +20,7 @@ import { TaskImage } from './tasks/task-image.entity';
       username: process.env.DB_USER || 'zupu',
       password: process.env.DB_PASS || 'zupu123',
       database: process.env.DB_NAME || 'zupu_scan',
-      entities: [User, Task, TaskImage],
+      entities: [User, Task, TaskImage, Setting, AiModel],
       synchronize: false,
       charset: 'utf8mb4',
     }),
@@ -25,6 +28,7 @@ import { TaskImage } from './tasks/task-image.entity';
     UsersModule,
     TasksModule,
     FilesModule,
+    SettingsModule,
   ],
 })
 export class AppModule {}

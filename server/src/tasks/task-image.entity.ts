@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
+﻿import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
 import { Task } from './task.entity';
 
 @Entity('task_images')
@@ -45,6 +45,21 @@ export class TaskImage {
   @Column({ name: 'processing_time_ms', type: 'int', nullable: true })
   processingTimeMs: number | null;
 
+  @Column({ name: 'ocr_model_id', type: 'bigint', unsigned: true, nullable: true })
+  ocrModelId: number | null;
+
+  @Column({ name: 'ocr_json', type: 'mediumtext', nullable: true })
+  ocrJson: string | null;
+
+  @Column({ type: 'decimal', precision: 12, scale: 4, default: 0 })
+  cost: string;
+
+  @Column({ name: 'tokens_in', type: 'int', default: 0 })
+  tokensIn: number;
+
+  @Column({ name: 'tokens_out', type: 'int', default: 0 })
+  tokensOut: number;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 
@@ -55,3 +70,4 @@ export class TaskImage {
   @JoinColumn({ name: 'task_id' })
   task: Task;
 }
+

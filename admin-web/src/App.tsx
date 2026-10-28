@@ -4,6 +4,7 @@ import { LoginView } from './components/LoginView';
 import { TopNav, MainViewTab } from './components/TopNav';
 import { TaskCenterView } from './components/TaskCenterView';
 import { ReviewWorkbench } from './components/ReviewWorkbench';
+import { SettingsView } from './components/SettingsView';
 import { api, clearAuth, getStoredUser, getToken } from './api/client';
 import { mapTask, mapUser } from './api/mappers';
 
@@ -277,7 +278,13 @@ export default function App() {
       name: newTaskPartial.name || '未命名任务',
       sourceFolder: newTaskPartial.folderPath || '',
       description: newTaskPartial.description,
-      genealogyNote: newTaskPartial.genealogyNote,
+      genealogyNote: newTaskPartial.genealogyNote || newTaskPartial.surname,
+      surname: newTaskPartial.surname || newTaskPartial.genealogyNote,
+      useAi: !!newTaskPartial.useAi,
+      ocrModelId: newTaskPartial.ocrModelId ?? null,
+      useAiClean: !!newTaskPartial.useAiClean,
+      cleanModelId: newTaskPartial.cleanModelId ?? null,
+      estimatedCost: newTaskPartial.estimatedCost ?? null,
     });
     await loadTasks();
     goToTasks();
@@ -354,6 +361,7 @@ export default function App() {
       <TopNav
         currentTab={currentTab}
         onBackToTasks={goToTasks}
+        onOpenSettings={() => setCurrentTab('settings')}
         user={currentUser}
         onLogout={handleLogout}
         activeTaskName={activeTask?.name}
@@ -379,6 +387,8 @@ export default function App() {
             onRefresh={loadTasks}
           />
         )}
+
+        {currentTab === 'settings' && <SettingsView />}
 
         {currentTab === 'workbench' && activeTask && (
           <ReviewWorkbench

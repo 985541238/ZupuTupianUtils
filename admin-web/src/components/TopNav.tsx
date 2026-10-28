@@ -4,13 +4,15 @@ import {
   BookOpen,
   LogOut,
   ChevronLeft,
+  Settings,
 } from 'lucide-react';
 
-export type MainViewTab = 'tasks' | 'workbench';
+export type MainViewTab = 'tasks' | 'workbench' | 'settings';
 
 interface TopNavProps {
   currentTab: MainViewTab;
   onBackToTasks: () => void;
+  onOpenSettings?: () => void;
   user: User;
   onLogout: () => void;
   activeTaskName?: string;
@@ -20,6 +22,7 @@ interface TopNavProps {
 export const TopNav: React.FC<TopNavProps> = ({
   currentTab,
   onBackToTasks,
+  onOpenSettings,
   user,
   onLogout,
   activeTaskName,
@@ -92,6 +95,20 @@ export const TopNav: React.FC<TopNavProps> = ({
           </div>
         </div>
 
+        {currentTab !== 'workbench' && onOpenSettings && (
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            title="模型配置"
+            className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+              currentTab === 'settings'
+                ? 'text-[#0071E3] bg-[#0071E3]/10'
+                : 'text-[#86868B] hover:text-[#1D1D1F] hover:bg-black/[0.04]'
+            }`}
+          >
+            <Settings className="w-3.5 h-3.5" />
+          </button>
+        )}
         <button
           onClick={onLogout}
           title="退出登录"

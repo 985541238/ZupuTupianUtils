@@ -1,0 +1,30 @@
+USE `zupu_scan`;
+SET @db := DATABASE();
+CREATE TABLE IF NOT EXISTS `settings` (
+  `k` VARCHAR(64) NOT NULL,
+  `v` TEXT NULL,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`k`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE IF NOT EXISTS `ai_models` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `purpose` VARCHAR(16) NOT NULL,
+  `display_name` VARCHAR(64) NOT NULL,
+  `model` VARCHAR(128) NOT NULL,
+  `base_url` VARCHAR(255) NULL,
+  `api_key` TEXT NULL,
+  `prompt` TEXT NULL,
+  `billing` VARCHAR(16) NOT NULL DEFAULT 'token',
+  `price_in` DECIMAL(12,6) NULL,
+  `price_out` DECIMAL(12,6) NULL,
+  `price_image` DECIMAL(12,6) NULL,
+  `avg_tokens_in` INT NOT NULL DEFAULT 3000,
+  `avg_tokens_out` INT NOT NULL DEFAULT 1000,
+  `enable_thinking` TINYINT NOT NULL DEFAULT 0,
+  `is_default` TINYINT NOT NULL DEFAULT 0,
+  `enabled` TINYINT NOT NULL DEFAULT 1,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_models_purpose` (`purpose`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

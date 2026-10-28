@@ -43,6 +43,9 @@ export interface ScanItem {
   /** Nest image status (ready/done/confirmed/...) */
   nestStatus?: string;
   cropBoxRaw?: any;
+  /** AI 识别结果原文（JSON 字符串或摘要） */
+  ocrJson?: string | null;
+  ocrText?: string;
 }
 
 export interface Task {
@@ -53,6 +56,14 @@ export interface Task {
   description?: string;
   /** 姓氏/谱系备注 */
   genealogyNote?: string;
+  /** 姓氏 */
+  surname?: string;
+  /** 建任务时是否选用 AI 识别 */
+  useAi?: boolean;
+  useAiClean?: boolean;
+  cleanModelId?: number | null;
+  ocrModelId?: number | null;
+  estimatedCost?: number | null;
   status: 'pending' | 'reviewing' | 'completed';
   /** Original Nest status */
   nestStatus?: string;

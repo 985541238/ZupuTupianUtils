@@ -70,6 +70,12 @@ export const api = {
     sourceFolder: string;
     description?: string;
     genealogyNote?: string;
+    surname?: string;
+    useAi?: boolean;
+    ocrModelId?: number | null;
+    useAiClean?: boolean;
+    cleanModelId?: number | null;
+    estimatedCost?: number | null;
   }) => request<any>('/tasks', { method: 'POST', body: JSON.stringify(data) }),
   getTask: (id: string | number) => request<any>('/tasks/' + id),
   processTask: (id: string | number) =>
@@ -103,6 +109,31 @@ export const api = {
   browseFolder: (path?: string) =>
     request<any>('/files/browse' + (path != null ? '?path=' + encodeURIComponent(path) : '')),
   getDefaultFolder: () => request<{ path: string }>('/files/default-folder'),
+
+  getSettings: () => request<any>('/settings'),
+  saveAliyun: (body: any) => request<any>('/settings/aliyun', { method: 'PUT', body: JSON.stringify(body) }),
+  testAliyun: () => request<any>('/settings/aliyun/test', { method: 'POST', body: '{}' }),
+  testModel: (body: { id?: number; purpose?: 'ocr' | 'clean'; baseUrl?: string; apiKey?: string; model?: string }) =>
+    request<any>('/settings/models/test', { method: 'POST', body: JSON.stringify(body || {}) }),
+  listOcrModels: () => request<any[]>('/settings/models/ocr'),
+  listCleanModels: () => request<any[]>('/settings/models/clean'),
+  estimateCost: (modelId: number, pageCount: number) =>
+    request<any>('/settings/estimate?modelId=' + modelId + '&pageCount=' + pageCount),
+  saveModel: (id: number | null, body: any) =>
+    id
+      ? request<any>('/settings/models/' + id, { method: 'PUT', body: JSON.stringify(body) })
+      : request<any>('/settings/models', { method: 'POST', body: JSON.stringify(body) }),
+  deleteModel: (id: number) => request<any>('/settings/models/' + id, { method: 'DELETE' }),
+  aiRecognizeImage: (taskId: string | number, imageId: string | number, body?: { modelId?: number }) =>
+    request<any>(`/tasks/${taskId}/images/${imageId}/ai-recognize`, {
+      method: 'POST',
+      body: JSON.stringify(body || {}),
+    }),
+  aiProcessImage: (taskId: string | number, imageId: string | number, body?: { modelId?: number }) =>
+    request<any>(`/tasks/${taskId}/images/${imageId}/ai-process`, {
+      method: 'POST',
+      body: JSON.stringify(body || {}),
+    }),
 };
 
 export function authImageUrl(url?: string | null): string {

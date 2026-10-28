@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, OneToMany } from 'typeorm';
+﻿import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, OneToMany } from 'typeorm';
 import { TaskImage } from './task-image.entity';
 
 @Entity('tasks')
@@ -27,6 +27,10 @@ export class Task {
   @Column({ name: 'genealogy_note', length: 255, nullable: true })
   genealogyNote: string | null;
 
+  /** 姓氏（一本族谱一个任务） */
+  @Column({ length: 32, default: '' })
+  surname: string;
+
   @Column({ name: 'source_folder', length: 1024 })
   sourceFolder: string;
 
@@ -51,9 +55,22 @@ export class Task {
   @Column({ name: 'default_params', type: 'text', nullable: true })
   defaultParams: string | null;
 
-  /** Last batch runProcess wall-clock ms; cancel mid-loop writes elapsed so far */
   @Column({ name: 'processing_time_ms', type: 'int', nullable: true })
   processingTimeMs: number | null;
+
+  /** 非空表示建任务时选用了 AI 识别，整本任务走该模型 */
+  @Column({ name: 'ocr_model_id', type: 'bigint', unsigned: true, nullable: true })
+  ocrModelId: number | null;
+
+  /** 非空表示建任务时选用了 AI 图片处理，启动后跳过本地 ScanWash，整本走阿里云 clean 模型 */
+  @Column({ name: 'clean_model_id', type: 'bigint', unsigned: true, nullable: true })
+  cleanModelId: number | null;
+
+  @Column({ name: 'estimated_cost', type: 'decimal', precision: 12, scale: 4, nullable: true })
+  estimatedCost: string | null;
+
+  @Column({ name: 'actual_cost', type: 'decimal', precision: 12, scale: 4, default: 0 })
+  actualCost: string;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

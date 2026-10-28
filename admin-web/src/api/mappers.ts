@@ -73,6 +73,15 @@ export function mapImage(raw: any, taskId: string | number, pageNumber: number):
     originalHeight: h,
     nestStatus: raw.status,
     cropBoxRaw: raw.cropBox,
+    ocrJson: raw.ocrJson || null,
+    ocrText: (() => {
+      if (!raw.ocrJson) return undefined;
+      try {
+        const p = typeof raw.ocrJson === 'string' ? JSON.parse(raw.ocrJson) : raw.ocrJson;
+        const cols = p?.result?.columns || p?.columns || [];
+        return cols.map((c: any) => c.text || '').filter(Boolean).join('\n');
+      } catch { return undefined; }
+    })(),
     ...(function () {
       const pt = raw.processingTimeMs ?? raw.processing_time_ms;
       if (pt == null || !Number.isFinite(Number(pt))) return {};
@@ -93,7 +102,11 @@ export function mapTask(raw: any, images?: any[]): Task {
     name: raw.name || '未命名扫描卷',
     folderPath: raw.sourceFolder || raw.folderPath || '',
     description: raw.description || undefined,
-    genealogyNote: raw.genealogyNote || undefined,
+    genealogyNote: raw.genealogyNote || raw.surname || undefined,
+    surname: raw.surname || raw.genealogyNote || undefined,
+    useAi: !!raw.ocrModelId,
+    ocrModelId: raw.ocrModelId != null ? Number(raw.ocrModelId) : null,
+    estimatedCost: raw.estimatedCost != null ? Number(raw.estimatedCost) : null,
     status: mapTaskStatus(raw.status),
     nestStatus: raw.status,
     totalPages,

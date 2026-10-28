@@ -73,3 +73,17 @@ _patches/
 
 # Credentials
 sql/credentials.txt
+
+server/.env.bak*
+
+server/nest-restart.log*
+
+待处理的图片 - 副本/
+
+*.err
+
+# Local sample folders / backups
+server/.env.bak*
+server/nest-restart.log*
+*.err
+寰呭鐞嗙殑鍥剧墖 - 鍓湰/

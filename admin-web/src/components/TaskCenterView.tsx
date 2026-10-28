@@ -69,6 +69,15 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   const [taskName, setTaskName] = useState('');
   const [taskDescription, setTaskDescription] = useState('旧族谱复印页去污去褶皱清晰化，供后续 OCR 识别与数据化');
   const [genealogyNote, setGenealogyNote] = useState('');
+  const [useAiRecognition, setUseAiRecognition] = useState(false);
+  const [ocrModels, setOcrModels] = useState<any[]>([]);
+  const [selectedModelId, setSelectedModelId] = useState<number | null>(null);
+  const [useAiClean, setUseAiClean] = useState(false);
+  const [cleanModels, setCleanModels] = useState<any[]>([]);
+  const [selectedCleanModelId, setSelectedCleanModelId] = useState<number | null>(null);
+  const [pageCountPreview, setPageCountPreview] = useState(0);
+  const [costEstimate, setCostEstimate] = useState<number | null>(null);
+  const [costPriced, setCostPriced] = useState(false);
   const [folderPath, setFolderPath] = useState('');
   const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [browseCurrent, setBrowseCurrent] = useState('');
@@ -127,10 +136,64 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     return filteredTasks.slice(start, start + pageSize);
   }, [filteredTasks, currentPage, pageSize]);
 
+  const loadOcrModels = async () => {
+    try {
+      const list = await api.listOcrModels();
+      const enabled = (list || []).filter((m: any) => m.enabled);
+      setOcrModels(enabled);
+      const def = enabled.find((m: any) => m.isDefault) || enabled[0];
+      setSelectedModelId(def ? Number(def.id) : null);
+      if (!enabled.length) {
+        setUseAiRecognition(false);
+      }
+    } catch {
+      setOcrModels([]);
+      setSelectedModelId(null);
+      setUseAiRecognition(false);
+    }
+  };
+
+  const loadCleanModels = async () => {
+    try {
+      const list = await api.listCleanModels();
+      const enabled = (list || []).filter((m: any) => m.enabled);
+      setCleanModels(enabled);
+      const def = enabled.find((m: any) => m.isDefault) || enabled[0];
+      setSelectedCleanModelId(def ? Number(def.id) : null);
+      if (!enabled.length) setUseAiClean(false);
+    } catch {
+      setCleanModels([]);
+      setSelectedCleanModelId(null);
+      setUseAiClean(false);
+    }
+  };
+
+  const refreshEstimate = async (modelId: number | null, pages: number) => {
+    if (!modelId || pages <= 0) {
+      setCostEstimate(null);
+      setCostPriced(false);
+      return;
+    }
+    try {
+      const r = await api.estimateCost(modelId, pages);
+      setCostEstimate(r.cost != null ? Number(r.cost) : null);
+      setCostPriced(!!r.priced);
+    } catch {
+      setCostEstimate(null);
+      setCostPriced(false);
+    }
+  };
+
   const openCreateModal = () => {
     // Always start blank — never prefill last/default folder.
     setShowCreateModal(true);
     setTaskName('');
+    setUseAiRecognition(false);
+    setPageCountPreview(0);
+    setCostEstimate(null);
+    setCostPriced(false);
+    void loadOcrModels();
+    void loadCleanModels();
     setTaskDescription('旧族谱复印页去污去褶皱清晰化，供后续 OCR 识别与数据化');
     setGenealogyNote('');
     setFolderPath('');
@@ -176,9 +239,43 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     if (!browseCurrent) return;
     setFolderPath(browseCurrent);
     setShowFolderPicker(false);
+    void (async () => {
+      try {
+        const data = await api.browseFolder(browseCurrent);
+        const files = Number(data?.imageCount) || 0;
+        setPageCountPreview(files);
+        if (useAiClean && selectedCleanModelId) {
+          await refreshEstimate(selectedCleanModelId, files);
+        } else if (useAiRecognition && selectedModelId) {
+          await refreshEstimate(selectedModelId, files);
+        }
+      } catch {
+        setPageCountPreview(0);
+      }
+    })();
   };
 
   const handleCreateSubmit = async () => {
+    if (!taskName.trim()) {
+      alert('请填写族谱名称');
+      return;
+    }
+    if (!genealogyNote.trim()) {
+      alert('请填写姓氏');
+      return;
+    }
+    if (useAiClean) {
+      if (!cleanModels.length || !selectedCleanModelId) {
+        alert('未配置图片处理模型，请先到「模型配置」添加');
+        return;
+      }
+    }
+    if (useAiRecognition) {
+      if (!ocrModels.length || !selectedModelId) {
+        alert('未配置识别模型，请先到「模型配置」添加');
+        return;
+      }
+    }
     if (!folderPath.trim()) {
       alert('请填写图片文件夹路径');
       return;
@@ -187,10 +284,16 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     try {
       await onCreateTask(
         {
-          name: taskName.trim() || '未命名卷册',
+          name: taskName.trim(),
           folderPath: folderPath.trim(),
           description: taskDescription.trim() || '旧族谱复印页去污去褶皱清晰化，供后续 OCR 识别与数据化',
-          genealogyNote: genealogyNote.trim() || undefined,
+          genealogyNote: genealogyNote.trim(),
+          surname: genealogyNote.trim(),
+          useAi: useAiRecognition,
+          ocrModelId: useAiRecognition ? selectedModelId : null,
+          useAiClean: useAiClean,
+          cleanModelId: useAiClean ? selectedCleanModelId : null,
+          estimatedCost: (useAiClean || useAiRecognition) ? costEstimate : null,
           status: 'pending',
           totalPages: 0,
           reviewedPages: 0,
@@ -198,15 +301,17 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
           updatedAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
         },
         [],
-        false // never auto-start process
+        false
       );
       setShowCreateModal(false);
       setTaskName('');
       setGenealogyNote('');
       setFolderPath('');
+      setUseAiRecognition(false);
+      setUseAiClean(false);
+      setCostEstimate(null);
     } catch (e: any) {
       alert(e?.message || '创建任务失败');
-      // leave modal open for retry
     } finally {
       setCreating(false);
     }
@@ -700,7 +805,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
             <div className="space-y-4">
               <div>
                 <label className="block text-xs font-semibold text-[#1D1D1F] mb-1">
-                  任务名称 / 卷册名称
+                  族谱名称 <span className="text-[#FF3B30]">*</span>
                 </label>
                 <input
                   type="text"
@@ -724,7 +829,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
               </div>
               <div>
                 <label className="block text-xs font-semibold text-[#1D1D1F] mb-1">
-                  姓氏 / 谱系备注 <span className="font-normal text-[#86868B]">（可选）</span>
+                  姓氏 <span className="text-[#FF3B30]">*</span>
                 </label>
                 <input
                   type="text"
@@ -733,6 +838,123 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                   placeholder="例如：吴氏 · 延陵支 · 卷三"
                   className="w-full px-3.5 py-2.5 text-xs bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
                 />
+              </div>
+
+              
+
+              <div className="p-3.5 rounded-2xl bg-[#F5F5F7]/90 border border-black/[0.05] space-y-3">
+                <label className={`flex items-start gap-2.5 ${cleanModels.length ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'}`}>
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={useAiClean}
+                    disabled={!cleanModels.length}
+                    onChange={(e) => {
+                      const on = e.target.checked;
+                      setUseAiClean(on);
+                      if (on && selectedCleanModelId) void refreshEstimate(selectedCleanModelId, pageCountPreview);
+                      if (!on && !useAiRecognition) { setCostEstimate(null); setCostPriced(false); }
+                      if (!on && useAiRecognition && selectedModelId) void refreshEstimate(selectedModelId, pageCountPreview);
+                    }}
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-xs font-semibold text-[#1D1D1F]">使用 AI 图片处理</span>
+                    <span className="block text-[11px] text-[#86868B] mt-0.5 leading-relaxed">
+                      {cleanModels.length
+                        ? '勾选后启动任务不走本地清晰化，整本页面用所选模型做AI图片处理。'
+                        : '尚未配置可用图片处理模型，请先打开右上角「模型配置」。'}
+                    </span>
+                  </span>
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-[#1D1D1F] mb-1">图片处理模型</label>
+                    <select
+                      disabled={!useAiClean || !cleanModels.length}
+                      value={selectedCleanModelId ?? ''}
+                      onChange={(e) => {
+                        const id = e.target.value ? Number(e.target.value) : null;
+                        setSelectedCleanModelId(id);
+                        if (useAiClean && id) void refreshEstimate(id, pageCountPreview);
+                      }}
+                      className="w-full px-3 py-2 text-xs bg-white border border-black/[0.06] rounded-xl disabled:bg-[#E5E5EA]/50 disabled:text-[#86868B]"
+                    >
+                      {!cleanModels.length && <option value="">无可用模型</option>}
+                      {cleanModels.map((m) => (
+                        <option key={m.id} value={m.id}>{m.displayName}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-[#1D1D1F] mb-1">费用预估</label>
+                    <div className="px-3 py-2 text-xs rounded-xl bg-white border border-black/[0.06] font-mono text-[#1D1D1F] min-h-[36px] flex items-center">
+                      {!useAiClean
+                        ? '—'
+                        : !pageCountPreview
+                          ? '选择文件夹后按页数估算'
+                          : costPriced && costEstimate != null
+                            ? `约 ¥${costEstimate.toFixed(4)}（${pageCountPreview} 页）`
+                            : `已选 ${pageCountPreview} 页（请在配置页填写单价）`}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-3.5 rounded-2xl bg-[#F5F5F7]/90 border border-black/[0.05] space-y-3">
+                <label className={`flex items-start gap-2.5 ${ocrModels.length ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'}`}>
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={useAiRecognition}
+                    disabled={!ocrModels.length}
+                    onChange={(e) => {
+                      const on = e.target.checked;
+                      setUseAiRecognition(on);
+                      if (on && selectedModelId) void refreshEstimate(selectedModelId, pageCountPreview);
+                      if (!on) { setCostEstimate(null); setCostPriced(false); }
+                    }}
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-xs font-semibold text-[#1D1D1F]">使用 AI 识别</span>
+                    <span className="block text-[11px] text-[#86868B] mt-0.5 leading-relaxed">
+                      {ocrModels.length
+                        ? '勾选后整本任务在清晰化后使用所选模型识别；审阅页也可对单页再识别。'
+                        : '尚未配置可用识别模型，请先打开右上角「模型配置」。'}
+                    </span>
+                  </span>
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-[#1D1D1F] mb-1">识别模型</label>
+                    <select
+                      disabled={!useAiRecognition || !ocrModels.length}
+                      value={selectedModelId ?? ''}
+                      onChange={(e) => {
+                        const id = e.target.value ? Number(e.target.value) : null;
+                        setSelectedModelId(id);
+                        if (useAiRecognition && id) void refreshEstimate(id, pageCountPreview);
+                      }}
+                      className="w-full px-3 py-2 text-xs bg-white border border-black/[0.06] rounded-xl disabled:bg-[#E5E5EA]/50 disabled:text-[#86868B]"
+                    >
+                      {!ocrModels.length && <option value="">无可用模型</option>}
+                      {ocrModels.map((m) => (
+                        <option key={m.id} value={m.id}>{m.displayName}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-[#1D1D1F] mb-1">费用预估</label>
+                    <div className="px-3 py-2 text-xs rounded-xl bg-white border border-black/[0.06] font-mono text-[#1D1D1F] min-h-[36px] flex items-center">
+                      {!useAiRecognition
+                        ? '—'
+                        : !pageCountPreview
+                          ? '选择文件夹后按页数估算'
+                          : costPriced && costEstimate != null
+                            ? `约 ¥${costEstimate.toFixed(4)}（${pageCountPreview} 页）`
+                            : `已选 ${pageCountPreview} 页（请在配置页填写单价）`}
+                    </div>
+                  </div>
+                </div>
               </div>
 
               <div>

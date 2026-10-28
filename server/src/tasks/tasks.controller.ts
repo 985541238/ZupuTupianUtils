@@ -15,7 +15,8 @@ import {
 import { Response } from 'express';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { TasksService } from './tasks.service';
-import { IsOptional, IsString, MinLength } from 'class-validator';
+import { IsBoolean, IsNumber, IsOptional, IsString, MinLength } from 'class-validator';
+import { Type } from 'class-transformer';
 
 class CreateTaskDto {
   @IsString()
@@ -33,6 +34,33 @@ class CreateTaskDto {
   @IsOptional()
   @IsString()
   genealogyNote?: string;
+
+  @IsOptional()
+  @IsString()
+  surname?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  useAi?: boolean;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  ocrModelId?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  useAiClean?: boolean;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  cleanModelId?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  estimatedCost?: number;
 }
 
 @Controller('tasks')
@@ -102,6 +130,26 @@ export class TasksController {
     const buf = await this.tasks.previewImage(req.user.id, id, imageId, body || {});
     res.setHeader('Content-Type', 'image/png');
     res.send(buf);
+  }
+
+  @Post(':id/images/:imageId/ai-recognize')
+  aiRecognize(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('imageId', ParseIntPipe) imageId: number,
+    @Body() body: any,
+  ) {
+    return this.tasks.aiRecognizeImage(req.user.id, id, imageId, body || {});
+  }
+
+  @Post(':id/images/:imageId/ai-process')
+  aiProcess(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('imageId', ParseIntPipe) imageId: number,
+    @Body() body: any,
+  ) {
+    return this.tasks.aiProcessImage(req.user.id, id, imageId, body || {});
   }
 
   @Put(':id/images/:imageId/reprocess')
