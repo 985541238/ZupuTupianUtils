@@ -74,6 +74,7 @@ _patches/
 # Credentials
 sql/credentials.txt
 
+<<<<<<< HEAD
 server/.env.bak*
 
 server/nest-restart.log*
@@ -87,3 +88,13 @@ server/.env.bak*
 server/nest-restart.log*
 *.err
 待处理的图片 - 副本/
+=======
+# Extra build / venv (ensure compile artifacts stay out)
+build/
+**/build/
+.next/
+**/.next/
+.venv/
+venv/
+**/out/
+>>>>>>> origin/main
