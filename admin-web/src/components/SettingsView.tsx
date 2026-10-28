@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client';
 import { parseCurlExample } from '../utils/parseCurlExample';
 import { AiSetupWizard } from './AiSetupWizard';
+import { SecretInput } from './SecretInput';
 import { Plus, Save, Trash2, RefreshCw, ScanText, Wand2, CheckCircle2, AlertCircle, X, KeyRound, ExternalLink } from 'lucide-react';
 
 type AiModel = {
@@ -14,6 +15,7 @@ type AiModel = {
   baseUrl?: string;
   apiKeySet?: boolean;
   apiKeyMasked?: string;
+  apiKeyPlain?: string;
   platformKeySet?: boolean;
   billing: 'token' | 'image';
   priceIn: string | null;
@@ -48,6 +50,7 @@ type Platform = {
   consoleUrl: string;
   baseUrlHelp?: string;
   modelsUrl?: string;
+  guide?: { keyUrl: string; billingUrl: string; steps: string[]; modelTip?: string };
   baseUrl: string;
   imageTransport: 'base64' | 'url';
   fields: PlatformField[];
@@ -112,38 +115,69 @@ function ModalShell({
   onClose,
   children,
   footer,
-  wide,
+  size = 'md',
+  headerExtra,
 }: {
   title: string;
   subtitle?: string;
   onClose: () => void;
   children: React.ReactNode;
   footer: React.ReactNode;
-  wide?: boolean;
+  /** md 460 · lg 720 · xl 960：内容多的弹窗用宽版、分栏摆放，避免上下滚动 */
+  size?: 'md' | 'lg' | 'xl';
+  headerExtra?: React.ReactNode;
 }) {
+  const w = size === 'xl' ? 'max-w-[960px]' : size === 'lg' ? 'max-w-[720px]' : 'max-w-[460px]';
   return (
     <div className="fixed inset-0 z-[90] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/30 backdrop-blur-[2px]" onClick={onClose} />
       <div
-        className={`relative w-full ${wide ? 'max-w-[560px]' : 'max-w-[460px]'} bg-white/95 backdrop-blur-xl rounded-[20px] shadow-[0_24px_80px_rgba(0,0,0,0.22)] border border-black/[0.06] animate-apple-in`}
+        className={`relative w-full ${w} max-h-[calc(100vh-32px)] flex flex-col bg-white/95 backdrop-blur-xl rounded-[20px] shadow-[0_24px_80px_rgba(0,0,0,0.22)] border border-black/[0.06] animate-apple-in`}
       >
-        <div className="flex items-start justify-between gap-3 px-5 pt-5 pb-3">
+        <div className="flex items-start justify-between gap-3 px-6 pt-5 pb-3 shrink-0">
           <div className="min-w-0">
             <h3 className="text-base font-bold text-[#1D1D1F]">{title}</h3>
             {subtitle ? <p className="text-[11px] text-[#86868B] mt-1 leading-relaxed">{subtitle}</p> : null}
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1.5 rounded-lg text-[#86868B] hover:bg-[#F5F5F7] cursor-pointer shrink-0"
-            aria-label="关闭"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-3 shrink-0">
+            {headerExtra}
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 rounded-lg text-[#86868B] hover:bg-[#F5F5F7] cursor-pointer"
+              aria-label="关闭"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
-        <div className="px-5 pb-2 max-h-[min(70vh,560px)] overflow-y-auto space-y-3">{children}</div>
-        <div className="flex justify-end gap-2 px-5 py-4 mt-1 border-t border-black/[0.06]">{footer}</div>
+        <div className="px-6 pb-3 flex-1 min-h-0 overflow-y-auto space-y-3">{children}</div>
+        <div className="flex flex-wrap items-center justify-end gap-2 px-6 py-4 border-t border-black/[0.06] shrink-0">{footer}</div>
       </div>
+    </div>
+  );
+}
+
+/** 弹窗内的提示条（成功 / 失败 / 进行中） */
+function Notice({ ok, children }: { ok: boolean | null; children: React.ReactNode }) {
+  return (
+    <div
+      className={`flex items-start gap-2 text-[11px] rounded-xl px-3 py-2 ${
+        ok === false ? 'bg-[#FFF2F2] text-[#C62828]' : ok === true ? 'bg-[#F0FFF4] text-[#248A3D]' : 'bg-[#F5F5F7] text-[#6E6E73]'
+      }`}
+    >
+      {ok === true ? <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" /> : <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />}
+      <span className="break-all">{children}</span>
+    </div>
+  );
+}
+
+/** 弹窗里的分组小标题 */
+function GroupTitle({ title, hint }: { title: string; hint?: string }) {
+  return (
+    <div className="pb-1">
+      <div className="text-xs font-bold text-[#1D1D1F]">{title}</div>
+      {hint ? <div className="text-[11px] text-[#86868B] mt-0.5">{hint}</div> : null}
     </div>
   );
 }
@@ -323,6 +357,12 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
   const [generalMsg, setGeneralMsg] = useState('');
   const [pEditing, setPEditing] = useState<PlatformDraft | null>(null);
   const [wizardOpen, setWizardOpen] = useState(false);
+  // 保存成功后的轻提示
+  const [flash, setFlashRaw] = useState('');
+  const setFlash = (m: string) => {
+    setFlashRaw(m);
+    window.setTimeout(() => setFlashRaw(''), 2600);
+  };
   // 模型弹窗：从平台拉取的模型列表
   const [remoteModels, setRemoteModels] = useState<{
     loading: boolean;
@@ -420,7 +460,8 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
       platform: m.platform || guessPlatform(m.baseUrl) || (m.purpose === 'clean' ? 'ark' : 'aliyun'),
       baseUrl: m.baseUrl || (m.purpose === 'clean' ? '' : DEFAULT_OCR_BASE),
       outputSize: m.outputSize || '',
-      apiKey: '',
+      // 回显已保存的 Key（默认密文显示）
+      apiKey: m.apiKeyPlain || '',
       prompt: m.prompt || (m.purpose === 'clean' ? DEFAULT_CLEAN_PROMPT : DEFAULT_OCR_PROMPT),
       curlPaste: '',
     });
@@ -464,23 +505,19 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
 
   const saveModel = async () => {
     if (!editing) return;
-    if (!String(editing.displayName || '').trim()) {
-      setErr('请填写显示名称');
-      return;
-    }
-    if (!String(editing.model || '').trim()) {
-      setErr('请填写模型代码');
-      return;
-    }
+    const fail = (m: string) => {
+      setTestMsg(m);
+      setTestOk(false);
+    };
+    if (!String(editing.displayName || '').trim()) return fail('请填写显示名称');
+    if (!String(editing.model || '').trim()) return fail('请填写模型代码，或点「从平台拉取模型」选择');
     const keyInput = String(editing.apiKey || '').trim();
     const platformHasKey = !!platformDef(editing.platform)?.configured;
-    if (!keyInput && !editing.apiKeySet && !platformHasKey) {
-      setErr(`请填写 API Key，或先在「平台账号」里填写${platformName(editing.platform) || '所属平台'}的 Key`);
-      return;
+    if (!keyInput && !platformHasKey) {
+      return fail(`请填写 API Key，或先在「平台账号」里填写${platformName(editing.platform) || '所属平台'}的 Key`);
     }
     if (editing.purpose === 'clean' && editing.platform && platformDef(editing.platform) && !platformDef(editing.platform)!.imageEdit.supported) {
-      setErr(`${platformName(editing.platform)}不支持图生图，请换一个平台`);
-      return;
+      return fail(`${platformName(editing.platform)}不支持图生图，请换一个平台`);
     }
     setSaving(true);
     setErr('');
@@ -507,11 +544,15 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
           (purpose === 'ocr' ? DEFAULT_OCR_PROMPT : DEFAULT_CLEAN_PROMPT),
       };
       if (keyInput) body.apiKey = keyInput;
+      else if (editing.apiKeySet) body.clearApiKey = true; // 清空了 Key = 改用平台账号的 Key
       await api.saveModel(editing.id || null, body);
       setEditing(null);
       await load();
+      setFlash('模型已保存');
     } catch (e: any) {
-      setErr(e?.message || '保存模型失败');
+      // 错误显示在弹窗里（之前显示在弹窗背后，用户看不到）
+      setTestMsg(e?.message || '保存模型失败');
+      setTestOk(false);
     } finally {
       setSaving(false);
     }
@@ -520,7 +561,7 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
   const testModel = async () => {
     if (!editing) return;
     const keyInput = String(editing.apiKey || '').trim();
-    if (!keyInput && !editing.apiKeySet && !platformDef(editing.platform)?.configured) {
+    if (!keyInput && !platformDef(editing.platform)?.configured) {
       setTestMsg('请先填写 API Key，或在「平台账号」里填写该平台的 Key');
       setTestOk(false);
       return;
@@ -590,9 +631,10 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
     setTestMsg('');
     setTestOk(null);
     setErr('');
+    // 回显已保存的值（密钥默认以密文显示，可点眼睛查看）
     const values: Record<string, string> = {};
     p.fields.forEach((f) => {
-      values[f.key] = f.secret ? '' : f.value || '';
+      values[f.key] = f.value || '';
     });
     setPEditing({ code: p.code, baseUrl: p.baseUrl || '', imageTransport: p.imageTransport || 'base64', values, clear: [] });
   };
@@ -610,6 +652,7 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
       });
       setPEditing(null);
       await load();
+      setFlash(`${platformName(pEditing.code)}的账号已保存`);
     } catch (e: any) {
       setTestMsg(e?.message || '保存失败');
       setTestOk(false);
@@ -621,9 +664,9 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
   const testPlatform = async () => {
     if (!pEditing) return;
     const def = platformDef(pEditing.code);
+    void def;
     const keyInput = String(pEditing.values.apiKey || '').trim();
-    const keySaved = !!def?.fields.find((f) => f.key === 'apiKey')?.set && !pEditing.clear.includes('apiKey');
-    if (!keyInput && !keySaved) {
+    if (!keyInput) {
       setTestMsg('请先填写 API Key');
       setTestOk(false);
       return;
@@ -697,6 +740,12 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
           </div>
         </div>
 
+        {flash ? (
+          <div className="flex items-center gap-2 p-3 rounded-2xl bg-[#F0FFF4] border border-[#34C759]/20 text-xs text-[#248A3D]">
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+            <span>{flash}</span>
+          </div>
+        ) : null}
         {err && (
           <div className="flex items-start gap-2 p-3 rounded-2xl bg-[#FFF2F2] border border-[#FFCDD2] text-xs text-[#C62828]">
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
@@ -867,6 +916,7 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
 
       {editing && (
         <ModalShell
+          size="xl"
           title={
             editing.id
               ? editingIsOcr
@@ -876,11 +926,15 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
                 ? '添加 OCR 识别模型'
                 : '添加图片处理模型'
           }
-          subtitle="选择所属平台；Key 和地址可沿用「平台账号」，也可在这里单独填写（优先使用）。AI_MOCK 下不会当作真实连通。"
+          subtitle="选好平台，点「从平台拉取模型」直接选择模型；Key 和地址默认用「平台账号」里的，这里填写则优先使用。"
           onClose={() => setEditing(null)}
-          wide
           footer={
             <>
+              {testMsg ? (
+                <div className="mr-auto max-w-[60%]">
+                  <Notice ok={testOk}>{testMsg}</Notice>
+                </div>
+              ) : null}
               <button type="button" onClick={() => setEditing(null)} className="px-3.5 py-2 text-xs text-[#86868B] cursor-pointer">
                 取消
               </button>
@@ -898,319 +952,278 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
                 className="px-4 py-2 text-xs font-semibold bg-[#0071E3] text-white rounded-xl cursor-pointer disabled:opacity-60 flex items-center gap-1.5"
               >
                 <Save className="w-3.5 h-3.5" />
-                保存
+                {saving ? '保存中…' : '保存'}
               </button>
             </>
           }
         >
-          <div>
-            <label className="block text-xs font-semibold mb-1">
-              粘贴 curl / 接口示例{' '}
-              <span className="font-normal text-[#86868B]">（可选，识别后自动填入）</span>
-            </label>
-            <textarea
-              value={editing.curlPaste || ''}
-              onChange={(e) => setEditing({ ...editing, curlPaste: e.target.value })}
-              rows={3}
-              className={inputCls + ' font-mono'}
-              placeholder="curl -X POST https://ark.cn-beijing.volces.com/api/v3/images/generations ..."
-            />
-            <div className="mt-1.5 flex justify-end">
-              <button
-                type="button"
-                onClick={applyCurl}
-                className="px-3 py-1.5 text-[11px] font-semibold border border-black/[0.08] bg-white hover:bg-[#F5F5F7] rounded-lg cursor-pointer"
-              >
-                识别并填入
-              </button>
-            </div>
-          </div>
-          <div>
-            <label className="block text-xs font-semibold mb-1">所属平台</label>
-            <select
-              value={editing.platform || ''}
-              onChange={(e) => changePlatform(e.target.value)}
-              className={inputCls}
-            >
-              {platforms.map((p) => (
-                <option key={p.code} value={p.code} disabled={!editingIsOcr && !p.imageEdit.supported}>
-                  {p.name}
-                  {!editingIsOcr && !p.imageEdit.supported ? '（不支持图生图）' : p.configured ? '（已配置 Key）' : '（未配置 Key）'}
-                </option>
-              ))}
-            </select>
-            {!editingIsOcr && editingPlatform && !editingPlatform.configured && !editing.apiKeySet ? (
-              <p className="text-[11px] text-[#C93400] mt-1.5">
-                {editingPlatform.name}还没有填写 Key：可在下面单独填写，或到「平台账号」里填写后所有模型共用。
-              </p>
-            ) : null}
-          </div>
-          <div>
-            <label className="block text-xs font-semibold mb-1">显示名称</label>
-            <input
-              value={editing.displayName || ''}
-              onChange={(e) => setEditing({ ...editing, displayName: e.target.value })}
-              className={inputCls}
-              placeholder={editingIsOcr ? '例如：识别-通义千问VL Plus' : '例如：图片处理-火山方舟 Seedream'}
-            />
-          </div>
-          <div>
-            <div className="flex items-center justify-between gap-2 mb-1">
-              <label className="block text-xs font-semibold">模型代码</label>
-              <div className="flex items-center gap-2">
-                {editingPlatform?.modelsUrl ? (
-                  <a
-                    href={editingPlatform.modelsUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-[11px] text-[#0071E3] inline-flex items-center gap-0.5 hover:underline"
-                  >
-                    开通模型 <ExternalLink className="w-3 h-3" />
-                  </a>
-                ) : null}
-                <button
-                  type="button"
-                  disabled={!editing.platform || remoteModels?.loading}
-                  onClick={() => void fetchModels()}
-                  className="px-2.5 py-1 text-[11px] font-semibold rounded-lg bg-white border border-black/[0.08] cursor-pointer hover:bg-[#F5F5F7] disabled:opacity-60"
-                  title="用当前填写的 Key（或平台账号的 Key）向平台查询可用模型"
-                >
-                  {remoteModels?.loading ? '拉取中…' : '从平台拉取模型'}
-                </button>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3">
+            {/* 左栏：用哪个模型、怎么连 */}
+            <div className="space-y-3">
+              <GroupTitle title="模型与连接" />
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold mb-1">所属平台</label>
+                  <select value={editing.platform || ''} onChange={(e) => changePlatform(e.target.value)} className={inputCls}>
+                    {platforms.map((p) => (
+                      <option key={p.code} value={p.code} disabled={!editingIsOcr && !p.imageEdit.supported}>
+                        {p.name}
+                        {!editingIsOcr && !p.imageEdit.supported ? '（不支持图生图）' : p.configured ? '（已配置 Key）' : '（未配置 Key）'}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold mb-1">显示名称</label>
+                  <input
+                    value={editing.displayName || ''}
+                    onChange={(e) => setEditing({ ...editing, displayName: e.target.value })}
+                    className={inputCls}
+                    placeholder={editingIsOcr ? '例如：识别-通义千问VL Plus' : '例如：图片处理-火山方舟'}
+                  />
+                </div>
               </div>
+              {!editingIsOcr && editingPlatform && !editingPlatform.configured && !String(editing.apiKey || '').trim() ? (
+                <Notice ok={null}>
+                  {editingPlatform.name}还没有填写 Key：可在下面单独填写，或到「平台账号」里填写后所有模型共用。
+                </Notice>
+              ) : null}
+              <div>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <label className="block text-xs font-semibold">模型代码</label>
+                  <div className="flex items-center gap-2">
+                    {editingPlatform?.modelsUrl ? (
+                      <a
+                        href={editingPlatform.modelsUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[11px] text-[#0071E3] inline-flex items-center gap-0.5 hover:underline"
+                      >
+                        去开通模型 <ExternalLink className="w-3 h-3" />
+                      </a>
+                    ) : null}
+                    <button
+                      type="button"
+                      disabled={!editing.platform || remoteModels?.loading}
+                      onClick={() => void fetchModels()}
+                      className="px-2.5 py-1 text-[11px] font-semibold rounded-lg bg-white border border-black/[0.08] cursor-pointer hover:bg-[#F5F5F7] disabled:opacity-60"
+                      title="用当前填写的 Key（或平台账号的 Key）向平台查询可用模型"
+                    >
+                      {remoteModels?.loading ? '拉取中…' : '从平台拉取模型'}
+                    </button>
+                  </div>
+                </div>
+                <input
+                  value={editing.model || ''}
+                  onChange={(e) => setEditing({ ...editing, model: e.target.value })}
+                  className={`${inputCls} font-mono`}
+                  placeholder={editingIsOcr ? 'qwen3-vl-plus' : editingPlatform?.imageEdit.suggestedModels?.[0] || ''}
+                />
+                {remoteModels && !remoteModels.loading ? (
+                  <div className="mt-1.5 p-2.5 rounded-xl bg-[#F5F5F7]/90 border border-black/[0.05] space-y-1.5">
+                    {remoteModels.error ? (
+                      <p className="text-[11px] text-[#C62828]">{remoteModels.error}</p>
+                    ) : (
+                      <>
+                        {remoteModels.note ? <p className="text-[11px] text-[#86868B]">{remoteModels.note}</p> : null}
+                        <div className="flex flex-wrap gap-1.5 max-h-[132px] overflow-y-auto">
+                          {remoteModels.list
+                            .filter((m) => (editingIsOcr ? !m.image : m.image || m.suggested))
+                            .map((m) => (
+                              <button
+                                key={m.id}
+                                type="button"
+                                onClick={() => setEditing({ ...editing, model: m.id })}
+                                className={`px-2 py-1 text-[11px] font-mono rounded-lg border cursor-pointer ${
+                                  editing.model === m.id
+                                    ? 'border-[#0071E3] bg-[#0071E3]/8 text-[#0071E3]'
+                                    : 'border-black/[0.08] bg-white text-[#1D1D1F] hover:bg-[#F5F5F7]'
+                                }`}
+                              >
+                                {m.id}
+                                {m.suggested ? ' · 推荐' : ''}
+                              </button>
+                            ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ) : !editingIsOcr && editingPlatform?.imageEdit.suggestedModels?.length ? (
+                  <p className="text-[11px] text-[#86868B] mt-1">推荐：{editingPlatform.imageEdit.suggestedModels.join('、')}</p>
+                ) : null}
+              </div>
+              <div>
+                <label className="block text-xs font-semibold mb-1">
+                  API Key{' '}
+                  <span className="font-normal text-[#86868B]">
+                    {editingPlatform?.configured ? `（可不填，留空使用${editingPlatform.name}平台账号的 Key）` : '（必填，或到「平台账号」填写）'}
+                  </span>
+                </label>
+                <SecretInput
+                  value={editing.apiKey || ''}
+                  onChange={(v) => setEditing({ ...editing, apiKey: v })}
+                  placeholder={editingPlatform?.configured ? '留空 = 使用平台账号的 Key' : '粘贴 API Key'}
+                  className={inputCls}
+                />
+              </div>
+              <div className={`grid gap-3 ${editingIsOcr ? 'grid-cols-1' : 'grid-cols-2'}`}>
+                <div>
+                  <label className="block text-xs font-semibold mb-1">
+                    Base URL {!editingIsOcr ? <span className="font-normal text-[#86868B]">（可不填）</span> : null}
+                  </label>
+                  <input
+                    value={editing.baseUrl || ''}
+                    onChange={(e) => setEditing({ ...editing, baseUrl: e.target.value })}
+                    className={`${inputCls} font-mono`}
+                    placeholder={
+                      editingIsOcr ? DEFAULT_OCR_BASE : editingPlatform?.baseUrl || editingPlatform?.defaultBaseUrl || ''
+                    }
+                  />
+                </div>
+                {!editingIsOcr ? (
+                  <div>
+                    <label className="block text-xs font-semibold mb-1">
+                      输出尺寸 <span className="font-normal text-[#86868B]">（可不填）</span>
+                    </label>
+                    <input
+                      value={editing.outputSize || ''}
+                      onChange={(e) => setEditing({ ...editing, outputSize: e.target.value })}
+                      className={`${inputCls} font-mono`}
+                      placeholder="自动：按原图比例"
+                    />
+                  </div>
+                ) : null}
+              </div>
+              <details className="rounded-xl border border-black/[0.06] bg-[#F5F5F7]/60 px-3 py-2">
+                <summary className="text-[11px] font-semibold text-[#6E6E73] cursor-pointer select-none">
+                  有平台给的 curl 示例？粘贴后自动填入
+                </summary>
+                <textarea
+                  value={editing.curlPaste || ''}
+                  onChange={(e) => setEditing({ ...editing, curlPaste: e.target.value })}
+                  rows={3}
+                  className={inputCls + ' font-mono mt-2'}
+                  placeholder="curl -X POST https://... -H 'Authorization: Bearer ...' -d '{...}'"
+                />
+                <div className="mt-1.5 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={applyCurl}
+                    className="px-3 py-1.5 text-[11px] font-semibold border border-black/[0.08] bg-white hover:bg-[#F5F5F7] rounded-lg cursor-pointer"
+                  >
+                    识别并填入
+                  </button>
+                </div>
+              </details>
             </div>
-            {remoteModels && !remoteModels.loading ? (
-              <div className="mb-1.5 p-2.5 rounded-xl bg-[#F5F5F7]/90 border border-black/[0.05] space-y-1.5">
-                {remoteModels.error ? (
-                  <p className="text-[11px] text-[#C62828]">{remoteModels.error}</p>
+
+            {/* 右栏：怎么处理、多少钱 */}
+            <div className="space-y-3">
+              <GroupTitle title="处理要求与费用" />
+              <div>
+                <label className="block text-xs font-semibold mb-1">
+                  提示词 <span className="font-normal text-[#86868B]">（族谱业务默认已填，一般不用改）</span>
+                </label>
+                <textarea
+                  value={editing.prompt || ''}
+                  onChange={(e) => setEditing({ ...editing, prompt: e.target.value })}
+                  rows={7}
+                  className={inputCls + ' leading-relaxed'}
+                  placeholder={editingIsOcr ? DEFAULT_OCR_PROMPT : DEFAULT_CLEAN_PROMPT}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3 items-end">
+                <div>
+                  <label className="block text-xs font-semibold mb-1">计费方式</label>
+                  <div className="flex p-1 rounded-xl bg-[#F5F5F7] border border-black/[0.04]">
+                    {(['token', 'image'] as const).map((b) => (
+                      <button
+                        key={b}
+                        type="button"
+                        onClick={() => setEditing({ ...editing, billing: b })}
+                        className={`flex-1 py-1.5 text-xs font-semibold rounded-lg cursor-pointer ${
+                          editingBilling === b ? 'bg-white text-[#0071E3] shadow-sm' : 'text-[#86868B]'
+                        }`}
+                      >
+                        {b === 'token' ? '按 Token' : '按张'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {editingBilling === 'image' ? (
+                  <div>
+                    <label className="block text-xs font-semibold mb-1">单价（元/张）</label>
+                    <input
+                      value={editing.priceImage ?? ''}
+                      onChange={(e) => setEditing({ ...editing, priceImage: e.target.value })}
+                      className={`${inputCls} font-mono`}
+                      placeholder="以平台价格页为准"
+                    />
+                  </div>
                 ) : (
-                  <>
-                    {remoteModels.note ? <p className="text-[11px] text-[#86868B]">{remoteModels.note}</p> : null}
-                    <div className="flex flex-wrap gap-1.5 max-h-[120px] overflow-y-auto">
-                      {remoteModels.list
-                        .filter((m) => (editingIsOcr ? !m.image : m.image || m.suggested))
-                        .map((m) => (
-                          <button
-                            key={m.id}
-                            type="button"
-                            onClick={() => setEditing({ ...editing, model: m.id })}
-                            className={`px-2 py-1 text-[11px] font-mono rounded-lg border cursor-pointer ${
-                              editing.model === m.id
-                                ? 'border-[#0071E3] bg-[#0071E3]/8 text-[#0071E3]'
-                                : 'border-black/[0.08] bg-white text-[#1D1D1F] hover:bg-[#F5F5F7]'
-                            }`}
-                          >
-                            {m.id}
-                            {m.suggested ? ' · 推荐' : ''}
-                          </button>
-                        ))}
-                    </div>
-                  </>
+                  <div />
                 )}
               </div>
-            ) : null}
-            <input
-              value={editing.model || ''}
-              onChange={(e) => setEditing({ ...editing, model: e.target.value })}
-              className={`${inputCls} font-mono`}
-              placeholder={editingIsOcr ? 'qwen3-vl-plus' : editingPlatform?.imageEdit.suggestedModels?.[0] || 'doubao-seedream-5-0-pro-260628'}
-              list={!editingIsOcr ? 'clean-model-suggest' : undefined}
-            />
-            {!editingIsOcr && editingPlatform?.imageEdit.suggestedModels?.length ? (
-              <>
-                <datalist id="clean-model-suggest">
-                  {editingPlatform.imageEdit.suggestedModels.map((m) => (
-                    <option key={m} value={m} />
-                  ))}
-                </datalist>
-                <p className="text-[11px] text-[#86868B] mt-1">
-                  推荐：{editingPlatform.imageEdit.suggestedModels.join('、')}（以平台控制台已开通的为准）
-                </p>
-              </>
-            ) : null}
-          </div>
-          <div>
-            <label className="block text-xs font-semibold mb-1">
-              Base URL{' '}
-              {!editingIsOcr ? <span className="font-normal text-[#86868B]">（可选，留空使用平台账号的地址）</span> : null}
-            </label>
-            <input
-              value={editing.baseUrl || ''}
-              onChange={(e) => setEditing({ ...editing, baseUrl: e.target.value })}
-              className={`${inputCls} font-mono`}
-              placeholder={
-                editingIsOcr
-                  ? DEFAULT_OCR_BASE
-                  : editingPlatform?.baseUrl || editingPlatform?.defaultBaseUrl || 'https://ark.cn-beijing.volces.com/api/v3'
-              }
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-semibold mb-1">
-              API Key{' '}
-              <span className="font-normal text-[#86868B]">
-                {editing.id && editing.apiKeySet
-                  ? '（留空则保留原值）'
-                  : editingPlatform?.configured
-                    ? `（可选，留空使用${editingPlatform.name}平台账号的 Key）`
-                    : '（必填，或到「平台账号」填写）'}
-              </span>
-            </label>
-            <input
-              type="password"
-              value={editing.apiKey || ''}
-              onChange={(e) => setEditing({ ...editing, apiKey: e.target.value })}
-              placeholder="sk-..."
-              className={`${inputCls} font-mono`}
-              autoComplete="off"
-            />
-            {editing.id && editing.apiKeySet ? (
-              <p className="text-[11px] text-[#86868B] mt-1.5">当前已配置：{editing.apiKeyMasked}</p>
-            ) : null}
-          </div>
-          {!editingIsOcr ? (
-            <div>
-              <label className="block text-xs font-semibold mb-1">
-                输出尺寸 <span className="font-normal text-[#86868B]">（可选，留空按原图比例自动计算）</span>
-              </label>
-              <input
-                value={editing.outputSize || ''}
-                onChange={(e) => setEditing({ ...editing, outputSize: e.target.value })}
-                className={`${inputCls} font-mono`}
-                placeholder="例如 2048x2048 或 2K"
-              />
-              <p className="text-[11px] text-[#86868B] mt-1">
-                自动计算时按原图宽高比、在平台允许的像素范围内取尽量清晰的尺寸；结果图会缩放回原图大小，便于对照。
-              </p>
-            </div>
-          ) : null}
-          <div>
-            <label className="block text-xs font-semibold mb-1">
-              提示词 <span className="font-normal text-[#86868B]">（族谱业务默认已填，可按模型微调）</span>
-            </label>
-            <textarea
-              value={editing.prompt || ''}
-              onChange={(e) => setEditing({ ...editing, prompt: e.target.value })}
-              rows={4}
-              className={inputCls}
-              placeholder={editingIsOcr ? DEFAULT_OCR_PROMPT : DEFAULT_CLEAN_PROMPT}
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-semibold mb-1">计费方式</label>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => setEditing({ ...editing, billing: 'token' })}
-                className={`flex-1 px-3 py-2 text-xs font-semibold rounded-xl border cursor-pointer ${
-                  editingBilling === 'token'
-                    ? 'border-[#0071E3] bg-[#0071E3]/8 text-[#0071E3]'
-                    : 'border-black/[0.08] bg-white text-[#6E6E73]'
-                }`}
-              >
-                按 Token
-              </button>
-              <button
-                type="button"
-                onClick={() => setEditing({ ...editing, billing: 'image' })}
-                className={`flex-1 px-3 py-2 text-xs font-semibold rounded-xl border cursor-pointer ${
-                  editingBilling === 'image'
-                    ? 'border-[#0071E3] bg-[#0071E3]/8 text-[#0071E3]'
-                    : 'border-black/[0.08] bg-white text-[#6E6E73]'
-                }`}
-              >
-                按张
-              </button>
-            </div>
-          </div>
-          {editingBilling === 'image' ? (
-            <div>
-              <label className="block text-xs font-semibold mb-1">单价（元/张）</label>
-              <input
-                value={editing.priceImage ?? ''}
-                onChange={(e) => setEditing({ ...editing, priceImage: e.target.value })}
-                className={`${inputCls} font-mono`}
-                placeholder="0.04"
-              />
-            </div>
-          ) : (
-            <>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold mb-1">输入单价（元/千 tokens）</label>
-                  <input
-                    value={editing.priceIn ?? ''}
-                    onChange={(e) => setEditing({ ...editing, priceIn: e.target.value })}
-                    className={`${inputCls} font-mono`}
-                    placeholder="0.003"
-                  />
+              {editingBilling === 'token' ? (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold mb-1">输入单价（元/千 tokens）</label>
+                    <input
+                      value={editing.priceIn ?? ''}
+                      onChange={(e) => setEditing({ ...editing, priceIn: e.target.value })}
+                      className={`${inputCls} font-mono`}
+                      placeholder="0.003"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold mb-1">输出单价（元/千 tokens）</label>
+                    <input
+                      value={editing.priceOut ?? ''}
+                      onChange={(e) => setEditing({ ...editing, priceOut: e.target.value })}
+                      className={`${inputCls} font-mono`}
+                      placeholder="0.009"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold mb-1">预估输入 tokens/页</label>
+                    <input
+                      type="number"
+                      value={editing.avgTokensIn ?? 3000}
+                      onChange={(e) => setEditing({ ...editing, avgTokensIn: Number(e.target.value) || 0 })}
+                      className={`${inputCls} font-mono`}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold mb-1">预估输出 tokens/页</label>
+                    <input
+                      type="number"
+                      value={editing.avgTokensOut ?? 1000}
+                      onChange={(e) => setEditing({ ...editing, avgTokensOut: Number(e.target.value) || 0 })}
+                      className={`${inputCls} font-mono`}
+                    />
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-xs font-semibold mb-1">输出单价（元/千 tokens）</label>
+              ) : null}
+              <div className="flex items-center gap-5 text-xs pt-1">
+                <label className="flex items-center gap-2 cursor-pointer">
                   <input
-                    value={editing.priceOut ?? ''}
-                    onChange={(e) => setEditing({ ...editing, priceOut: e.target.value })}
-                    className={`${inputCls} font-mono`}
-                    placeholder="0.009"
+                    type="checkbox"
+                    checked={!!editing.enabled}
+                    onChange={(e) => setEditing({ ...editing, enabled: e.target.checked ? 1 : 0 })}
                   />
-                </div>
+                  启用
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={!!editing.isDefault}
+                    onChange={(e) => setEditing({ ...editing, isDefault: e.target.checked ? 1 : 0 })}
+                  />
+                  设为该类默认（新建任务时默认选中）
+                </label>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold mb-1">预估输入 tokens/页</label>
-                  <input
-                    type="number"
-                    value={editing.avgTokensIn ?? 3000}
-                    onChange={(e) => setEditing({ ...editing, avgTokensIn: Number(e.target.value) || 0 })}
-                    className={`${inputCls} font-mono`}
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold mb-1">预估输出 tokens/页</label>
-                  <input
-                    type="number"
-                    value={editing.avgTokensOut ?? 1000}
-                    onChange={(e) => setEditing({ ...editing, avgTokensOut: Number(e.target.value) || 0 })}
-                    className={`${inputCls} font-mono`}
-                  />
-                </div>
-              </div>
-            </>
-          )}
-          <div className="flex items-center gap-4 text-xs pt-1">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={!!editing.enabled}
-                onChange={(e) => setEditing({ ...editing, enabled: e.target.checked ? 1 : 0 })}
-              />
-              启用
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={!!editing.isDefault}
-                onChange={(e) => setEditing({ ...editing, isDefault: e.target.checked ? 1 : 0 })}
-              />
-              设为该类默认
-            </label>
-          </div>
-          {testMsg ? (
-            <div
-              className={`flex items-start gap-2 text-[11px] rounded-xl px-3 py-2 ${
-                testOk === false ? 'bg-[#FFF2F2] text-[#C62828]' : testOk === true ? 'bg-[#F0FFF4] text-[#248A3D]' : 'bg-[#F5F5F7] text-[#6E6E73]'
-              }`}
-            >
-              {testOk === false ? (
-                <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-              ) : testOk === true ? (
-                <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-              ) : (
-                <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-              )}
-              <span className="break-all">{testMsg}</span>
             </div>
-          ) : null}
+          </div>
         </ModalShell>
       )}
 
@@ -1218,12 +1231,27 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
 
       {pEditing && pDef && (
         <ModalShell
+          size="xl"
           title={`${pDef.name} · 平台账号`}
-          subtitle="按官方文档填写。密钥加密保存，再次编辑时留空表示保留原值。"
+          subtitle="每一项下面都写了去哪里找，点「直达」即可打开对应页面。已保存的内容会回显，密钥默认以圆点显示，点眼睛可查看。"
           onClose={() => setPEditing(null)}
-          wide
+          headerExtra={
+            <div className="hidden md:flex items-center gap-3 text-[11px]">
+              <a href={pDef.docsUrl} target="_blank" rel="noreferrer" className="text-[#0071E3] inline-flex items-center gap-1 hover:underline">
+                接入文档 <ExternalLink className="w-3 h-3" />
+              </a>
+              <a href={pDef.consoleUrl} target="_blank" rel="noreferrer" className="text-[#0071E3] inline-flex items-center gap-1 hover:underline">
+                控制台 <ExternalLink className="w-3 h-3" />
+              </a>
+            </div>
+          }
           footer={
             <>
+              {testMsg ? (
+                <div className="mr-auto max-w-[60%]">
+                  <Notice ok={testOk}>{testMsg}</Notice>
+                </div>
+              ) : null}
               <button type="button" onClick={() => setPEditing(null)} className="px-3.5 py-2 text-xs text-[#86868B] cursor-pointer">
                 取消
               </button>
@@ -1241,148 +1269,145 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
                 className="px-4 py-2 text-xs font-semibold bg-[#0071E3] text-white rounded-xl cursor-pointer disabled:opacity-60 flex items-center gap-1.5"
               >
                 <Save className="w-3.5 h-3.5" />
-                保存
+                {saving ? '保存中…' : '保存'}
               </button>
             </>
           }
         >
-          <div className="flex items-center gap-3 text-[11px]">
-            <a href={pDef.docsUrl} target="_blank" rel="noreferrer" className="text-[#0071E3] inline-flex items-center gap-1 hover:underline">
-              官方文档 <ExternalLink className="w-3 h-3" />
-            </a>
-            <a href={pDef.consoleUrl} target="_blank" rel="noreferrer" className="text-[#0071E3] inline-flex items-center gap-1 hover:underline">
-              控制台 <ExternalLink className="w-3 h-3" />
-            </a>
-            {pDef.modelsUrl ? (
-              <a href={pDef.modelsUrl} target="_blank" rel="noreferrer" className="text-[#0071E3] inline-flex items-center gap-1 hover:underline">
-                开通 / 管理模型 <ExternalLink className="w-3 h-3" />
-              </a>
-            ) : null}
-          </div>
-          {!pDef.imageEdit.supported ? (
-            <div className="flex items-start gap-2 p-3 rounded-2xl bg-[#F5F5F7] border border-black/[0.04] text-[11px] text-[#6E6E73]">
-              <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-              <span>不能用于图片处理：{pDef.imageEdit.reason}</span>
-            </div>
-          ) : null}
-          <div>
-            <label className="block text-xs font-semibold mb-1">
-              服务地址 <span className="font-normal text-[#86868B]">（留空使用官方默认地址）</span>
-            </label>
-            <input
-              value={pEditing.baseUrl}
-              onChange={(e) => setPEditing({ ...pEditing, baseUrl: e.target.value })}
-              className={`${inputCls} font-mono`}
-              placeholder={pDef.defaultBaseUrl}
-            />
-            {pDef.baseUrlHelp ? <p className="text-[11px] text-[#86868B] mt-1">{pDef.baseUrlHelp}</p> : null}
-          </div>
-          {[...pDef.fields.filter((f) => f.scope === 'general'), ...pDef.fields.filter((f) => f.scope === 'ocr')].map((f, idx, arr) => {
-            const cleared = pEditing.clear.includes(f.key);
-            const firstOcr = f.scope === 'ocr' && (idx === 0 || arr[idx - 1].scope !== 'ocr');
+          {(() => {
+            const fieldRow = (f: PlatformField) => (
+              <div key={f.key}>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <label className="block text-xs font-semibold">{f.label}</label>
+                  {f.link ? (
+                    <a
+                      href={f.link}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[11px] text-[#0071E3] font-semibold inline-flex items-center gap-0.5 hover:underline shrink-0"
+                    >
+                      直达获取页 <ExternalLink className="w-3 h-3" />
+                    </a>
+                  ) : null}
+                </div>
+                {f.secret ? (
+                  <SecretInput
+                    value={pEditing.values[f.key] || ''}
+                    onChange={(v) => setPEditing({ ...pEditing, values: { ...pEditing.values, [f.key]: v } })}
+                    placeholder={f.placeholder || '粘贴到这里'}
+                    className={inputCls}
+                  />
+                ) : (
+                  <input
+                    value={pEditing.values[f.key] || ''}
+                    onChange={(e) => setPEditing({ ...pEditing, values: { ...pEditing.values, [f.key]: e.target.value } })}
+                    placeholder={f.placeholder || ''}
+                    className={`${inputCls} font-mono`}
+                    autoComplete="off"
+                  />
+                )}
+                {f.howTo ? <p className="text-[11px] text-[#86868B] mt-1 leading-relaxed">在哪里找：{f.howTo}</p> : null}
+                {f.help ? <p className="text-[11px] text-[#86868B] mt-0.5">{f.help}</p> : null}
+              </div>
+            );
+            const general = pDef.fields.filter((f) => f.scope === 'general');
+            const ocr = pDef.fields.filter((f) => f.scope === 'ocr');
             return (
-              <React.Fragment key={f.key}>
-                {firstOcr ? (
-                  <div className="pt-2 border-t border-black/[0.06]">
-                    <div className="text-xs font-semibold text-[#1D1D1F]">文字识别 OCR 接口</div>
-                    <p className="text-[11px] text-[#86868B] mt-0.5">后续接入传统 OCR 时使用，现在可以先不填</p>
-                  </div>
-                ) : null}
-                <div>
-                  <label className="block text-xs font-semibold mb-1">
-                    {f.label}{' '}
-                    {f.secret && f.set && !cleared ? (
-                      <span className="font-normal text-[#86868B]">（已配置 {f.masked}，留空保留）</span>
-                    ) : null}
-                  </label>
-                  <div className="flex items-center gap-2">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
+                <div className="space-y-3">
+                  <GroupTitle
+                    title="大模型调用（必填）"
+                    hint={pDef.imageEdit.supported ? '用于图片处理（图生图）和后续的大模型文字识别' : '用于后续的大模型文字识别'}
+                  />
+                  {!pDef.imageEdit.supported ? <Notice ok={null}>不能用于图片处理：{pDef.imageEdit.reason}</Notice> : null}
+                  {general.map(fieldRow)}
+                  <div>
+                    <label className="block text-xs font-semibold mb-1">
+                      服务地址 <span className="font-normal text-[#86868B]">（一般不用填）</span>
+                    </label>
                     <input
-                      type={f.secret ? 'password' : 'text'}
-                      value={pEditing.values[f.key] || ''}
-                      onChange={(e) =>
-                        setPEditing({
-                          ...pEditing,
-                          values: { ...pEditing.values, [f.key]: e.target.value },
-                          clear: pEditing.clear.filter((k) => k !== f.key),
-                        })
-                      }
-                      placeholder={f.placeholder || ''}
+                      value={pEditing.baseUrl}
+                      onChange={(e) => setPEditing({ ...pEditing, baseUrl: e.target.value })}
                       className={`${inputCls} font-mono`}
-                      autoComplete="off"
+                      placeholder={pDef.defaultBaseUrl}
                     />
-                    {f.secret && f.set && !cleared ? (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setPEditing({
-                            ...pEditing,
-                            values: { ...pEditing.values, [f.key]: '' },
-                            clear: [...pEditing.clear, f.key],
-                          })
-                        }
-                        className="px-2.5 py-2 text-[11px] font-semibold rounded-lg text-[#FF3B30] border border-[#FF3B30]/25 bg-white cursor-pointer shrink-0"
-                      >
-                        清除
-                      </button>
-                    ) : null}
+                    {pDef.baseUrlHelp ? <p className="text-[11px] text-[#86868B] mt-1 leading-relaxed">{pDef.baseUrlHelp}</p> : null}
                   </div>
-                  {cleared ? <p className="text-[11px] text-[#C93400] mt-1">保存后将清除该项</p> : null}
-                  {f.howTo || f.link ? (
-                    <p className="text-[11px] text-[#86868B] mt-1 leading-relaxed">
-                      {f.howTo ? <>在哪里找：{f.howTo}</> : null}
-                      {f.link ? (
-                        <a
-                          href={f.link}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="ml-1.5 text-[#0071E3] font-semibold inline-flex items-center gap-0.5 hover:underline"
-                        >
-                          直达获取页 <ExternalLink className="w-3 h-3" />
-                        </a>
-                      ) : null}
+                  {pDef.imageEdit.supported ? (
+                    <div>
+                      <label className="block text-xs font-semibold mb-1">图片传输方式</label>
+                      <div className="flex p-1 rounded-xl bg-[#F5F5F7] border border-black/[0.04]">
+                        {(['base64', 'url'] as const).map((t) => (
+                          <button
+                            key={t}
+                            type="button"
+                            onClick={() => setPEditing({ ...pEditing, imageTransport: t })}
+                            className={`flex-1 py-1.5 text-xs font-semibold rounded-lg cursor-pointer ${
+                              pEditing.imageTransport === t ? 'bg-white text-[#0071E3] shadow-sm' : 'text-[#86868B]'
+                            }`}
+                          >
+                            {t === 'base64' ? '直接上传（默认）' : '公网链接'}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-[11px] text-[#86868B] mt-1 leading-relaxed">
+                        {pDef.imageEdit.base64Documented
+                          ? '官方支持直接上传图片，保持默认即可。'
+                          : '官方文档只给了图片链接的示例：如处理时报「图片无法读取」，改为「公网链接」，并在「通用设置」填写本服务的公网地址。'}
+                      </p>
+                    </div>
+                  ) : null}
+                  {pDef.modelsUrl ? (
+                    <p className="text-[11px] text-[#86868B]">
+                      首次使用记得开通模型：
+                      <a href={pDef.modelsUrl} target="_blank" rel="noreferrer" className="ml-1 text-[#0071E3] font-semibold inline-flex items-center gap-0.5 hover:underline">
+                        去开通 <ExternalLink className="w-3 h-3" />
+                      </a>
                     </p>
                   ) : null}
-                  {f.help ? <p className="text-[11px] text-[#86868B] mt-1">{f.help}</p> : null}
                 </div>
-                {f.key === 'apiKey' && pDef.imageEdit.supported ? (
-                  <div>
-                    <label className="block text-xs font-semibold mb-1">图片传输方式</label>
-                    <div className="flex gap-2">
-                      {(['base64', 'url'] as const).map((t) => (
-                        <button
-                          key={t}
-                          type="button"
-                          onClick={() => setPEditing({ ...pEditing, imageTransport: t })}
-                          className={`flex-1 px-3 py-2 text-xs font-semibold rounded-xl border cursor-pointer ${
-                            pEditing.imageTransport === t
-                              ? 'border-[#0071E3] bg-[#0071E3]/8 text-[#0071E3]'
-                              : 'border-black/[0.08] bg-white text-[#6E6E73]'
-                          }`}
-                        >
-                          {t === 'base64' ? 'Base64 直接上传（默认）' : '公网链接'}
-                        </button>
+                {ocr.length ? (
+                  <div className="space-y-3 md:pl-6 md:border-l md:border-black/[0.06]">
+                    <GroupTitle title="文字识别 OCR 接口（可后填）" hint="后续接入传统 OCR 时才用到，现在可以先不填" />
+                    {ocr.map(fieldRow)}
+                  </div>
+                ) : pDef.guide ? (
+                  <div className="space-y-3 md:pl-6 md:border-l md:border-black/[0.06]">
+                    <GroupTitle title={`怎么获取${pDef.name}的 API Key`} />
+                    <ol className="space-y-2">
+                      {pDef.guide.steps.map((st, i) => (
+                        <li key={i} className="flex items-start gap-2.5 text-xs text-[#1D1D1F] leading-relaxed">
+                          <span className="w-5 h-5 rounded-full bg-[#F5F5F7] border border-black/[0.06] text-[10px] font-semibold flex items-center justify-center shrink-0">
+                            {i + 1}
+                          </span>
+                          <span>{st}</span>
+                        </li>
                       ))}
+                    </ol>
+                    <div className="flex flex-wrap gap-2">
+                      <a
+                        href={pDef.guide.keyUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="px-3 py-2 text-[11px] font-semibold rounded-xl bg-[#0071E3] text-white inline-flex items-center gap-1"
+                      >
+                        打开「API Key」页面 <ExternalLink className="w-3 h-3" />
+                      </a>
+                      <a
+                        href={pDef.guide.billingUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="px-3 py-2 text-[11px] font-semibold rounded-xl bg-white border border-black/[0.08] text-[#1D1D1F] inline-flex items-center gap-1"
+                      >
+                        查看余额 / 充值 <ExternalLink className="w-3 h-3" />
+                      </a>
                     </div>
-                    <p className="text-[11px] text-[#86868B] mt-1">
-                      {pDef.imageEdit.base64Documented
-                        ? '官方支持 Base64，保持默认即可。'
-                        : '官方文档示例只给了图片链接：如处理时报「图片无法读取 / 格式错误」，请改为「公网链接」，并在「通用设置」填写本服务的公网访问地址。'}
-                    </p>
+                    {pDef.guide.modelTip ? <Notice ok={null}>{pDef.guide.modelTip}</Notice> : null}
                   </div>
                 ) : null}
-              </React.Fragment>
+              </div>
             );
-          })}
-          {testMsg ? (
-            <div
-              className={`flex items-start gap-2 text-[11px] rounded-xl px-3 py-2 ${
-                testOk === false ? 'bg-[#FFF2F2] text-[#C62828]' : testOk === true ? 'bg-[#F0FFF4] text-[#248A3D]' : 'bg-[#F5F5F7] text-[#6E6E73]'
-              }`}
-            >
-              {testOk === true ? <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" /> : <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />}
-              <span className="break-all">{testMsg}</span>
-            </div>
-          ) : null}
+          })()}
         </ModalShell>
       )}
     </div>

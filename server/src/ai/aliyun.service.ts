@@ -362,14 +362,15 @@ export class AliyunService {
     const o = (override || '').trim();
     const sep = platform === 'aliyun' ? '*' : platform === 'tencent' ? ':' : 'x';
     if (o) {
-      if (/^[124]K$/i.test(o)) return o.toUpperCase();
+      if (/^(1|1\.5|2|3|4)K$/i.test(o)) return o.toUpperCase();
       const m = o.match(/^(\d{2,5})\s*[x*:×]\s*(\d{2,5})$/i);
       if (m) return `${m[1]}${sep}${m[2]}`;
     }
     if (platform === 'baidu') return null; // 官方文档未给出 size 参数，用模型默认（保持输入比例）
     const limits: Record<string, { min: number; max: number; side: number; mult: number }> = {
-      // Seedream：总像素 [1280x720, 4096x4096]，取 ≥2K 以保证小字清楚
-      ark: { min: 2048 * 1800, max: 3072 * 3072, side: 4096, mult: 16 },
+      // Seedream：官方范围按模型不同（5.0 pro 921600~4624220；5.0 lite 3686400~10404496；4.x ≤ 4096²），
+      // 取 2048² 附近，所有 Seedream 模型都在范围内，又足够看清小字
+      ark: { min: 2048 * 2048, max: 2048 * 2048, side: 4096, mult: 16 },
       // qwen-image：总像素 [512x512, 2048x2048]，16 的倍数
       aliyun: { min: 512 * 512, max: 2048 * 2048, side: 3072, mult: 16 },
       // 混元生图 3.0：单边 ≤ 2048

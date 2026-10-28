@@ -830,210 +830,228 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
         </div>
       )}
 
-      {/* Create Task Modal — path pick + genealogy fields */}
+      {/* Create Task Modal — 宽版两栏：左「谱书信息」，右「处理方式」，底部常驻费用预估 */}
       {showCreateModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm animate-fade-in">
-          <div className="bg-white rounded-3xl border border-black/[0.08] shadow-[0_24px_64px_rgba(0,0,0,0.18)] max-w-xl w-full p-6 overflow-hidden animate-apple-in max-h-[92vh] overflow-y-auto">
-            <div className="flex items-center justify-between pb-3.5 border-b border-black/[0.06] mb-4">
+          <div className="bg-white rounded-3xl border border-black/[0.08] shadow-[0_24px_64px_rgba(0,0,0,0.18)] max-w-[960px] w-full max-h-[calc(100vh-32px)] flex flex-col animate-apple-in">
+            <div className="flex items-start justify-between px-6 pt-5 pb-4 border-b border-black/[0.06] shrink-0">
               <div>
-                <h3 className="text-base font-bold text-[#1D1D1F]">
-                  新建族谱图片处理任务
-                </h3>
-                <p className="text-xs text-[#86868B] mt-0.5">
-                  旧谱复印页处理成白底黑字 → 供后续 OCR 识别与数据化
-                </p>
+                <h3 className="text-base font-bold text-[#1D1D1F]">新建族谱图片处理任务</h3>
+                <p className="text-xs text-[#86868B] mt-0.5">一本谱书建一个任务：把旧谱复印页处理成白底黑字，供后续 OCR 识别与数据化</p>
               </div>
               <button
                 onClick={() => setShowCreateModal(false)}
-                className="text-[#86868B] hover:text-[#1D1D1F] text-xl font-light p-1 cursor-pointer"
+                className="text-[#86868B] hover:text-[#1D1D1F] text-xl font-light p-1 cursor-pointer leading-none"
+                aria-label="关闭"
               >
                 ×
               </button>
             </div>
 
-            <div className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-[#1D1D1F] mb-1">
-                  族谱名称 <span className="text-[#FF3B30]">*</span>
-                </label>
-                <input
-                  type="text"
-                  value={taskName}
-                  onChange={(e) => setTaskName(e.target.value)}
-                  placeholder="例如：《××族谱》卷×"
-                  className="w-full px-3.5 py-2.5 text-xs bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
-                />
-              </div>
+            <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
+                {/* 左栏：谱书信息 */}
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full bg-[#0071E3] text-white text-[10px] font-bold flex items-center justify-center">1</span>
+                    <span className="text-sm font-semibold text-[#1D1D1F]">谱书信息</span>
+                  </div>
+                  <div className="grid grid-cols-[1fr_140px] gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-[#1D1D1F] mb-1">
+                        族谱名称 <span className="text-[#FF3B30]">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={taskName}
+                        onChange={(e) => setTaskName(e.target.value)}
+                        placeholder="例如：《××族谱》卷×"
+                        autoFocus
+                        className="w-full px-3.5 py-2.5 text-xs bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-[#1D1D1F] mb-1">
+                        姓氏 <span className="text-[#FF3B30]">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={genealogyNote}
+                        onChange={(e) => setGenealogyNote(e.target.value)}
+                        placeholder="例如：吴"
+                        className="w-full px-3.5 py-2.5 text-xs bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-[#1D1D1F] mb-1">
+                      图片文件夹 <span className="text-[#FF3B30]">*</span>
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={folderPath}
+                        onChange={(e) => setFolderPath(e.target.value)}
+                        placeholder="粘贴或输入服务器上的文件夹路径"
+                        className="flex-1 min-w-0 px-3.5 py-2.5 text-xs bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-mono text-[#1D1D1F]"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void openFolderPicker()}
+                        className="px-3 py-2.5 text-xs font-semibold bg-[#E5E5EA] hover:bg-[#D1D1D6] text-[#1D1D1F] rounded-xl cursor-pointer whitespace-nowrap flex items-center gap-1.5"
+                      >
+                        <Folder className="w-3.5 h-3.5" />
+                        选择目录
+                      </button>
+                    </div>
+                    <p className="text-[11px] text-[#86868B] mt-1">
+                      {pageCountPreview ? `文件夹里共 ${pageCountPreview} 张图片` : '选择目录后会显示图片张数，并据此预估费用'}
+                    </p>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-[#1D1D1F] mb-1">任务说明</label>
+                    <textarea
+                      value={taskDescription}
+                      onChange={(e) => setTaskDescription(e.target.value)}
+                      rows={4}
+                      className="w-full px-3.5 py-2.5 text-xs bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium resize-y leading-relaxed"
+                    />
+                  </div>
+                </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-[#1D1D1F] mb-1">
-                  任务说明
-                </label>
-                <textarea
-                  value={taskDescription}
-                  onChange={(e) => setTaskDescription(e.target.value)}
-                  rows={2}
-                  className="w-full px-3.5 py-2.5 text-xs bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium resize-y min-h-[56px]"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-[#1D1D1F] mb-1">
-                  姓氏 <span className="text-[#FF3B30]">*</span>
-                </label>
-                <input
-                  type="text"
-                  value={genealogyNote}
-                  onChange={(e) => setGenealogyNote(e.target.value)}
-                  placeholder="例如：吴氏 · 延陵支 · 卷三"
-                  className="w-full px-3.5 py-2.5 text-xs bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
-                />
-              </div>
-
-              
-
-              <div className="p-3.5 rounded-2xl bg-[#F5F5F7]/90 border border-black/[0.05] space-y-3">
-                <label className={`flex items-start gap-2.5 ${cleanModels.length ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'}`}>
-                  <input
-                    type="checkbox"
-                    className="mt-0.5"
-                    checked={useAiClean}
-                    disabled={!cleanModels.length}
-                    onChange={(e) => {
-                      setUseAiClean(e.target.checked);
-                    }}
-                  />
-                  <span className="min-w-0">
-                    <span className="block text-xs font-semibold text-[#1D1D1F]">使用图生图大模型处理图片</span>
-                    <span className="block text-[11px] text-[#86868B] mt-0.5 leading-relaxed">
-                      {cleanModels.length
-                        ? '勾选后整本不再用现有算法，每页完全由所选大模型处理成白底黑字；不勾选则用现有算法。审核页可对单页改用大模型。'
-                        : '还没有配置图片处理大模型。'}
-                      {!cleanModels.length && onOpenSetup ? (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.preventDefault();
-                            onOpenSetup(null, undefined, () => void loadCleanModels());
-                          }}
-                          className="ml-1 text-[#0071E3] font-semibold underline cursor-pointer"
+                {/* 右栏：处理方式 */}
+                <div className="space-y-4 md:pl-8 md:border-l md:border-black/[0.06]">
+                  <div className="flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full bg-[#0071E3] text-white text-[10px] font-bold flex items-center justify-center">2</span>
+                    <span className="text-sm font-semibold text-[#1D1D1F]">图片处理方式</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() => setUseAiClean(false)}
+                      className={`text-left p-3 rounded-2xl border-2 cursor-pointer transition-colors ${
+                        !useAiClean ? 'border-[#0071E3] bg-[#0071E3]/[0.04]' : 'border-transparent bg-[#F5F5F7]/90 hover:bg-[#F0F0F3]'
+                      }`}
+                    >
+                      <div className="text-xs font-semibold text-[#1D1D1F]">现有算法</div>
+                      <div className="text-[11px] text-[#86868B] mt-1 leading-snug">免费、速度快；干净或轻微泛黄的页效果好</div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!cleanModels.length) {
+                          onOpenSetup?.(null, undefined, () => void loadCleanModels());
+                          return;
+                        }
+                        setUseAiClean(true);
+                      }}
+                      className={`text-left p-3 rounded-2xl border-2 cursor-pointer transition-colors ${
+                        useAiClean ? 'border-[#AF52DE] bg-[#AF52DE]/[0.05]' : 'border-transparent bg-[#F5F5F7]/90 hover:bg-[#F0F0F3]'
+                      }`}
+                    >
+                      <div className="text-xs font-semibold text-[#1D1D1F] flex items-center gap-1">
+                        <Sparkles className="w-3.5 h-3.5 text-[#8944AB]" />
+                        图生图大模型
+                      </div>
+                      <div className="text-[11px] text-[#86868B] mt-1 leading-snug">
+                        {cleanModels.length ? '污渍多、残破的页更干净；按张收费' : '还没配置，点这里打开引导配置（约 3 分钟）'}
+                      </div>
+                    </button>
+                  </div>
+                  {useAiClean ? (
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[11px] font-semibold text-[#1D1D1F] mb-1">图片处理模型</label>
+                        <select
+                          value={selectedCleanModelId ?? ''}
+                          onChange={(e) => setSelectedCleanModelId(e.target.value ? Number(e.target.value) : null)}
+                          className="w-full px-3 py-2 text-xs bg-white border border-black/[0.08] rounded-xl"
                         >
-                          引导配置（约 3 分钟）
-                        </button>
-                      ) : null}
-                    </span>
-                  </span>
-                </label>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-[11px] font-semibold text-[#1D1D1F] mb-1">图片处理模型</label>
-                    <select
-                      disabled={!useAiClean || !cleanModels.length}
-                      value={selectedCleanModelId ?? ''}
-                      onChange={(e) => {
-                        const id = e.target.value ? Number(e.target.value) : null;
-                        setSelectedCleanModelId(id);
-                      }}
-                      className="w-full px-3 py-2 text-xs bg-white border border-black/[0.06] rounded-xl disabled:bg-[#E5E5EA]/50 disabled:text-[#86868B]"
-                    >
-                      {!cleanModels.length && <option value="">无可用模型</option>}
-                      {cleanModels.map((m) => (
-                        <option key={m.id} value={m.id}>{m.displayName}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-semibold text-[#1D1D1F] mb-1">费用预估</label>
-                    <div className="px-3 py-2 text-xs rounded-xl bg-white border border-black/[0.06] font-mono text-[#1D1D1F] min-h-[36px] flex items-center">
-                      {!useAiClean
-                        ? '—'
-                        : !pageCountPreview
-                          ? '选择文件夹后按页数估算'
-                          : cleanEst.priced && cleanEst.cost != null
-                            ? `约 ¥${cleanEst.cost.toFixed(4)}（${pageCountPreview} 页）`
-                            : `已选 ${pageCountPreview} 页（请在配置页填写单价）`}
+                          {cleanModels.map((m) => (
+                            <option key={m.id} value={m.id}>{m.displayName}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-semibold text-[#1D1D1F] mb-1">图片处理费用</label>
+                        <div className="px-3 py-2 text-xs rounded-xl bg-[#F5F5F7] font-mono text-[#1D1D1F] min-h-[34px] flex items-center">
+                          {!pageCountPreview
+                            ? '选目录后估算'
+                            : cleanEst.priced && cleanEst.cost != null
+                              ? `约 ¥${cleanEst.cost.toFixed(2)}`
+                              : '模型未填单价'}
+                        </div>
+                      </div>
+                      <p className="col-span-2 text-[11px] text-[#86868B] leading-relaxed">
+                        整本每页都由大模型处理成白底黑字，不再用现有算法；审核时也可以对单页切回算法结果。
+                      </p>
                     </div>
-                  </div>
-                </div>
-              </div>
+                  ) : (
+                    <p className="text-[11px] text-[#86868B] leading-relaxed">
+                      用现有算法处理整本。审核时如果某页效果不好，可以对那一页点「使用大模型处理」。
+                    </p>
+                  )}
 
-              <div className="p-3.5 rounded-2xl bg-[#F5F5F7]/90 border border-black/[0.05] space-y-3">
-                <label className={`flex items-start gap-2.5 ${ocrModels.length ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'}`}>
-                  <input
-                    type="checkbox"
-                    className="mt-0.5"
-                    checked={useAiRecognition}
-                    disabled={!ocrModels.length}
-                    onChange={(e) => {
-                      setUseAiRecognition(e.target.checked);
-                    }}
-                  />
-                  <span className="min-w-0">
-                    <span className="block text-xs font-semibold text-[#1D1D1F]">使用 AI 识别</span>
-                    <span className="block text-[11px] text-[#86868B] mt-0.5 leading-relaxed">
-                      {ocrModels.length
-                        ? '勾选后整本任务在图片处理后使用所选模型识别；审阅页也可对单页再识别。'
-                        : '尚未配置可用识别模型，请先打开右上角「模型配置」。'}
-                    </span>
-                  </span>
-                </label>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-[11px] font-semibold text-[#1D1D1F] mb-1">识别模型</label>
-                    <select
-                      disabled={!useAiRecognition || !ocrModels.length}
-                      value={selectedModelId ?? ''}
-                      onChange={(e) => {
-                        const id = e.target.value ? Number(e.target.value) : null;
-                        setSelectedModelId(id);
-                      }}
-                      className="w-full px-3 py-2 text-xs bg-white border border-black/[0.06] rounded-xl disabled:bg-[#E5E5EA]/50 disabled:text-[#86868B]"
-                    >
-                      {!ocrModels.length && <option value="">无可用模型</option>}
-                      {ocrModels.map((m) => (
-                        <option key={m.id} value={m.id}>{m.displayName}</option>
-                      ))}
-                    </select>
+                  <div className="pt-4 border-t border-black/[0.06] space-y-3">
+                    <label className={`flex items-start gap-2.5 ${ocrModels.length ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'}`}>
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={useAiRecognition}
+                        disabled={!ocrModels.length}
+                        onChange={(e) => setUseAiRecognition(e.target.checked)}
+                      />
+                      <span className="min-w-0">
+                        <span className="block text-xs font-semibold text-[#1D1D1F]">同时用 AI 识别文字（可选）</span>
+                        <span className="block text-[11px] text-[#86868B] mt-0.5 leading-relaxed">
+                          {ocrModels.length ? '图片处理完后自动识别每页文字；审阅页也可对单页再识别。' : '尚未配置识别模型，可到右上角「模型配置」添加。'}
+                        </span>
+                      </span>
+                    </label>
+                    {useAiRecognition ? (
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-[11px] font-semibold text-[#1D1D1F] mb-1">识别模型</label>
+                          <select
+                            value={selectedModelId ?? ''}
+                            onChange={(e) => setSelectedModelId(e.target.value ? Number(e.target.value) : null)}
+                            className="w-full px-3 py-2 text-xs bg-white border border-black/[0.08] rounded-xl"
+                          >
+                            {ocrModels.map((m) => (
+                              <option key={m.id} value={m.id}>{m.displayName}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-semibold text-[#1D1D1F] mb-1">识别费用</label>
+                          <div className="px-3 py-2 text-xs rounded-xl bg-[#F5F5F7] font-mono text-[#1D1D1F] min-h-[34px] flex items-center">
+                            {!pageCountPreview
+                              ? '选目录后估算'
+                              : ocrEst.priced && ocrEst.cost != null
+                                ? `约 ¥${ocrEst.cost.toFixed(2)}`
+                                : '模型未填单价'}
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
-                  <div>
-                    <label className="block text-[11px] font-semibold text-[#1D1D1F] mb-1">费用预估</label>
-                    <div className="px-3 py-2 text-xs rounded-xl bg-white border border-black/[0.06] font-mono text-[#1D1D1F] min-h-[36px] flex items-center">
-                      {!useAiRecognition
-                        ? '—'
-                        : !pageCountPreview
-                          ? '选择文件夹后按页数估算'
-                          : ocrEst.priced && ocrEst.cost != null
-                            ? `约 ¥${ocrEst.cost.toFixed(4)}（${pageCountPreview} 页）`
-                            : `已选 ${pageCountPreview} 页（请在配置页填写单价）`}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[#1D1D1F] mb-1">
-                  图片文件夹
-                </label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={folderPath}
-                    onChange={(e) => setFolderPath(e.target.value)}
-                    placeholder="粘贴或输入服务器上的文件夹路径"
-                    className="flex-1 px-3.5 py-2.5 text-xs bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-mono text-[#1D1D1F]"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => void openFolderPicker()}
-                    className="px-3 py-2.5 text-xs font-semibold bg-[#E5E5EA] hover:bg-[#D1D1D6] text-[#1D1D1F] rounded-xl cursor-pointer whitespace-nowrap flex items-center gap-1.5"
-                  >
-                    <Folder className="w-3.5 h-3.5" />
-                    选择目录
-                  </button>
                 </div>
               </div>
             </div>
 
-            <div className="flex items-center justify-end gap-2.5 pt-5 border-t border-black/[0.06] mt-5">
+            <div className="flex flex-wrap items-center justify-end gap-2.5 px-6 py-4 border-t border-black/[0.06] shrink-0">
+              <div className="mr-auto text-xs text-[#6E6E73]">
+                {pageCountPreview ? (
+                  <>
+                    共 <b className="text-[#1D1D1F] tabular-nums">{pageCountPreview}</b> 张 · 预计费用{' '}
+                    <b className="text-[#1D1D1F] tabular-nums">
+                      {!useAiClean && !useAiRecognition ? '¥0（算法免费）' : totalEstimate != null ? `约 ¥${totalEstimate.toFixed(2)}` : '模型未填单价'}
+                    </b>
+                  </>
+                ) : (
+                  '填好左侧信息、选好处理方式后创建；创建后在列表里点「开始处理」'
+                )}
+              </div>
               <button
                 type="button"
                 onClick={() => setShowCreateModal(false)}

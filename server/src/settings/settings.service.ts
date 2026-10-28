@@ -172,6 +172,8 @@ export class SettingsService implements OnModuleInit {
       baseUrl: m.baseUrl || '',
       apiKeySet: !!plain,
       apiKeyMasked: maskSecret(plain),
+      /** 回显用，前端默认密文显示 */
+      apiKeyPlain: plain,
       /** 模型自己没填 Key，但所属平台已填 */
       platformKeySet: !!platform && !!keyedPlatforms?.has(platform),
     };
@@ -248,10 +250,11 @@ export class SettingsService implements OnModuleInit {
       const fields = def.fields.map((f) => {
         const raw = stored.values?.[f.key] || '';
         const plain = f.secret ? decryptSecret(raw) : raw;
+        // 单角色内部工具：按需求回显明文，前端默认以密文（圆点）显示，可点眼睛查看
         return {
           ...f,
           set: !!plain,
-          value: f.secret ? '' : plain,
+          value: plain,
           masked: f.secret ? maskSecret(plain) : '',
         };
       });
@@ -287,11 +290,9 @@ export class SettingsService implements OnModuleInit {
       const v = body.values?.[f.key];
       if (v == null) continue;
       const t = String(v).trim();
-      // 密钥留空 = 保留原值；普通字段留空 = 清空
-      if (f.secret) {
-        if (t) values[f.key] = encryptSecret(t);
-      } else if (t) values[f.key] = t;
-      else delete values[f.key];
+      // 前端会回显已保存的值，所以传什么就存什么；传空 = 清空
+      if (!t) delete values[f.key];
+      else values[f.key] = f.secret ? encryptSecret(t) : t;
     }
     all[def.code] = {
       baseUrl: baseUrl && baseUrl !== def.defaultBaseUrl ? baseUrl : '',
@@ -387,7 +388,7 @@ export class SettingsService implements OnModuleInit {
     let outputSize = existing?.outputSize ?? null;
     if ((body as any).outputSize !== undefined) {
       const os = String((body as any).outputSize || '').trim();
-      if (os && !/^\d{2,5}\s*[x*:×]\s*\d{2,5}$/i.test(os) && !/^[124]K$/i.test(os)) {
+      if (os && !/^\d{2,5}\s*[x*:×]\s*\d{2,5}$/i.test(os) && !/^(1|1\.5|2|3|4)K$/i.test(os)) {
         throw new BadRequestException('输出尺寸格式如 2048x2048、2K，留空为按原图比例自动计算');
       }
       outputSize = os || null;
