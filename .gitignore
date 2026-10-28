@@ -12,16 +12,26 @@ Desktop.ini
 admin-vue3/dist/
 admin/dist/
 server/dist/
+build/
+**/build/
+.next/
+**/.next/
+**/out/
 
 # Logs
 *.log
 npm-debug.log*
 ormlogs.log
 **/logs/
+*.err
+server/nest-restart.log*
 
-# Env / secrets（真实生产配置不要进库；可自行提交 *.yml.example）
+# Env / secrets
 server/src/config/prod.yml
 server/src/config/test.yml
+**/.env
+server/.env
+server/.env.bak*
 **/.env.local
 **/.env.*.local
 
@@ -31,7 +41,7 @@ docs/.vitepress/cache/
 docs/.vitepress/dist/
 docs/dist/
 
-# IDE — WebStorm / IntelliJ：保留运行配置，忽略个人工作区
+# IDE
 .idea/workspace.xml
 .idea/usage.statistics.xml
 .idea/shelf/
@@ -43,7 +53,7 @@ docs/dist/
 *.iws
 *.iml
 
-# VS Code — 可提交 launch/tasks；忽略个人态
+# VS Code
 .vscode/*.code-workspace
 
 # Uni-app / HBuilder
@@ -59,12 +69,12 @@ coverage/
 data/
 server/node_modules/
 admin-vue3/dist/
-
+.venv/
+venv/
 
 # Local secrets & sample inputs (do not commit)
-**/.env
-server/.env
 待处理的图片/
+待处理的图片 - 副本/
 _patches/
 
 # Python cache
@@ -73,28 +83,3 @@ _patches/
 
 # Credentials
 sql/credentials.txt
-
-<<<<<<< HEAD
-server/.env.bak*
-
-server/nest-restart.log*
-
-��������ͼƬ - ����/
-
-*.err
-
-# Local sample folders / backups
-server/.env.bak*
-server/nest-restart.log*
-*.err
-待处理的图片 - 副本/
-=======
-# Extra build / venv (ensure compile artifacts stay out)
-build/
-**/build/
-.next/
-**/.next/
-.venv/
-venv/
-**/out/
->>>>>>> origin/main
