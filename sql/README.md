@@ -48,3 +48,14 @@ Get-Content .\sql\init.sql -Raw -Encoding UTF8 | & "C:\Program Files\MySQL\MySQL
 - users：登录用户
 - tasks：处理任务（一任务一文件夹）
 - task_images：任务内图片及处理参数/裁剪框
+
+## 升级脚本（已有数据库按顺序执行，均可重复执行）
+
+```bash
+mysql -uroot zupu_scan < sql/migrate_task_meta.sql
+mysql -uroot zupu_scan < sql/migrate_processing_time.sql
+mysql -uroot zupu_scan < sql/migrate_ai.sql
+mysql -uroot zupu_scan < sql/migrate_model_creds.sql
+mysql -uroot zupu_scan < sql/migrate_clean_model.sql
+mysql -uroot zupu_scan < sql/migrate_image_ai.sql   # 平台账号 + 图生图大模型处理
+```

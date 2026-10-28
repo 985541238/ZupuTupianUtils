@@ -73,6 +73,12 @@ export function mapImage(raw: any, taskId: string | number, pageNumber: number):
     originalHeight: h,
     nestStatus: raw.status,
     cropBoxRaw: raw.cropBox,
+    processMode: raw.processMode || (raw.resultUrl ? 'algo' : null),
+    hasAlgoResult: !!raw.hasAlgoResult,
+    hasAiResult: !!raw.hasAiResult,
+    aiModelId: raw.aiModelId != null ? Number(raw.aiModelId) : null,
+    cleanCost: raw.cleanCost != null ? Number(raw.cleanCost) || 0 : 0,
+    errorMessage: raw.errorMessage || null,
     ocrJson: raw.ocrJson || null,
     ocrText: (() => {
       if (!raw.ocrJson) return undefined;
@@ -106,6 +112,10 @@ export function mapTask(raw: any, images?: any[]): Task {
     surname: raw.surname || raw.genealogyNote || undefined,
     useAi: !!raw.ocrModelId,
     ocrModelId: raw.ocrModelId != null ? Number(raw.ocrModelId) : null,
+    useAiClean: !!raw.cleanModelId,
+    cleanModelId: raw.cleanModelId != null ? Number(raw.cleanModelId) : null,
+    actualCost: raw.actualCost != null ? Number(raw.actualCost) || 0 : 0,
+    errorMessage: raw.errorMessage || null,
     estimatedCost: raw.estimatedCost != null ? Number(raw.estimatedCost) : null,
     status: mapTaskStatus(raw.status),
     nestStatus: raw.status,

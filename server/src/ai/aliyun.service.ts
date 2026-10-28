@@ -3,7 +3,10 @@ import sharp from 'sharp';
 import * as fs from 'fs';
 import * as path from 'path';
 import { AiModel } from '../settings/ai-model.entity';
-import { AliyunConfig, SettingsService } from '../settings/settings.service';
+import * as crypto from 'crypto';
+import { AliyunConfig, ResolvedCredentials, SettingsService } from '../settings/settings.service';
+import { PlatformCode, getPlatformDef, guessPlatform } from '../settings/platforms';
+import { signPath } from '../common/secret';
 import { DEFAULT_CLEAN_PROMPT, DEFAULT_OCR_PROMPT } from '../settings/prompts';
 
 export interface OcrColumn {
@@ -44,18 +47,17 @@ export class AliyunService {
     return process.env.AI_MOCK === '1';
   }
 
-  async assertReady(model?: AiModel): Promise<AliyunConfig> {
+  async assertReady(model?: AiModel): Promise<ResolvedCredentials> {
     const creds = await this.settings.resolveCredentials(model);
     if (!this.mock && !creds.apiKey) {
-      throw new AiConfigError('还没有填写 API Key，请先在模型配置里填写');
+      const name = getPlatformDef(creds.platform)?.name;
+      throw new AiConfigError(
+        name
+          ? `还没有填写${name}的 API Key，请到「模型配置 → 平台账号」填写`
+          : '还没有填写 API Key，请到「模型配置」填写',
+      );
     }
-    return {
-      baseUrl: creds.baseUrl,
-      imageEditUrl: creds.imageEditUrl,
-      apiKey: creds.apiKey,
-      concurrency: creds.concurrency,
-      timeoutSec: creds.timeoutSec,
-    };
+    return creds;
   }
 
   // ---------------- 费用 ----------------
@@ -177,7 +179,7 @@ export class AliyunService {
     return { content, usage };
   }
 
-  // ---------------- 图片清理（火山方舟 images/generations 或阿里云 multimodal） ----------------
+  // ---------------- 图片处理（图生图） ----------------
 
   /** 从图像编辑响应里抽结果图（URL 或 base64）；兼容 Ark data[].url 与 DashScope output.choices */
   private extractEditedImage(data: any): string | null {
@@ -247,205 +249,280 @@ export class AliyunService {
     return /ark\.cn-beijing\.volces\.com/i.test(b) || /\/images\/generations\/?$/i.test(b) || /volces\.com\/api\/v3/i.test(b);
   }
 
-  private isAliyunMultimodalBase(base: string): boolean {
-    return /multimodal-generation/i.test(base || '') || /maas\.aliyuncs\.com/i.test(base || '');
+  /** 平台：模型/平台配置里明确的优先，老数据按地址推断 */
+  private imagePlatform(cfg: ResolvedCredentials): PlatformCode {
+    if (cfg.platform) return cfg.platform;
+    const g = guessPlatform(cfg.baseUrl);
+    if (g) return g;
+    return this.isArkImageBase(cfg.baseUrl) ? 'ark' : 'aliyun';
   }
 
-  /**
-   * 清理出图：
-   * - 火山方舟：.../api/v3 或 .../images/generations
-   * - 阿里云 MaaS：.../multimodal-generation/generation
-   * baseUrl 若是 compatible-mode，仍回落阿里云 generation（兼容旧配置）。
-   */
-  private resolveImageEditUrl(cfg: { baseUrl: string; imageEditUrl?: string }): string {
-    const explicit = (cfg.imageEditUrl || '').trim();
-    if (explicit) return explicit.replace(/\/+$/, '');
+  /** 各平台图生图接口地址（官方文档） */
+  private imageEditEndpoint(platform: PlatformCode, cfg: ResolvedCredentials): string {
     const base = (cfg.baseUrl || '').trim().replace(/\/+$/, '');
-    if (!base) throw new AiConfigError('请先填写 Base URL');
-    if (/\/images\/generations\/?$/i.test(base)) return base.replace(/\/+$/, '');
-    if (/\/services\/aigc\/multimodal-generation\/generation\/?$/i.test(base)) {
-      return base.replace(/\/+$/, '');
-    }
-    if (this.isArkImageBase(base)) {
-      // https://ark.../api/v3 → append /images/generations
-      if (/\/api\/v3$/i.test(base)) return base + '/images/generations';
-      try {
-        const u = new URL(base);
-        if (/\/api\/v3\//i.test(u.pathname)) return u.origin + '/api/v3/images/generations';
-        return u.origin + '/api/v3/images/generations';
-      } catch {
-        throw new AiConfigError('Base URL 无效：' + base);
-      }
-    }
-    if (this.isAliyunMultimodalBase(base)) {
-      try {
-        return new URL(base).origin + '/api/v1/services/aigc/multimodal-generation/generation';
-      } catch {
-        throw new AiConfigError('Base URL 无效：' + base);
-      }
-    }
-    // 旧阿里云 compatible-mode：取 origin 拼 multimodal
+    if (!base) throw new AiConfigError('请先填写服务地址');
     let origin: string;
     try {
       origin = new URL(base).origin;
     } catch {
-      throw new AiConfigError('Base URL 无效：' + base);
+      throw new AiConfigError('服务地址无效：' + base);
     }
-    return origin + '/api/v1/services/aigc/multimodal-generation/generation';
+    switch (platform) {
+      case 'ark':
+        if (/\/images\/generations$/i.test(base)) return base;
+        return /\/api\/v3$/i.test(base) ? base + '/images/generations' : origin + '/api/v3/images/generations';
+      case 'aliyun':
+        if (/\/multimodal-generation\/generation$/i.test(base)) return base;
+        if (cfg.imageEditUrl && /multimodal-generation/i.test(cfg.imageEditUrl)) return cfg.imageEditUrl.replace(/\/+$/, '');
+        return origin + '/api/v1/services/aigc/multimodal-generation/generation';
+      case 'baidu':
+        if (/\/images\/edits$/i.test(base)) return base;
+        return /\/v2$/i.test(base) ? base + '/images/edits' : origin + '/v2/images/edits';
+      case 'tencent':
+        if (/\/images\/generations$/i.test(base)) return base;
+        return /\/v1$/i.test(base) ? base + '/images/generations' : origin + '/v1/images/generations';
+      default:
+        throw new AiConfigError(`${getPlatformDef(platform)?.name || platform}不支持图生图，请换一个图片处理模型`);
+    }
   }
 
-  async cleanImage(imagePath: string, outPath: string, model: AiModel): Promise<{ usage: Usage }> {
+  /**
+   * 输出尺寸：按原图（裁剪后）比例计算，满足各平台像素范围，避免模型自行改变宽高比。
+   * 模型里填了「输出尺寸」时以填写为准。
+   */
+  private outputSize(platform: PlatformCode, w: number, h: number, override?: string | null): string | null {
+    const o = (override || '').trim();
+    const sep = platform === 'aliyun' ? '*' : platform === 'tencent' ? ':' : 'x';
+    if (o) {
+      if (/^[124]K$/i.test(o)) return o.toUpperCase();
+      const m = o.match(/^(\d{2,5})\s*[x*:×]\s*(\d{2,5})$/i);
+      if (m) return `${m[1]}${sep}${m[2]}`;
+    }
+    if (platform === 'baidu') return null; // 官方文档未给出 size 参数，用模型默认（保持输入比例）
+    const limits: Record<string, { min: number; max: number; side: number; mult: number }> = {
+      // Seedream：总像素 [1280x720, 4096x4096]，取 ≥2K 以保证小字清楚
+      ark: { min: 2048 * 1800, max: 3072 * 3072, side: 4096, mult: 16 },
+      // qwen-image：总像素 [512x512, 2048x2048]，16 的倍数
+      aliyun: { min: 512 * 512, max: 2048 * 2048, side: 3072, mult: 16 },
+      // 混元生图 3.0：单边 ≤ 2048
+      tencent: { min: 512 * 512, max: 2048 * 2048, side: 2048, mult: 16 },
+    };
+    const L = limits[platform];
+    if (!L || !w || !h) return null;
+    const area = Math.max(L.min, Math.min(L.max, w * h));
+    let scale = Math.sqrt(area / (w * h));
+    scale = Math.min(scale, L.side / Math.max(w, h));
+    const round = (v: number) => Math.max(L.mult, Math.floor(v / L.mult) * L.mult);
+    return `${round(w * scale)}${sep}${round(h * scale)}`;
+  }
+
+  /** 准备发给模型的输入图：长边 ≤ 3072 的 JPEG */
+  private async prepareInput(imagePath: string) {
+    const buf = await sharp(imagePath, { failOn: 'none' })
+      .rotate()
+      .flatten({ background: '#ffffff' })
+      .resize({ width: 3072, height: 3072, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 90 })
+      .toBuffer();
+    const meta = await sharp(imagePath, { failOn: 'none' }).rotate().metadata();
+    return { buf, width: meta.width || 0, height: meta.height || 0 };
+  }
+
+  /** 平台要求公网链接时：把输入图放到 OUTPUT_ROOT/_ai_input，并生成带签名、30 分钟有效的链接 */
+  private publishInput(buf: Buffer, publicBaseUrl: string): { url: string; file: string } {
+    if (!publicBaseUrl) {
+      throw new AiConfigError('该平台设置为「公网链接」传图，请先在「平台账号 → 通用设置」填写本服务的公网访问地址');
+    }
+    const name = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}.jpg`;
+    const file = path.join(outputRoot(), '_ai_input', name);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, buf);
+    const exp = Date.now() + 30 * 60 * 1000;
+    const sig = signPath('_ai_input/' + name, exp);
+    return { url: `${publicBaseUrl}/public/ai-input/${name}?exp=${exp}&sig=${sig}`, file };
+  }
+
+  /**
+   * 图生图：整页交给大模型处理，结果原样保存（仅缩放到与输入相同的像素尺寸，方便与原图对照）。
+   * imagePath 应是已按裁剪框裁好的图。
+   */
+  async cleanImage(
+    imagePath: string,
+    outPath: string,
+    model: AiModel,
+  ): Promise<{ usage: Usage; width: number; height: number }> {
+    const input = await this.prepareInput(imagePath);
     if (this.mock) {
-      await sharp(imagePath).grayscale().normalise().png().toFile(outPath);
-      return { usage: { tokensIn: 0, tokensOut: 0, images: 1 } };
+      // 模拟：灰度 + 拉伸对比，模拟「白底黑字」
+      fs.mkdirSync(path.dirname(outPath), { recursive: true });
+      await sharp(imagePath, { failOn: 'none' }).rotate().grayscale().normalise().threshold(150).png().toFile(outPath);
+      return { usage: { tokensIn: 0, tokensOut: 0, images: 1 }, width: input.width, height: input.height };
     }
     const cfg = await this.assertReady(model);
-    const url = this.resolveImageEditUrl(cfg);
-    const dataUri = await this.toDataUri(imagePath, 2048);
+    const platform = this.imagePlatform(cfg);
+    const def = getPlatformDef(platform);
+    if (def && !def.imageEdit.supported) {
+      throw new AiConfigError(`${def.name}${def.imageEdit.reason ? '：' + def.imageEdit.reason : '不支持图生图'}`);
+    }
+    const url = this.imageEditEndpoint(platform, cfg);
     const prompt = (model.prompt || DEFAULT_CLEAN_PROMPT).trim();
-    const useArk = this.isArkImageBase(cfg.baseUrl) || /\/images\/generations/i.test(url);
+    const size = this.outputSize(platform, input.width, input.height, model.outputSize);
+
+    let published: { url: string; file: string } | null = null;
+    let image: string;
+    if (cfg.imageTransport === 'url') {
+      published = this.publishInput(input.buf, cfg.publicBaseUrl);
+      image = published.url;
+    } else {
+      image = 'data:image/jpeg;base64,' + input.buf.toString('base64');
+    }
 
     let body: any;
-    if (useArk) {
-      // 火山方舟 Seedream：model + prompt + image + response_format/size/stream/watermark
-      body = {
-        model: model.model,
-        prompt,
-        image: dataUri,
-        response_format: 'url',
-        size: '2K',
-        stream: false,
-        watermark: false,
-      };
-    } else {
-      // 阿里云 MaaS multimodal-generation
-      body = {
-        model: model.model,
-        input: {
-          messages: [
-            {
-              role: 'user',
-              content: [{ image: dataUri }, { text: prompt }],
-            },
-          ],
-        },
-        parameters: {
-          n: 1,
-          negative_prompt: '',
+    switch (platform) {
+      case 'ark':
+        body = {
+          model: model.model,
+          prompt,
+          image,
+          size: size || '2K',
+          sequential_image_generation: 'disabled',
+          response_format: 'url',
+          stream: false,
           watermark: false,
-        },
-      };
+        };
+        break;
+      case 'aliyun':
+        body = {
+          model: model.model,
+          input: { messages: [{ role: 'user', content: [{ image }, { text: prompt }] }] },
+          parameters: {
+            n: 1,
+            watermark: false,
+            prompt_extend: false,
+            negative_prompt: NEGATIVE_PROMPT,
+            ...(size ? { size } : {}),
+          },
+        };
+        break;
+      case 'baidu':
+        body = { model: model.model, prompt, image, n: 1, ...(size ? { size } : {}) };
+        break;
+      case 'tencent':
+        body = { model: model.model, prompt, images: [image], revise: 0, logo_add: 0, ...(size ? { size } : {}) };
+        break;
     }
 
-    this.logger.debug('cleanImage POST ' + url + ' model=' + model.model + (useArk ? ' provider=ark' : ' provider=aliyun'));
-    const res = await this.fetchWithTimeout(
-      url,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfg.apiKey },
-        body: JSON.stringify(body),
-      },
-      cfg.timeoutSec * 1000,
-    );
-    if (!res.ok) throw await this.httpError(res);
-    const data: any = await res.json();
-    if (data.code && !data.data) throw new Error(String(data.code) + ': ' + (data.message || ''));
-    if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
-    const imageUrl = this.extractEditedImage(data);
-    if (!imageUrl) {
-      this.logger.warn(
-        'cleanImage 无结果图 model=' + model.model + ' url=' + url + ' keys=' + JSON.stringify(Object.keys(data || {})),
-      );
-      throw new AiConfigError(
-        '图像编辑模型没有返回图片。当前模型「' +
-          model.model +
-          '」可能不是出图模型，或接口返回格式异常。' +
-          '请在「模型配置 → 图片处理」使用 doubao-seedream-5-0-pro（火山方舟）等图像编辑模型。',
-      );
-    }
-    let buf: Buffer;
-    if (/^data:image\//i.test(imageUrl)) {
-      const b64 = imageUrl.replace(/^data:image\/[^;]+;base64,/i, '');
-      buf = Buffer.from(b64, 'base64');
-    } else {
-      const img = await this.fetchWithTimeout(imageUrl, {}, cfg.timeoutSec * 1000);
-      if (!img.ok) throw new Error('下载模型结果图失败：HTTP ' + img.status);
-      buf = Buffer.from(await img.arrayBuffer());
-    }
-    fs.mkdirSync(path.dirname(outPath), { recursive: true });
-    await sharp(buf).png().toFile(outPath);
-    const images =
-      Number(data?.usage?.generated_images || data?.usage?.image_count || data?.usage?.output_image_count) || 1;
-    return { usage: { tokensIn: 0, tokensOut: 0, images } };
-  }
-
-  /** 图片处理连通性：Ark 优先 GET /api/v3/models（快）；失败再回落样例出图。阿里云 multimodal 用样例图探测。 */
-  async pingImage(model: AiModel, override?: { apiKey?: string; baseUrl?: string }) {
-    if (this.mock) throw new AiConfigError('当前为 AI_MOCK，未真实连通');
-    const base = await this.settings.resolveCredentials(model);
-    const cfg = {
-      ...base,
-      apiKey: (override?.apiKey || base.apiKey || '').trim(),
-      baseUrl: String(override?.baseUrl || base.baseUrl || '')
-        .trim()
-        .replace(/\/+$/, ''),
-    };
-    if (!cfg.apiKey) throw new AiConfigError('请先填写 API Key');
-    const url = this.resolveImageEditUrl(cfg);
-    const useArk = this.isArkImageBase(cfg.baseUrl) || /\/images\/generations/i.test(url);
-    const t = Date.now();
-
-    if (useArk) {
-      let origin: string;
-      try {
-        origin = new URL(cfg.baseUrl || url).origin;
-      } catch {
-        origin = 'https://ark.cn-beijing.volces.com';
-      }
-      const modelsUrl = origin + '/api/v3/models';
+    this.logger.debug(`cleanImage POST ${url} model=${model.model} platform=${platform} size=${size}`);
+    try {
       const res = await this.fetchWithTimeout(
-        modelsUrl,
-        { method: 'GET', headers: { Authorization: 'Bearer ' + cfg.apiKey } },
-        Math.min(cfg.timeoutSec, 30) * 1000,
+        url,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfg.apiKey },
+          body: JSON.stringify(body),
+        },
+        cfg.timeoutSec * 1000,
       );
       if (!res.ok) throw await this.httpError(res);
-      const data: any = await res.json().catch(() => ({}));
-      const list = Array.isArray(data?.data) ? data.data : [];
-      const hit = list.find((m: any) => String(m?.id || m?.name || '') === model.model);
-      const hint = hit
-        ? '模型目录含 ' + model.model
-        : list.length
-          ? 'Key 有效（目录 ' + list.length + ' 个模型；未精确匹配 ' + model.model + '，仍可尝试出图）'
-          : 'Key 有效';
-      return { ok: true, ms: Date.now() - t, reply: hint, usage: { tokensIn: 0, tokensOut: 0, images: 0 } };
+      const data: any = await res.json();
+      if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+      if (data.code && !data.data && !data.output) {
+        const msg = String(data.code) + ': ' + (data.message || '');
+        if (/InvalidApiKey|Unauthorized|AccessDenied|ModelNotFound|InvalidParameter/i.test(String(data.code))) {
+          throw new AiConfigError(msg);
+        }
+        throw new Error(msg);
+      }
+      const imageUrl = this.extractEditedImage(data);
+      if (!imageUrl) {
+        this.logger.warn('cleanImage 无结果图 model=' + model.model + ' keys=' + JSON.stringify(Object.keys(data || {})));
+        throw new AiConfigError(
+          `模型「${model.model}」没有返回图片：可能不是图生图模型，或接口返回格式异常。请在配置页检查模型代码。`,
+        );
+      }
+      let buf: Buffer;
+      if (/^data:image\//i.test(imageUrl)) {
+        buf = Buffer.from(imageUrl.replace(/^data:image\/[^;]+;base64,/i, ''), 'base64');
+      } else {
+        const img = await this.fetchWithTimeout(imageUrl, {}, cfg.timeoutSec * 1000);
+        if (!img.ok) throw new Error('下载模型结果图失败：HTTP ' + img.status);
+        buf = Buffer.from(await img.arrayBuffer());
+      }
+      // 结果缩放到与输入相同的像素尺寸（不变形：比例不同时用白边补齐），便于与原图逐像素对照
+      fs.mkdirSync(path.dirname(outPath), { recursive: true });
+      await sharp(buf, { failOn: 'none' })
+        .flatten({ background: '#ffffff' })
+        .resize(input.width, input.height, { fit: 'contain', background: '#ffffff' })
+        .png()
+        .toFile(outPath);
+      const images =
+        Number(data?.usage?.generated_images || data?.usage?.image_count || data?.usage?.output_image_count) || 1;
+      return { usage: { tokensIn: 0, tokensOut: 0, images }, width: input.width, height: input.height };
+    } finally {
+      if (published) {
+        try {
+          fs.unlinkSync(published.file);
+        } catch {}
+      }
     }
+  }
 
-    const sample =
-      'https://help-static-aliyun-doc.aliyuncs.com/file-manage-files/zh-CN/20250925/thtclx/input1.png';
-    const prompt = '请保持画面主体不变，仅做轻微清晰化。';
-    const body = {
-      model: model.model,
-      input: {
-        messages: [{ role: 'user', content: [{ image: sample }, { text: prompt }] }],
-      },
-      parameters: { n: 1, negative_prompt: '', watermark: false },
-    };
+  /**
+   * 测试平台连通：GET 模型列表（不出图、不扣费）。
+   * 200 = Key 有效；401/403 = Key 无效；其他 = 服务可达但无法用此方式验证 Key。
+   */
+  async pingPlatform(
+    code: string,
+    override?: { apiKey?: string; baseUrl?: string },
+    modelCode?: string,
+  ): Promise<{ ok: boolean; ms: number; reply: string }> {
+    const def = getPlatformDef(code);
+    if (!def) throw new AiConfigError('未知平台');
+    if (this.mock) throw new AiConfigError('当前为 AI_MOCK，未真实连通');
+    const saved = await this.settings.getPlatformSecrets(def.code);
+    const apiKey = (override?.apiKey || saved?.values.apiKey || '').trim();
+    const base = String(override?.baseUrl || saved?.baseUrl || def.defaultBaseUrl).trim().replace(/\/+$/, '');
+    if (!apiKey) throw new AiConfigError('请先填写 API Key');
+    let modelsUrl: string;
+    try {
+      const u = new URL(base);
+      if (def.code === 'aliyun') modelsUrl = u.origin + '/compatible-mode/v1/models';
+      else if (def.code === 'ark') modelsUrl = u.origin + '/api/v3/models';
+      else modelsUrl = base.replace(/\/(images\/(generations|edits)|chat\/completions)$/i, '') + '/models';
+    } catch {
+      throw new AiConfigError('服务地址无效：' + base);
+    }
+    const t = Date.now();
     const res = await this.fetchWithTimeout(
-      url,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfg.apiKey },
-        body: JSON.stringify(body),
-      },
-      Math.max(cfg.timeoutSec, 180) * 1000,
+      modelsUrl,
+      { method: 'GET', headers: { Authorization: 'Bearer ' + apiKey } },
+      30 * 1000,
     );
-    if (!res.ok) throw await this.httpError(res);
-    const data: any = await res.json();
-    if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
-    if (data.code && !data.data) throw new Error(String(data.code) + ': ' + (data.message || ''));
-    const imageUrl = this.extractEditedImage(data);
-    if (!imageUrl) throw new AiConfigError('连通成功但未返回图片，请检查模型是否支持图像编辑');
-    return { ok: true, ms: Date.now() - t, reply: '已返回结果图', usage: { tokensIn: 0, tokensOut: 0, images: 1 } };
+    const ms = Date.now() - t;
+    if (res.status === 401 || res.status === 403) throw await this.httpError(res);
+    if (!res.ok) {
+      return { ok: true, ms, reply: `服务可达（HTTP ${res.status}），该平台不支持用模型列表验证 Key，请处理一页试试` };
+    }
+    const data: any = await res.json().catch(() => ({}));
+    const list: any[] = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
+    if (modelCode && list.length) {
+      const hit = list.some((m: any) => String(m?.id || m?.name || m?.model || '') === modelCode);
+      return { ok: true, ms, reply: hit ? `Key 有效，模型 ${modelCode} 可用` : `Key 有效（未在模型列表中找到 ${modelCode}，可能需在控制台开通）` };
+    }
+    return { ok: true, ms, reply: list.length ? `Key 有效（${list.length} 个模型）` : 'Key 有效' };
+  }
+
+  /** 图片处理模型的「测试连接」：用该模型的凭证测平台，不出图、不扣费 */
+  async pingImage(model: AiModel, override?: { apiKey?: string; baseUrl?: string }) {
+    if (this.mock) throw new AiConfigError('当前为 AI_MOCK，未真实连通');
+    const cfg = await this.settings.resolveCredentials(model);
+    const platform = this.imagePlatform({ ...cfg, baseUrl: override?.baseUrl || cfg.baseUrl });
+    const r = await this.pingPlatform(
+      platform,
+      { apiKey: override?.apiKey || cfg.apiKey, baseUrl: override?.baseUrl || cfg.baseUrl },
+      model.model,
+    );
+    return { ...r, usage: { tokensIn: 0, tokensOut: 0, images: 0 } };
   }
 
   // ---------------- 工具 ----------------
@@ -503,6 +580,12 @@ export class AliyunService {
     this.logger.debug(`mock ocr ${meta.width}x${meta.height}`);
     return { result: { columns, uncertain }, usage: { tokensIn: 2600, tokensOut: 400, images: 1 }, raw: '' };
   }
+}
+
+const NEGATIVE_PROMPT = '改字，错字，补字，漏字，增加文字，删除文字，变形，模糊，水印，彩色，纸张纹理，阴影，边框装饰';
+
+function outputRoot() {
+  return process.env.OUTPUT_ROOT || path.join(process.cwd(), '..', 'data', 'output');
 }
 
 /** 解析模型返回的 JSON，容忍 ```json 包裹、前后多余文字 */

@@ -558,7 +558,10 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
         if (cancelled) return;
         const enabled = (list || []).filter((m: any) => m.enabled);
         setCleanModels(enabled);
-        const def = enabled.find((m: any) => m.isDefault) || enabled[0];
+        const def =
+          enabled.find((m: any) => Number(m.id) === Number(task.cleanModelId)) ||
+          enabled.find((m: any) => m.isDefault) ||
+          enabled[0];
         setSelectedCleanModelId(def ? Number(def.id) : null);
       } catch {
         if (!cancelled) {
@@ -570,36 +573,70 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
     return () => { cancelled = true; };
   }, []);
 
+  /** 服务端返回的图片数据 → 刷新当前页显示（结果图、缓存、会话预览） */
+  const applyServerImage = (raw: any, item: ScanItem) => {
+    const mapped = mapImage(raw, task.id, item.pageNumber);
+    mapped.params = item.params;
+    const clean = mapped.processedUrl;
+    if (clean) {
+      pageUrlCacheRef.current.set(item.id, { clean, original: mapped.originalUrl || item.originalUrl });
+      const sess = pageSessionRef.current.get(item.id);
+      if (sess) pageSessionRef.current.set(item.id, { ...sess, previewUrl: clean });
+      if (currentItemRef.current?.id === item.id) {
+        previewUrlRef.current = clean;
+        setPreviewDataUrl(clean);
+      }
+    }
+    if (mapped.stats?.processingTimeMs != null && currentItemRef.current?.id === item.id) {
+      setCurrentStats(mapped.stats);
+    }
+    onUpdateTaskItem(task.id, mapped);
+    return mapped;
+  };
+
+  /** 「使用大模型处理」：本页交给图生图大模型，算法结果保留可切回 */
   const handleAiProcessPage = async () => {
-    if (!currentItem) return;
+    if (!currentItem || aiProcessBusy) return;
     if (!cleanModels.length) {
-      alert('暂无可用模型，请先到「模型配置」添加');
+      alert('暂无可用的图片处理模型，请先到「模型配置」添加');
       return;
     }
+    const item = currentItem;
     setAiProcessBusy(true);
     try {
-      const r = await api.aiProcessImage(task.id, currentItem.id, {
+      const r = await api.aiProcessImage(task.id, item.id, {
         modelId: selectedCleanModelId || undefined,
       });
-      const mapped = {
-        ...currentItem,
-        processedUrl: r.resultUrl || currentItem.processedUrl,
-        thumbnailUrl: r.thumbUrl || currentItem.thumbnailUrl,
-      };
-      // refresh preview cache
-      try {
-        const cache = pageUrlCacheRef.current.get(String(currentItem.id)) || {};
-        if (r.resultUrl) cache.clean = r.resultUrl;
-        pageUrlCacheRef.current.set(String(currentItem.id), cache);
-      } catch {}
-      if (r.resultUrl) setPreviewDataUrl(r.resultUrl);
-      onUpdateTaskItem(task.id, mapped as any);
-      if (typeof onReloadTask === 'function') {
-        await onReloadTask();
-      }
-      triggerToast('本页AI图片处理完成');
+      applyServerImage(r, item);
+      const cost = Number(r?.cleanCost);
+      triggerToast(`第 ${item.pageNumber} 页已用大模型处理${r?.aiModelName ? '（' + r.aiModelName + '）' : ''}${Number.isFinite(cost) && cost > 0 ? `，累计 ¥${cost.toFixed(3)}` : ''}`);
     } catch (e: any) {
-      alert(e?.message || 'AI图片处理失败');
+      alert(e?.message || '大模型处理失败');
+    } finally {
+      setAiProcessBusy(false);
+    }
+  };
+
+  /** 在算法结果 / 大模型结果之间切换；没有算法结果时现跑一次算法 */
+  const handleUseResult = async (mode: 'algo' | 'ai') => {
+    if (!currentItem || aiProcessBusy) return;
+    const item = currentItem;
+    setAiProcessBusy(true);
+    try {
+      let r: any;
+      if (mode === 'algo' && !item.hasAlgoResult) {
+        const img = originalImgRef.current;
+        const ow = img && img.naturalWidth > 0 ? img.naturalWidth : item.originalWidth;
+        const oh = img && img.naturalHeight > 0 ? img.naturalHeight : item.originalHeight;
+        const crop = confirmedCropRef.current;
+        r = await api.reprocessImage(task.id, item.id, buildPreviewBody(localParamsRef.current, crop, ow, oh));
+      } else {
+        r = await api.useImageResult(task.id, item.id, mode);
+      }
+      applyServerImage(r, item);
+      triggerToast(mode === 'ai' ? '已切换为大模型结果' : '已切换为算法结果');
+    } catch (e: any) {
+      alert(e?.message || '切换失败');
     } finally {
       setAiProcessBusy(false);
     }
@@ -1478,11 +1515,21 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                 ) : (
                   <span className="text-[#86868B] font-medium">未处理</span>
                 )}
+                {currentItem.processMode ? (
+                  <span
+                    className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold font-sans whitespace-nowrap ${
+                      currentItem.processMode === 'ai' ? 'bg-[#AF52DE]/12 text-[#8944AB]' : 'bg-black/[0.05] text-[#6E6E73]'
+                    }`}
+                    title="当前结果图的来源"
+                  >
+                    {currentItem.processMode === 'ai' ? '大模型结果' : '算法结果'}
+                  </span>
+                ) : null}
               </div>
             </div>
 
             {/* Keyboard hints — subtle Apple-style */}
-            <div className="hidden lg:flex items-center gap-2 text-[11px] text-[#6E6E73]">
+            <div className="hidden 2xl:flex items-center gap-2 text-[11px] text-[#6E6E73]">
               <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full bg-white/80 border border-black/[0.06] shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
                 <kbd className="min-w-[1.4rem] px-1.5 py-0.5 rounded-md bg-[#F5F5F7] border border-black/[0.08] text-[10px] font-semibold text-[#1D1D1F] text-center font-mono">Space</kbd>
                 <span className="font-medium text-[#1D1D1F]">通过</span>
@@ -1519,6 +1566,20 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                 <XCircle className="w-4 h-4" />
                 <span>未通过</span>
                 <kbd className="ml-0.5 px-1 py-0.5 rounded bg-[#F5F5F7] border border-black/[0.06] text-[10px] font-mono text-[#86868B]">F</kbd>
+              </button>
+
+              <button
+                onClick={() => void handleAiProcessPage()}
+                disabled={isProcessing || aiProcessBusy || !cleanModels.length}
+                className="px-3.5 py-2 bg-white hover:bg-[#AF52DE]/[0.06] active:scale-[0.98] text-[#8944AB] font-medium text-xs rounded-xl border border-[#AF52DE]/30 shadow-2xs transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                title={
+                  !cleanModels.length
+                    ? '还没有图片处理模型，请先到「模型配置」添加'
+                    : '用图生图大模型重新处理本页，算法结果会保留，可在右侧「大模型处理」里切回'
+                }
+              >
+                <Sparkles className={`w-4 h-4 ${aiProcessBusy ? 'animate-spin' : ''}`} />
+                <span>{aiProcessBusy ? '大模型处理中…' : '使用大模型处理'}</span>
               </button>
 
               
@@ -1596,7 +1657,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                     : 'text-[#6E6E73] hover:text-[#1D1D1F]'
                 }`}
               >
-                AI 图片处理
+                大模型处理
               </button>
             </div>
             <button
@@ -1611,8 +1672,10 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
           {rightPanelTab === 'aiClean' ? (
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
               <div className="p-3.5 bg-white rounded-2xl border border-black/[0.06] shadow-2xs space-y-3">
-                <div className="text-xs font-semibold text-[#1D1D1F]">AI 图片处理</div>
-                <p className="text-[11px] text-[#86868B] leading-relaxed">使用阿里云图像编辑模型处理当前页原图，结果会替换当前清晰图。</p>
+                <div className="text-xs font-semibold text-[#1D1D1F]">使用大模型处理本页</div>
+                <p className="text-[11px] text-[#86868B] leading-relaxed">
+                  把本页原图（有裁剪框则按裁剪区域）交给图生图大模型，处理成白底黑字。只影响这一页；算法结果会保留，可随时切回。
+                </p>
                 <div>
                   <label className="block text-[11px] font-semibold text-[#1D1D1F] mb-1">图片处理模型</label>
                   <select
@@ -1634,9 +1697,55 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                   className="w-full px-3 py-2.5 rounded-xl text-xs font-semibold bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.25)] cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-60 active:scale-[0.98]"
                 >
                   <Sparkles className={`w-3.5 h-3.5 ${aiProcessBusy ? 'animate-spin' : ''}`} />
-                  <span>{aiProcessBusy ? '处理中…' : '对当前页执行AI图片处理'}</span>
+                  <span>{aiProcessBusy ? '处理中…' : currentItem?.hasAiResult ? '用大模型重新处理' : '使用大模型处理'}</span>
                 </button>
               </div>
+              {currentItem ? (
+                <div className="p-3.5 bg-white rounded-2xl border border-black/[0.06] shadow-2xs space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-xs font-semibold text-[#1D1D1F]">当前结果</div>
+                    <span
+                      className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${
+                        currentItem.processMode === 'ai' ? 'bg-[#AF52DE]/12 text-[#8944AB]' : 'bg-black/[0.05] text-[#6E6E73]'
+                      }`}
+                    >
+                      {currentItem.processMode === 'ai' ? '大模型结果' : currentItem.processMode === 'algo' ? '算法结果' : '未处理'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1 p-1 bg-[#E5E5EA]/70 rounded-xl">
+                    <button
+                      type="button"
+                      disabled={aiProcessBusy || isProcessing || currentItem.processMode === 'algo'}
+                      onClick={() => void handleUseResult('algo')}
+                      className={`py-1.5 text-[11px] font-semibold rounded-lg transition-all cursor-pointer disabled:cursor-default ${
+                        currentItem.processMode === 'algo' ? 'bg-white text-[#1D1D1F] shadow-xs' : 'text-[#6E6E73] hover:text-[#1D1D1F]'
+                      }`}
+                      title={currentItem.hasAlgoResult ? '切换为算法结果' : '还没有算法结果，点击用现有算法处理本页'}
+                    >
+                      {currentItem.hasAlgoResult || currentItem.processMode === 'algo' ? '算法结果' : '用算法处理'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={aiProcessBusy || isProcessing || !currentItem.hasAiResult || currentItem.processMode === 'ai'}
+                      onClick={() => void handleUseResult('ai')}
+                      className={`py-1.5 text-[11px] font-semibold rounded-lg transition-all cursor-pointer disabled:cursor-default ${
+                        currentItem.processMode === 'ai'
+                          ? 'bg-white text-[#8944AB] shadow-xs'
+                          : currentItem.hasAiResult
+                            ? 'text-[#6E6E73] hover:text-[#1D1D1F]'
+                            : 'text-[#C7C7CC]'
+                      }`}
+                      title={currentItem.hasAiResult ? '切换为大模型结果' : '本页还没有大模型结果'}
+                    >
+                      大模型结果
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-[#86868B] leading-relaxed">
+                    切换后需重新点「通过 / 未通过」。在「参数调节」里拖动滑条会重新生成算法结果。
+                    {currentItem.cleanCost ? ` 本页大模型费用 ¥${currentItem.cleanCost.toFixed(3)}。` : ''}
+                  </p>
+                </div>
+              ) : null}
             </div>
           ) : (
           <div className="flex-1 overflow-y-auto p-4 space-y-4">

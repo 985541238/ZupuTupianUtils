@@ -6,6 +6,7 @@ import { AiModel } from './ai-model.entity';
 import { Task } from '../tasks/task.entity';
 import { decryptSecret, encryptSecret, maskSecret } from '../common/secret';
 import { DEFAULT_CLEAN_PROMPT, DEFAULT_OCR_PROMPT } from './prompts';
+import { PLATFORMS, PlatformCode, getPlatformDef, guessPlatform } from './platforms';
 
 export const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 
@@ -16,6 +17,26 @@ export interface AliyunConfig {
   concurrency: number;
   timeoutSec: number;
 }
+
+/** 调用模型时实际使用的凭证 */
+export interface ResolvedCredentials extends AliyunConfig {
+  platform: PlatformCode | null;
+  /** base64 = 图片以 data URI 发送；url = 发送本服务的签名公网链接 */
+  imageTransport: 'base64' | 'url';
+  publicBaseUrl: string;
+}
+
+export interface GeneralConfig {
+  concurrency: number;
+  timeoutSec: number;
+  publicBaseUrl: string;
+}
+
+type StoredPlatform = {
+  baseUrl?: string;
+  imageTransport?: 'base64' | 'url';
+  values?: Record<string, string>;
+};
 
 @Injectable()
 export class SettingsService implements OnModuleInit {
@@ -35,6 +56,7 @@ export class SettingsService implements OnModuleInit {
             purpose: 'ocr',
             displayName: '识别-通义千问VL Plus',
             model: 'qwen3-vl-plus',
+            platform: 'aliyun',
             prompt: DEFAULT_OCR_PROMPT,
             billing: 'token',
             avgTokensIn: 3000,
@@ -45,7 +67,8 @@ export class SettingsService implements OnModuleInit {
           }),
           this.models.create({
             purpose: 'clean',
-            displayName: '清理-火山方舟 Seedream',
+            displayName: '图片处理-火山方舟 Seedream',
+            platform: 'ark',
             model: 'doubao-seedream-5-0-pro-260628',
             baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
             prompt: DEFAULT_CLEAN_PROMPT,
@@ -124,35 +147,195 @@ export class SettingsService implements OnModuleInit {
 
   async listModels() {
     const rows = await this.models.find({ order: { purpose: 'ASC', isDefault: 'DESC', id: 'ASC' } });
-    return rows.map((m) => this.toPublicModel(m));
+    const keyed = await this.platformsWithKey();
+    return rows.map((m) => this.toPublicModel(m, keyed));
+  }
+
+  /** 已填写大模型 API Key 的平台 */
+  private async platformsWithKey(): Promise<Set<string>> {
+    const all = await this.readPlatforms();
+    const out = new Set<string>();
+    for (const [code, v] of Object.entries(all)) {
+      if (decryptSecret(v?.values?.apiKey || '')) out.add(code);
+    }
+    return out;
   }
 
   /** Strip encrypted key; expose mask + flags for UI */
-  toPublicModel(m: AiModel) {
+  toPublicModel(m: AiModel, keyedPlatforms?: Set<string>) {
     const plain = decryptSecret(m.apiKey || '');
     const { apiKey: _drop, ...rest } = m as any;
+    const platform = this.platformOf(m);
     return {
       ...rest,
+      platform,
       baseUrl: m.baseUrl || '',
       apiKeySet: !!plain,
       apiKeyMasked: maskSecret(plain),
+      /** 模型自己没填 Key，但所属平台已填 */
+      platformKeySet: !!platform && !!keyedPlatforms?.has(platform),
     };
   }
 
-  /** Resolve runtime credentials: model first, then global/env fallback */
-  async resolveCredentials(model?: AiModel | null): Promise<{ baseUrl: string; apiKey: string; imageEditUrl: string; concurrency: number; timeoutSec: number }> {
-    const global = await this.getAliyun();
-    const plain = decryptSecret(model?.apiKey || '');
-    const apiKey = plain || global.apiKey;
-    const baseUrl = String(model?.baseUrl || global.baseUrl || DEFAULT_BASE_URL)
+  // ---------------- 通用设置 ----------------
+
+  async getGeneral(): Promise<GeneralConfig> {
+    const legacy = await this.read<any>('aliyun', {});
+    const raw = await this.read<any>('general', {});
+    return {
+      concurrency: clampInt(raw.concurrency ?? legacy.concurrency, 1, 16, 3),
+      timeoutSec: clampInt(raw.timeoutSec ?? legacy.timeoutSec, 20, 900, 300),
+      publicBaseUrl: String(raw.publicBaseUrl || process.env.PUBLIC_BASE_URL || '')
+        .trim()
+        .replace(/\/+$/, ''),
+    };
+  }
+
+  async saveGeneral(body: Partial<GeneralConfig>) {
+    const cur = await this.getGeneral();
+    const publicBaseUrl = String(body.publicBaseUrl ?? cur.publicBaseUrl ?? '')
       .trim()
       .replace(/\/+$/, '');
+    if (publicBaseUrl && !/^https?:\/\//i.test(publicBaseUrl)) {
+      throw new BadRequestException('公网访问地址需以 http:// 或 https:// 开头');
+    }
+    const next: GeneralConfig = {
+      concurrency: clampInt(body.concurrency ?? cur.concurrency, 1, 16, 3),
+      timeoutSec: clampInt(body.timeoutSec ?? cur.timeoutSec, 20, 900, 300),
+      publicBaseUrl,
+    };
+    await this.write('general', next);
+    return next;
+  }
+
+  // ---------------- 平台账号 ----------------
+
+  private async readPlatforms(): Promise<Record<string, StoredPlatform>> {
+    const row = await this.settings.findOne({ where: { key: 'platforms' } });
+    if (!row?.value) return {};
+    try {
+      const v = JSON.parse(row.value);
+      return v && typeof v === 'object' ? v : {};
+    } catch {
+      return {};
+    }
+  }
+
+  /** 解密后的平台配置（仅服务端内部使用） */
+  async getPlatformSecrets(code: string | null | undefined) {
+    const def = getPlatformDef(code);
+    if (!def) return null;
+    const stored = (await this.readPlatforms())[def.code] || {};
+    const values: Record<string, string> = {};
+    for (const f of def.fields) {
+      const v = stored.values?.[f.key] || '';
+      values[f.key] = f.secret ? decryptSecret(v) : v;
+    }
     return {
+      def,
+      baseUrl: String(stored.baseUrl || def.defaultBaseUrl).trim().replace(/\/+$/, ''),
+      imageTransport: (stored.imageTransport === 'url' ? 'url' : 'base64') as 'base64' | 'url',
+      values,
+    };
+  }
+
+  /** 给配置页的平台列表：目录 + 已填状态（密钥只给掩码） */
+  async listPlatformsPublic() {
+    const all = await this.readPlatforms();
+    const models = await this.models.find();
+    return PLATFORMS.map((def) => {
+      const stored = all[def.code] || {};
+      const fields = def.fields.map((f) => {
+        const raw = stored.values?.[f.key] || '';
+        const plain = f.secret ? decryptSecret(raw) : raw;
+        return {
+          ...f,
+          set: !!plain,
+          value: f.secret ? '' : plain,
+          masked: f.secret ? maskSecret(plain) : '',
+        };
+      });
+      const modelCount = models.filter((m) => (m.platform || guessPlatform(m.baseUrl)) === def.code).length;
+      return {
+        ...def,
+        baseUrl: stored.baseUrl || '',
+        imageTransport: stored.imageTransport === 'url' ? 'url' : 'base64',
+        fields,
+        configured: fields.some((f) => f.scope === 'general' && f.set),
+        modelCount,
+      };
+    });
+  }
+
+  async savePlatform(
+    code: string,
+    body: { baseUrl?: string; imageTransport?: string; values?: Record<string, string>; clear?: string[] },
+  ) {
+    const def = getPlatformDef(code);
+    if (!def) throw new NotFoundException('未知平台');
+    const all = await this.readPlatforms();
+    const cur: StoredPlatform = all[def.code] || {};
+    const baseUrl = String(body.baseUrl ?? cur.baseUrl ?? '').trim().replace(/\/+$/, '');
+    if (baseUrl && !/^https?:\/\//i.test(baseUrl)) throw new BadRequestException('服务地址需以 http:// 或 https:// 开头');
+    const values = { ...(cur.values || {}) };
+    const clear = new Set(body.clear || []);
+    for (const f of def.fields) {
+      if (clear.has(f.key)) {
+        delete values[f.key];
+        continue;
+      }
+      const v = body.values?.[f.key];
+      if (v == null) continue;
+      const t = String(v).trim();
+      // 密钥留空 = 保留原值；普通字段留空 = 清空
+      if (f.secret) {
+        if (t) values[f.key] = encryptSecret(t);
+      } else if (t) values[f.key] = t;
+      else delete values[f.key];
+    }
+    all[def.code] = {
+      baseUrl: baseUrl && baseUrl !== def.defaultBaseUrl ? baseUrl : '',
+      imageTransport: body.imageTransport === 'url' ? 'url' : body.imageTransport === 'base64' ? 'base64' : cur.imageTransport || 'base64',
+      values,
+    };
+    await this.settings.save({ key: 'platforms', value: JSON.stringify(all) });
+    return (await this.listPlatformsPublic()).find((p) => p.code === def.code);
+  }
+
+  /** 模型所属平台：显式字段优先，老数据按地址推断 */
+  platformOf(model?: AiModel | null): PlatformCode | null {
+    if (!model) return null;
+    return (getPlatformDef(model.platform)?.code as PlatformCode) || guessPlatform(model.baseUrl);
+  }
+
+  /**
+   * 运行时凭证：模型自己的 Key / 地址 → 所属平台的 Key / 地址 → 旧版全局阿里云配置（兼容）
+   */
+  async resolveCredentials(model?: AiModel | null): Promise<ResolvedCredentials> {
+    const legacy = await this.getAliyun();
+    const general = await this.getGeneral();
+    const platform = this.platformOf(model);
+    const p = await this.getPlatformSecrets(platform);
+    const modelKey = decryptSecret(model?.apiKey || '');
+    const apiKey = modelKey || p?.values.apiKey || (platform === 'aliyun' || !platform ? legacy.apiKey : '');
+    let baseUrl = String(model?.baseUrl || p?.baseUrl || legacy.baseUrl || DEFAULT_BASE_URL)
+      .trim()
+      .replace(/\/+$/, '');
+    // 阿里云平台地址是域名根；文字识别走 OpenAI 兼容接口，需要 /compatible-mode/v1
+    if (!model?.baseUrl && platform === 'aliyun' && model?.purpose === 'ocr' && !/compatible-mode/i.test(baseUrl)) {
+      try {
+        baseUrl = new URL(baseUrl).origin + '/compatible-mode/v1';
+      } catch {}
+    }
+    return {
+      platform,
       baseUrl,
       apiKey,
-      imageEditUrl: global.imageEditUrl,
-      concurrency: global.concurrency,
-      timeoutSec: global.timeoutSec,
+      imageEditUrl: legacy.imageEditUrl,
+      concurrency: general.concurrency,
+      timeoutSec: general.timeoutSec,
+      imageTransport: p?.imageTransport || 'base64',
+      publicBaseUrl: general.publicBaseUrl,
     };
   }
 
@@ -161,7 +344,8 @@ export class SettingsService implements OnModuleInit {
       where: { purpose: 'ocr', enabled: 1 },
       order: { isDefault: 'DESC', id: 'ASC' },
     });
-    return rows.map((m) => this.toPublicModel(m));
+    const keyed = await this.platformsWithKey();
+    return rows.map((m) => this.toPublicModel(m, keyed));
   }
 
   async listEnabledCleanModels() {
@@ -169,7 +353,8 @@ export class SettingsService implements OnModuleInit {
       where: { purpose: 'clean', enabled: 1 },
       order: { isDefault: 'DESC', id: 'ASC' },
     });
-    return rows.map((m) => this.toPublicModel(m));
+    const keyed = await this.platformsWithKey();
+    return rows.map((m) => this.toPublicModel(m, keyed));
   }
 
   async getModel(id: number | null | undefined): Promise<AiModel | null> {
@@ -188,7 +373,25 @@ export class SettingsService implements OnModuleInit {
     const existing = id ? await this.models.findOne({ where: { id } }) : null;
     if (id && !existing) throw new NotFoundException('模型不存在');
     const purpose = (body.purpose ?? existing?.purpose) as 'ocr' | 'clean';
-    if (purpose !== 'ocr' && purpose !== 'clean') throw new BadRequestException('用途只能是文字识别或图片清理');
+    if (purpose !== 'ocr' && purpose !== 'clean') throw new BadRequestException('用途只能是文字识别或图片处理');
+    let platform: PlatformCode | null = (existing?.platform as PlatformCode) ?? null;
+    if ((body as any).platform !== undefined) {
+      const raw = String((body as any).platform || '').trim();
+      const def = raw ? getPlatformDef(raw) : null;
+      if (raw && !def) throw new BadRequestException('未知平台：' + raw);
+      platform = (def?.code as PlatformCode) || null;
+    }
+    if (purpose === 'clean' && platform && !getPlatformDef(platform)!.imageEdit.supported) {
+      throw new BadRequestException(`${getPlatformDef(platform)!.name}不支持图生图，不能用作图片处理模型`);
+    }
+    let outputSize = existing?.outputSize ?? null;
+    if ((body as any).outputSize !== undefined) {
+      const os = String((body as any).outputSize || '').trim();
+      if (os && !/^\d{2,5}\s*[x*:×]\s*\d{2,5}$/i.test(os) && !/^[124]K$/i.test(os)) {
+        throw new BadRequestException('输出尺寸格式如 2048x2048、2K，留空为按原图比例自动计算');
+      }
+      outputSize = os || null;
+    }
     const model = String(body.model ?? existing?.model ?? '').trim();
     const displayName = String(body.displayName ?? existing?.displayName ?? '').trim();
     if (!model) throw new BadRequestException('请填写模型名');
@@ -210,6 +413,8 @@ export class SettingsService implements OnModuleInit {
       purpose,
       model,
       displayName,
+      platform,
+      outputSize,
       baseUrl: nextBaseUrl,
       apiKey: nextApiKey,
       billing,
@@ -240,17 +445,18 @@ export class SettingsService implements OnModuleInit {
       if (first) await this.models.update(first.id, { isDefault: 1 });
     }
     const full = await this.models.findOne({ where: { id: saved.id } });
-    return full ? this.toPublicModel(full) : null;
+    return full ? this.toPublicModel(full, await this.platformsWithKey()) : null;
   }
 
   async removeModel(id: number) {
     const row = await this.models.findOne({ where: { id } });
     if (!row) throw new NotFoundException('模型不存在');
-    const inUse = await this.tasks.count({
-      where: { ocrModelId: id, status: In(['pending', 'processing', 'reviewing']) },
-    });
+    const unfinished = In(['pending', 'processing', 'reviewing', 'failed']);
+    const inUse =
+      (await this.tasks.count({ where: { ocrModelId: id, status: unfinished } })) +
+      (await this.tasks.count({ where: { cleanModelId: id, status: unfinished } }));
     if (inUse > 0) {
-      throw new BadRequestException(`有 ${inUse} 个未完成任务正在使用该模型，请先完成或停用模型`);
+      throw new BadRequestException(`有 ${inUse} 个未完成任务正在使用该模型，请先完成这些任务，或改为停用模型`);
     }
     await this.models.delete(id);
     if (row.isDefault) {

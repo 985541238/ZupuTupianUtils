@@ -67,7 +67,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   // Create Task Modal (path pick + genealogy fields, no folder tree)
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [taskName, setTaskName] = useState('');
-  const [taskDescription, setTaskDescription] = useState('旧族谱复印页去污去褶皱清晰化，供后续 OCR 识别与数据化');
+  const [taskDescription, setTaskDescription] = useState('旧族谱复印页图片处理（去污去褶皱、白底黑字），供后续 OCR 识别与数据化');
   const [genealogyNote, setGenealogyNote] = useState('');
   const [useAiRecognition, setUseAiRecognition] = useState(false);
   const [ocrModels, setOcrModels] = useState<any[]>([]);
@@ -76,8 +76,9 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   const [cleanModels, setCleanModels] = useState<any[]>([]);
   const [selectedCleanModelId, setSelectedCleanModelId] = useState<number | null>(null);
   const [pageCountPreview, setPageCountPreview] = useState(0);
-  const [costEstimate, setCostEstimate] = useState<number | null>(null);
-  const [costPriced, setCostPriced] = useState(false);
+  // 图片处理、AI 识别各自的费用预估（之前共用一个值，会互相覆盖）
+  const [cleanEst, setCleanEst] = useState<{ cost: number | null; priced: boolean }>({ cost: null, priced: false });
+  const [ocrEst, setOcrEst] = useState<{ cost: number | null; priced: boolean }>({ cost: null, priced: false });
   const [folderPath, setFolderPath] = useState('');
   const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [browseCurrent, setBrowseCurrent] = useState('');
@@ -168,21 +169,35 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     }
   };
 
-  const refreshEstimate = async (modelId: number | null, pages: number) => {
-    if (!modelId || pages <= 0) {
-      setCostEstimate(null);
-      setCostPriced(false);
-      return;
-    }
-    try {
-      const r = await api.estimateCost(modelId, pages);
-      setCostEstimate(r.cost != null ? Number(r.cost) : null);
-      setCostPriced(!!r.priced);
-    } catch {
-      setCostEstimate(null);
-      setCostPriced(false);
-    }
-  };
+  React.useEffect(() => {
+    let off = false;
+    const run = async (
+      on: boolean,
+      modelId: number | null,
+      set: (v: { cost: number | null; priced: boolean }) => void,
+    ) => {
+      if (!on || !modelId || pageCountPreview <= 0) {
+        set({ cost: null, priced: false });
+        return;
+      }
+      try {
+        const r = await api.estimateCost(modelId, pageCountPreview);
+        if (!off) set({ cost: r.cost != null ? Number(r.cost) : null, priced: !!r.priced });
+      } catch {
+        if (!off) set({ cost: null, priced: false });
+      }
+    };
+    void run(useAiClean, selectedCleanModelId, setCleanEst);
+    void run(useAiRecognition, selectedModelId, setOcrEst);
+    return () => {
+      off = true;
+    };
+  }, [useAiClean, selectedCleanModelId, useAiRecognition, selectedModelId, pageCountPreview]);
+
+  const totalEstimate =
+    (useAiClean && cleanEst.cost != null) || (useAiRecognition && ocrEst.cost != null)
+      ? (useAiClean ? cleanEst.cost || 0 : 0) + (useAiRecognition ? ocrEst.cost || 0 : 0)
+      : null;
 
   const openCreateModal = () => {
     // Always start blank — never prefill last/default folder.
@@ -190,11 +205,10 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     setTaskName('');
     setUseAiRecognition(false);
     setPageCountPreview(0);
-    setCostEstimate(null);
-    setCostPriced(false);
+    setUseAiClean(false);
     void loadOcrModels();
     void loadCleanModels();
-    setTaskDescription('旧族谱复印页去污去褶皱清晰化，供后续 OCR 识别与数据化');
+    setTaskDescription('旧族谱复印页图片处理（去污去褶皱、白底黑字），供后续 OCR 识别与数据化');
     setGenealogyNote('');
     setFolderPath('');
   };
@@ -244,11 +258,6 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
         const data = await api.browseFolder(browseCurrent);
         const files = Number(data?.imageCount) || 0;
         setPageCountPreview(files);
-        if (useAiClean && selectedCleanModelId) {
-          await refreshEstimate(selectedCleanModelId, files);
-        } else if (useAiRecognition && selectedModelId) {
-          await refreshEstimate(selectedModelId, files);
-        }
       } catch {
         setPageCountPreview(0);
       }
@@ -286,14 +295,14 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
         {
           name: taskName.trim(),
           folderPath: folderPath.trim(),
-          description: taskDescription.trim() || '旧族谱复印页去污去褶皱清晰化，供后续 OCR 识别与数据化',
+          description: taskDescription.trim() || '旧族谱复印页图片处理（去污去褶皱、白底黑字），供后续 OCR 识别与数据化',
           genealogyNote: genealogyNote.trim(),
           surname: genealogyNote.trim(),
           useAi: useAiRecognition,
           ocrModelId: useAiRecognition ? selectedModelId : null,
           useAiClean: useAiClean,
           cleanModelId: useAiClean ? selectedCleanModelId : null,
-          estimatedCost: (useAiClean || useAiRecognition) ? costEstimate : null,
+          estimatedCost: (useAiClean || useAiRecognition) ? totalEstimate : null,
           status: 'pending',
           totalPages: 0,
           reviewedPages: 0,
@@ -309,7 +318,6 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
       setFolderPath('');
       setUseAiRecognition(false);
       setUseAiClean(false);
-      setCostEstimate(null);
     } catch (e: any) {
       alert(e?.message || '创建任务失败');
     } finally {
@@ -343,7 +351,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
               族谱清晰化工作台
             </h1>
             <p className="text-xs text-[#86868B] mt-0.5 font-medium">
-              旧谱复印页去污去褶皱清晰化 · 供后续 OCR 识别与数据化
+              旧谱复印页图片处理（白底黑字）· 供后续 OCR 识别与数据化
             </p>
           </div>
 
@@ -588,6 +596,21 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         ) : null}
                         <span className="text-black/15">·</span>
                         <span className="tabular-nums">共 {task.totalPages} 页</span>
+                        <span className="text-black/15">·</span>
+                        <span
+                          className={`inline-flex items-center px-1.5 py-px rounded-full text-[10px] font-semibold ${
+                            task.useAiClean ? 'bg-[#AF52DE]/12 text-[#8944AB]' : 'bg-black/[0.05] text-[#6E6E73]'
+                          }`}
+                          title="图片处理方式"
+                        >
+                          {task.useAiClean ? '大模型处理' : '算法处理'}
+                        </span>
+                        {task.actualCost ? (
+                          <>
+                            <span className="text-black/15">·</span>
+                            <span className="tabular-nums">费用 ¥{task.actualCost.toFixed(2)}</span>
+                          </>
+                        ) : null}
                         {isProcessing ? (
                           <>
                             <span className="text-black/15">·</span>
@@ -617,7 +640,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         <div className="pt-0.5 max-w-md">
                           <div className="flex items-center justify-between mb-1">
                             <span className="text-[10px] font-medium text-[#86868B]">
-                              去污去褶皱与二值化
+                              {task.useAiClean ? '图生图大模型处理中' : '现有算法处理（去污、白底黑字）'}
                             </span>
                             <span className="text-[10px] font-semibold text-[#0071E3] tabular-nums">
                               {processPct}%
@@ -631,6 +654,16 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                           </div>
                         </div>
                       )}
+
+                      {!isProcessing && task.errorMessage ? (
+                        <div
+                          className={`text-[11px] leading-relaxed max-w-xl ${
+                            task.nestStatus === 'failed' ? 'text-[#C62828]' : 'text-[#C93400]'
+                          }`}
+                        >
+                          {task.errorMessage}
+                        </div>
+                      ) : null}
 
                       {!isProcessing && task.status === 'reviewing' && task.totalPages > 0 && (
                         <div className="pt-0.5 max-w-md">
@@ -788,10 +821,10 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
             <div className="flex items-center justify-between pb-3.5 border-b border-black/[0.06] mb-4">
               <div>
                 <h3 className="text-base font-bold text-[#1D1D1F]">
-                  新建族谱清晰化任务
+                  新建族谱图片处理任务
                 </h3>
                 <p className="text-xs text-[#86868B] mt-0.5">
-                  旧谱复印页清晰化 → 供后续 OCR 识别与数据化
+                  旧谱复印页处理成白底黑字 → 供后续 OCR 识别与数据化
                 </p>
               </div>
               <button
@@ -850,19 +883,15 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                     checked={useAiClean}
                     disabled={!cleanModels.length}
                     onChange={(e) => {
-                      const on = e.target.checked;
-                      setUseAiClean(on);
-                      if (on && selectedCleanModelId) void refreshEstimate(selectedCleanModelId, pageCountPreview);
-                      if (!on && !useAiRecognition) { setCostEstimate(null); setCostPriced(false); }
-                      if (!on && useAiRecognition && selectedModelId) void refreshEstimate(selectedModelId, pageCountPreview);
+                      setUseAiClean(e.target.checked);
                     }}
                   />
                   <span className="min-w-0">
-                    <span className="block text-xs font-semibold text-[#1D1D1F]">使用 AI 图片处理</span>
+                    <span className="block text-xs font-semibold text-[#1D1D1F]">使用图生图大模型处理图片</span>
                     <span className="block text-[11px] text-[#86868B] mt-0.5 leading-relaxed">
                       {cleanModels.length
-                        ? '勾选后启动任务不走本地清晰化，整本页面用所选模型做AI图片处理。'
-                        : '尚未配置可用图片处理模型，请先打开右上角「模型配置」。'}
+                        ? '勾选后整本不再用现有算法，每页完全由所选大模型处理成白底黑字；不勾选则用现有算法。审核页可对单页改用大模型。'
+                        : '尚未配置图片处理模型，请先到右上角「模型配置」添加（平台账号里填好 Key）。'}
                     </span>
                   </span>
                 </label>
@@ -875,7 +904,6 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                       onChange={(e) => {
                         const id = e.target.value ? Number(e.target.value) : null;
                         setSelectedCleanModelId(id);
-                        if (useAiClean && id) void refreshEstimate(id, pageCountPreview);
                       }}
                       className="w-full px-3 py-2 text-xs bg-white border border-black/[0.06] rounded-xl disabled:bg-[#E5E5EA]/50 disabled:text-[#86868B]"
                     >
@@ -892,8 +920,8 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         ? '—'
                         : !pageCountPreview
                           ? '选择文件夹后按页数估算'
-                          : costPriced && costEstimate != null
-                            ? `约 ¥${costEstimate.toFixed(4)}（${pageCountPreview} 页）`
+                          : cleanEst.priced && cleanEst.cost != null
+                            ? `约 ¥${cleanEst.cost.toFixed(4)}（${pageCountPreview} 页）`
                             : `已选 ${pageCountPreview} 页（请在配置页填写单价）`}
                     </div>
                   </div>
@@ -908,17 +936,14 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                     checked={useAiRecognition}
                     disabled={!ocrModels.length}
                     onChange={(e) => {
-                      const on = e.target.checked;
-                      setUseAiRecognition(on);
-                      if (on && selectedModelId) void refreshEstimate(selectedModelId, pageCountPreview);
-                      if (!on) { setCostEstimate(null); setCostPriced(false); }
+                      setUseAiRecognition(e.target.checked);
                     }}
                   />
                   <span className="min-w-0">
                     <span className="block text-xs font-semibold text-[#1D1D1F]">使用 AI 识别</span>
                     <span className="block text-[11px] text-[#86868B] mt-0.5 leading-relaxed">
                       {ocrModels.length
-                        ? '勾选后整本任务在清晰化后使用所选模型识别；审阅页也可对单页再识别。'
+                        ? '勾选后整本任务在图片处理后使用所选模型识别；审阅页也可对单页再识别。'
                         : '尚未配置可用识别模型，请先打开右上角「模型配置」。'}
                     </span>
                   </span>
@@ -932,7 +957,6 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                       onChange={(e) => {
                         const id = e.target.value ? Number(e.target.value) : null;
                         setSelectedModelId(id);
-                        if (useAiRecognition && id) void refreshEstimate(id, pageCountPreview);
                       }}
                       className="w-full px-3 py-2 text-xs bg-white border border-black/[0.06] rounded-xl disabled:bg-[#E5E5EA]/50 disabled:text-[#86868B]"
                     >
@@ -949,8 +973,8 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         ? '—'
                         : !pageCountPreview
                           ? '选择文件夹后按页数估算'
-                          : costPriced && costEstimate != null
-                            ? `约 ¥${costEstimate.toFixed(4)}（${pageCountPreview} 页）`
+                          : ocrEst.priced && ocrEst.cost != null
+                            ? `约 ¥${ocrEst.cost.toFixed(4)}（${pageCountPreview} 页）`
                             : `已选 ${pageCountPreview} 页（请在配置页填写单价）`}
                     </div>
                   </div>

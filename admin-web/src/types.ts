@@ -43,6 +43,14 @@ export interface ScanItem {
   /** Nest image status (ready/done/confirmed/...) */
   nestStatus?: string;
   cropBoxRaw?: any;
+  /** 当前结果图来源：algo = 现有算法，ai = 图生图大模型 */
+  processMode?: 'algo' | 'ai' | null;
+  hasAlgoResult?: boolean;
+  hasAiResult?: boolean;
+  aiModelId?: number | null;
+  /** 图片处理费用（元） */
+  cleanCost?: number;
+  errorMessage?: string | null;
   /** AI 识别结果原文（JSON 字符串或摘要） */
   ocrJson?: string | null;
   ocrText?: string;
@@ -52,7 +60,7 @@ export interface Task {
   id: string;
   name: string;
   folderPath: string;
-  /** 任务说明（清晰化目的） */
+  /** 任务说明 */
   description?: string;
   /** 姓氏/谱系备注 */
   genealogyNote?: string;
@@ -64,6 +72,8 @@ export interface Task {
   cleanModelId?: number | null;
   ocrModelId?: number | null;
   estimatedCost?: number | null;
+  actualCost?: number;
+  errorMessage?: string | null;
   status: 'pending' | 'reviewing' | 'completed';
   /** Original Nest status */
   nestStatus?: string;

@@ -96,12 +96,7 @@ export class TasksController {
   @Get(':id/images')
   async images(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
     const list = await this.tasks.listImages(req.user.id, id);
-    return list.map((img) => ({
-      ...img,
-      sourceUrl: this.tasks.fileUrl(img.sourcePath),
-      resultUrl: this.tasks.fileUrl(img.resultPath),
-      thumbUrl: this.tasks.fileUrl(img.thumbPath),
-    }));
+    return list.map((img) => this.tasks.imageView(img));
   }
 
   @Get(':id/images/:imageId')
@@ -111,12 +106,7 @@ export class TasksController {
     @Param('imageId', ParseIntPipe) imageId: number,
   ) {
     const img = await this.tasks.getImage(req.user.id, id, imageId);
-    return {
-      ...img,
-      sourceUrl: this.tasks.fileUrl(img.sourcePath),
-      resultUrl: this.tasks.fileUrl(img.resultPath),
-      thumbUrl: this.tasks.fileUrl(img.thumbPath),
-    };
+    return this.tasks.imageView(img);
   }
 
   @Post(':id/images/:imageId/preview')
@@ -160,13 +150,18 @@ export class TasksController {
     @Body() body: any,
   ) {
     const img = await this.tasks.reprocessImage(req.user.id, id, imageId, body || {});
-    const bust = '&t=' + Date.now();
-    return {
-      ...img,
-      sourceUrl: this.tasks.fileUrl(img.sourcePath) + bust,
-      resultUrl: this.tasks.fileUrl(img.resultPath) + bust,
-      thumbUrl: this.tasks.fileUrl(img.thumbPath) + bust,
-    };
+    return this.tasks.imageView(img);
+  }
+
+  /** 切换当前结果：{ mode: 'algo' | 'ai' } */
+  @Post(':id/images/:imageId/use-result')
+  useResult(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('imageId', ParseIntPipe) imageId: number,
+    @Body() body: any,
+  ) {
+    return this.tasks.useResult(req.user.id, id, imageId, String(body?.mode || ''));
   }
 
 @Post(':id/images/:imageId/confirm')

@@ -18,6 +18,26 @@ export class TaskImage {
   @Column({ name: 'result_path', length: 1024, nullable: true })
   resultPath: string | null;
 
+  /** 当前结果图来源：algo = 现有算法，ai = 图生图大模型 */
+  @Column({ name: 'process_mode', length: 16, nullable: true })
+  processMode: 'algo' | 'ai' | null;
+
+  /** 算法结果（与 ai 结果分开保存，可来回切换） */
+  @Column({ name: 'algo_result_path', length: 1024, nullable: true })
+  algoResultPath: string | null;
+
+  /** 大模型结果 */
+  @Column({ name: 'ai_result_path', length: 1024, nullable: true })
+  aiResultPath: string | null;
+
+  /** 生成大模型结果所用模型 */
+  @Column({ name: 'ai_model_id', type: 'bigint', unsigned: true, nullable: true })
+  aiModelId: number | null;
+
+  /** 图片处理费用（元，累计），与识别费用 cost 分开 */
+  @Column({ name: 'clean_cost', type: 'decimal', precision: 12, scale: 4, default: 0 })
+  cleanCost: string;
+
   @Column({ name: 'thumb_path', length: 1024, nullable: true })
   thumbPath: string | null;
 

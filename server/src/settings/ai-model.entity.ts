@@ -14,7 +14,15 @@ export class AiModel {
   @Column({ length: 128 })
   model: string;
 
-  /** Optional per-model DashScope compatible base URL */
+  /** 所属平台：ark / aliyun / baidu / tencent / zhipu / deepseek；为空时按 base_url 推断 */
+  @Column({ length: 32, nullable: true })
+  platform: string | null;
+
+  /** 图片处理输出尺寸，如 2048x2048 / 2K；为空 = 按原图比例自动计算 */
+  @Column({ name: 'output_size', length: 32, nullable: true })
+  outputSize: string | null;
+
+  /** Optional per-model base URL (overrides platform base URL) */
   @Column({ name: 'base_url', length: 255, nullable: true })
   baseUrl: string | null;
 

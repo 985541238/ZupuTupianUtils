@@ -25,11 +25,43 @@ export class SettingsController {
 
   @Get()
   async all() {
-    const [aliyun, models] = await Promise.all([
+    const [aliyun, models, platforms, general] = await Promise.all([
       this.settings.getAliyunPublic(),
       this.settings.listModels(),
+      this.settings.listPlatformsPublic(),
+      this.settings.getGeneral(),
     ]);
-    return { aliyun, models, mock: process.env.AI_MOCK === '1' };
+    return { aliyun, models, platforms, general, mock: process.env.AI_MOCK === '1' };
+  }
+
+  @Put('general')
+  saveGeneral(@Body() body: any) {
+    return this.settings.saveGeneral(body || {});
+  }
+
+  @Get('platforms')
+  platforms() {
+    return this.settings.listPlatformsPublic();
+  }
+
+  @Put('platforms/:code')
+  savePlatform(@Param('code') code: string, @Body() body: any) {
+    return this.settings.savePlatform(code, body || {});
+  }
+
+  /** 测试平台 Key：可带弹窗里尚未保存的 Key / 地址 */
+  @Post('platforms/:code/test')
+  async testPlatform(@Param('code') code: string, @Body() body: { apiKey?: string; baseUrl?: string }) {
+    if (process.env.AI_MOCK === '1') return { ok: false, mock: true, error: '当前为 AI_MOCK，未真实连通' };
+    try {
+      const r = await this.aliyun.pingPlatform(code, {
+        apiKey: String(body?.apiKey || '').trim() || undefined,
+        baseUrl: String(body?.baseUrl || '').trim() || undefined,
+      });
+      return { ok: true, ms: r.ms, reply: r.reply };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e) };
+    }
   }
 
   @Put('aliyun')
@@ -52,6 +84,7 @@ export class SettingsController {
     body: {
       id?: number;
       purpose?: 'ocr' | 'clean';
+      platform?: string;
       baseUrl?: string;
       apiKey?: string;
       model?: string;
@@ -62,7 +95,9 @@ export class SettingsController {
     if (draft.id && !saved) throw new BadRequestException('模型不存在');
 
     const inputKey = String(draft.apiKey || '').trim();
-    const creds = await this.settings.resolveCredentials(saved);
+    // 弹窗里改了所属平台：按新平台取 Key / 地址
+    const credsFor = draft.platform !== undefined ? ({ ...(saved || {}), platform: draft.platform || null, apiKey: saved?.apiKey ?? null } as any) : saved;
+    const creds = await this.settings.resolveCredentials(credsFor);
     const apiKey = inputKey || creds.apiKey;
     if (!apiKey) {
       return { ok: false, error: '请先填写 API Key' };
@@ -87,10 +122,11 @@ export class SettingsController {
     const purpose = (saved?.purpose || (draft as any).purpose || 'ocr') as 'ocr' | 'clean';
     const resolvedBase = baseUrl || creds.baseUrl;
     const probe = saved
-      ? ({ ...saved, model: modelCode, baseUrl: resolvedBase || saved.baseUrl, purpose } as any)
+      ? ({ ...saved, platform: credsFor?.platform ?? saved.platform, model: modelCode, baseUrl: resolvedBase || saved.baseUrl, purpose } as any)
       : ({
           id: 0,
           purpose,
+          platform: draft.platform || null,
           displayName: 'probe',
           model: modelCode,
           baseUrl: resolvedBase || null,
@@ -108,12 +144,7 @@ export class SettingsController {
         } as any);
 
     try {
-      const isImageEndpoint =
-        purpose === 'clean' ||
-        /ark\.cn-beijing\.volces\.com|images\/generations|multimodal-generation|maas\.aliyuncs\.com/i.test(
-          resolvedBase || '',
-        );
-      const r = isImageEndpoint
+      const r = purpose === 'clean'
         ? await this.aliyun.pingImage(probe, { apiKey, baseUrl: resolvedBase })
         : await this.aliyun.ping(probe, { apiKey, baseUrl: resolvedBase });
       return { ok: true, ms: r.ms, model: modelCode, reply: r.reply };

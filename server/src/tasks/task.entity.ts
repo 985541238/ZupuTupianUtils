@@ -62,7 +62,7 @@ export class Task {
   @Column({ name: 'ocr_model_id', type: 'bigint', unsigned: true, nullable: true })
   ocrModelId: number | null;
 
-  /** 非空表示建任务时选用了 AI 图片处理，启动后跳过本地 ScanWash，整本走阿里云 clean 模型 */
+  /** 非空表示建任务时选用了图生图大模型：整本跳过现有算法，结果完全由该模型生成 */
   @Column({ name: 'clean_model_id', type: 'bigint', unsigned: true, nullable: true })
   cleanModelId: number | null;
 

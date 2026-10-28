@@ -113,7 +113,15 @@ export const api = {
   getSettings: () => request<any>('/settings'),
   saveAliyun: (body: any) => request<any>('/settings/aliyun', { method: 'PUT', body: JSON.stringify(body) }),
   testAliyun: () => request<any>('/settings/aliyun/test', { method: 'POST', body: '{}' }),
-  testModel: (body: { id?: number; purpose?: 'ocr' | 'clean'; baseUrl?: string; apiKey?: string; model?: string }) =>
+  saveGeneral: (body: { concurrency?: number; timeoutSec?: number; publicBaseUrl?: string }) =>
+    request<any>('/settings/general', { method: 'PUT', body: JSON.stringify(body || {}) }),
+  savePlatform: (
+    code: string,
+    body: { baseUrl?: string; imageTransport?: 'base64' | 'url'; values?: Record<string, string>; clear?: string[] },
+  ) => request<any>('/settings/platforms/' + code, { method: 'PUT', body: JSON.stringify(body || {}) }),
+  testPlatform: (code: string, body: { apiKey?: string; baseUrl?: string }) =>
+    request<any>('/settings/platforms/' + code + '/test', { method: 'POST', body: JSON.stringify(body || {}) }),
+  testModel: (body: { id?: number; purpose?: 'ocr' | 'clean'; platform?: string; baseUrl?: string; apiKey?: string; model?: string }) =>
     request<any>('/settings/models/test', { method: 'POST', body: JSON.stringify(body || {}) }),
   listOcrModels: () => request<any[]>('/settings/models/ocr'),
   listCleanModels: () => request<any[]>('/settings/models/clean'),
@@ -133,6 +141,12 @@ export const api = {
     request<any>(`/tasks/${taskId}/images/${imageId}/ai-process`, {
       method: 'POST',
       body: JSON.stringify(body || {}),
+    }),
+  /** 切换当前结果：algo = 算法结果，ai = 大模型结果 */
+  useImageResult: (taskId: string | number, imageId: string | number, mode: 'algo' | 'ai') =>
+    request<any>(`/tasks/${taskId}/images/${imageId}/use-result`, {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
     }),
 };
 

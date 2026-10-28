@@ -21,6 +21,7 @@ import {
 } from './image-process.service';
 import { SettingsService } from '../settings/settings.service';
 import { AliyunService, AiConfigError } from '../ai/aliyun.service';
+import { AiModel } from '../settings/ai-model.entity';
 
 const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp']);
 
@@ -109,7 +110,7 @@ export class TasksService implements OnModuleInit {
     const description =
       dto.description != null && String(dto.description).trim()
         ? String(dto.description).trim()
-        : '旧族谱复印页去污去褶皱清晰化，供后续 OCR 识别与数据化';
+        : '旧族谱复印页图片处理（去污去褶皱、白底黑字），供后续 OCR 识别与数据化';
     const surname =
       dto.surname != null && String(dto.surname).trim()
         ? String(dto.surname).trim()
@@ -150,6 +151,10 @@ export class TasksService implements OnModuleInit {
       const model = await this.settings.getModel(modelId);
       if (!model || !model.enabled || model.purpose !== 'clean') {
         throw new BadRequestException('所选图片处理模型不可用，请先到「模型配置」添加');
+      }
+      const creds = await this.settings.resolveCredentials(model);
+      if (!creds.apiKey && process.env.AI_MOCK !== '1') {
+        throw new BadRequestException(`图片处理模型「${model.displayName}」还没有可用的 API Key，请先到「模型配置 → 平台账号」填写`);
       }
       cleanModelId = Number(model.id);
       const est = this.settings.estimateCost(model, files.length);
@@ -313,108 +318,86 @@ export class TasksService implements OnModuleInit {
 
       const defaults = this.processor.parseParams(task.defaultParams);
 
-      for (const img of imgs) {
-        if (this.cancelled.has(taskId)) {
-          this.logger.warn(`Task ${taskId} cancelled during processing`);
-          // Persist elapsed wall-clock even on cancel (not a full successful batch)
-          task.processingTimeMs = Date.now() - batchStartedAt;
+      // 选了图生图大模型：整本完全走大模型；否则走现有算法
+      let cleanModel: AiModel | null = null;
+      if (task.cleanModelId) {
+        cleanModel = await this.settings.getModel(task.cleanModelId);
+        if (!cleanModel || !cleanModel.enabled || cleanModel.purpose !== 'clean') {
+          task.status = 'failed';
+          task.errorMessage = '任务选用的图片处理模型已被删除或停用，请到「模型配置」检查后重新开始处理';
           task.updatedAt = new Date();
           await this.tasks.save(task);
           return;
         }
-        if (DONE_OK.has(img.status)) {
-          continue;
-        }
+      }
 
-        try {
-          img.status = 'processing';
-          img.updatedAt = new Date();
-          await this.images.save(img);
+      const queue = imgs.filter((i) => !DONE_OK.has(i.status));
+      const concurrency = cleanModel ? (await this.settings.getGeneral()).concurrency : 1;
+      let stopReason: string | null = null;
 
-          const params = this.processor.parseParams(img.params, defaults);
-          const crop = this.processor.parseCrop(img.cropBox);
-          const resultPath = path.join(
-            task.outputFolder,
-            'results',
-            this.safeName(img.fileName) + '.png',
-          );
-          const thumbPath = path.join(
-            task.outputFolder,
-            'thumbs',
-            this.safeName(img.fileName) + '.jpg',
-          );
-
-          const imgStartedAt = Date.now();
-          let size: { width: number; height: number };
-          if (task.cleanModelId) {
-            const cleanModel = await this.settings.getModel(task.cleanModelId);
-            if (!cleanModel || !cleanModel.enabled || cleanModel.purpose !== 'clean') {
-              throw new BadRequestException('任务绑定的图片处理模型不可用，请到「模型配置」检查');
-            }
-            // AI 图片处理：不走本地 ScanWash
-            const { usage } = await this.aliyun.cleanImage(img.sourcePath, resultPath, cleanModel);
-            const cost = this.aliyun.cost(cleanModel, usage);
-            if (cost != null) {
-              const prev = Number(task.actualCost || 0) || 0;
-              task.actualCost = String(prev + cost);
-            }
-            const meta = await sharp(resultPath, { failOn: 'none' }).metadata();
-            size = { width: meta.width || 0, height: meta.height || 0 };
-            await this.processor.makeThumb(resultPath, thumbPath);
-          } else {
-            size = await this.processor.processToFile(
-              img.sourcePath,
-              resultPath,
-              params,
-              crop,
-            );
-            await this.processor.makeThumb(resultPath, thumbPath);
-          }
-          img.processingTimeMs = Date.now() - imgStartedAt;
-
-          img.resultPath = resultPath;
-          img.thumbPath = thumbPath;
-          if (img.width == null || img.height == null) {
-            img.width = size.width;
-            img.height = size.height;
-          }
-          img.status = 'ready';
-          img.errorMessage = null;
-          img.params = JSON.stringify(params);
-          img.updatedAt = new Date();
-
-          if (task.ocrModelId) {
-            try {
-              await this.runOcrOnImage(task, img, resultPath);
-            } catch (ocrErr: any) {
-              this.logger.warn(`Task ${taskId} image ${img.id} OCR failed: ${ocrErr?.message || ocrErr}`);
-              const msg = ocrErr instanceof AiConfigError
-                ? ocrErr.message
-                : 'AI识别失败: ' + (ocrErr?.message || ocrErr);
-              img.errorMessage = (img.errorMessage ? img.errorMessage + '; ' : '') + msg;
-              if (ocrErr instanceof AiConfigError) task.errorMessage = ocrErr.message;
-            }
-          }
-
-          await this.images.save(img);
-          success++;
-        } catch (e: any) {
-          this.logger.warn(
-            `Task ${taskId} image ${img.id} (${img.fileName}) failed: ${e?.message || e}`,
-          );
-          img.status = 'failed';
-          img.errorMessage = e?.message || String(e);
-          img.updatedAt = new Date();
-          await this.images.save(img);
-        }
-
-        // Advance progress for every finished attempt (success or fail)
-        const finished = imgs.filter(
-          (i) => DONE_OK.has(i.status) || i.status === 'failed',
-        ).length;
+      const finishOne = async () => {
+        const finished = imgs.filter((i) => DONE_OK.has(i.status) || i.status === 'failed').length;
         task.doneCount = finished;
         task.updatedAt = new Date();
         await this.tasks.save(task);
+      };
+
+      const worker = async () => {
+        while (queue.length && !stopReason && !this.cancelled.has(taskId)) {
+          const img = queue.shift()!;
+          try {
+            img.status = 'processing';
+            img.updatedAt = new Date();
+            await this.images.save(img);
+
+            if (cleanModel) {
+              await this.aiProcessOne(task, img, cleanModel, true);
+            } else {
+              await this.algoProcessOne(task, img, defaults);
+            }
+
+            if (task.ocrModelId) {
+              try {
+                await this.runOcrOnImage(task, img, img.resultPath!);
+              } catch (ocrErr: any) {
+                this.logger.warn(`Task ${taskId} image ${img.id} OCR failed: ${ocrErr?.message || ocrErr}`);
+                const msg = ocrErr instanceof AiConfigError
+                  ? ocrErr.message
+                  : 'AI识别失败: ' + (ocrErr?.message || ocrErr);
+                img.errorMessage = (img.errorMessage ? img.errorMessage + '; ' : '') + msg;
+                if (ocrErr instanceof AiConfigError) task.errorMessage = ocrErr.message;
+              }
+            }
+            await this.images.save(img);
+          } catch (e: any) {
+            if (e instanceof AiConfigError) {
+              // 配置问题（Key 错、模型不存在…）：整本停下，本页退回待处理，修好配置后继续
+              stopReason = e.message;
+              img.status = 'pending';
+              img.errorMessage = null;
+            } else {
+              this.logger.warn(`Task ${taskId} image ${img.id} (${img.fileName}) failed: ${e?.message || e}`);
+              img.status = 'failed';
+              img.errorMessage = e?.message || String(e);
+            }
+            img.updatedAt = new Date();
+            await this.images.save(img);
+          }
+          await finishOne();
+        }
+      };
+      await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, queue.length)) }, () => worker()));
+
+      if (stopReason) {
+        task.status = 'failed';
+        task.errorMessage =
+          '图片处理模型配置有误，已暂停：' +
+          stopReason +
+          '。修改配置后点「开始处理」继续，已完成的页不会重复处理。';
+        task.processingTimeMs = Date.now() - batchStartedAt;
+        task.updatedAt = new Date();
+        await this.tasks.save(task);
+        return;
       }
 
       if (this.cancelled.has(taskId)) {
@@ -486,66 +469,160 @@ export class TasksService implements OnModuleInit {
     await this.tasks.save(task);
   }
 
-  async aiProcessImage(userId: number, taskId: number, imageId: number, body?: { modelId?: number }) {
-    const task = await this.get(userId, taskId);
-    const img = await this.getImage(userId, taskId, imageId);
-    let modelId = Number(body?.modelId || task.cleanModelId || 0);
-    let model = modelId ? await this.settings.getModel(modelId) : null;
-    if (!model || !model.enabled || model.purpose !== 'clean') {
-      model = await this.settings.defaultModel('clean');
+  /** 现有算法处理一页（整本处理用） */
+  private async algoProcessOne(task: Task, img: TaskImage, defaults: ProcessParams) {
+    const params = this.processor.parseParams(img.params, defaults);
+    const crop = this.processor.parseCrop(img.cropBox);
+    const resultPath = this.algoPath(task, img);
+    const thumbPath = this.thumbPath(task, img);
+    const started = Date.now();
+    const size = await this.processor.processToFile(img.sourcePath, resultPath, params, crop);
+    await this.processor.makeThumb(resultPath, thumbPath);
+    img.processingTimeMs = Date.now() - started;
+    img.algoResultPath = resultPath;
+    img.resultPath = resultPath;
+    img.processMode = 'algo';
+    img.thumbPath = thumbPath;
+    if (img.width == null || img.height == null) {
+      img.width = size.width;
+      img.height = size.height;
     }
-    if (!model) throw new BadRequestException('请先在「模型配置」添加并启用图片处理模型');
-    if (!img.sourcePath || !fs.existsSync(img.sourcePath)) {
-      throw new BadRequestException('当前页原图不存在');
+    img.status = 'ready';
+    img.errorMessage = null;
+    img.params = JSON.stringify(params);
+    img.updatedAt = new Date();
+  }
+
+  /**
+   * 图生图大模型处理一页：按裁剪框取图 → 模型出图 → 存为 AI 结果并设为当前结果。
+   * 临时性失败自动重试 1 次；配置错误（AiConfigError）直接抛出。
+   */
+  private async aiProcessOne(task: Task, img: TaskImage, model: AiModel, retry: boolean) {
+    await this.restoreOriginalSource(task, img);
+    if (!img.sourcePath || !fs.existsSync(img.sourcePath)) throw new Error('原图不存在：' + img.fileName);
+    const crop = this.processor.parseCrop(img.cropBox);
+    let input = img.sourcePath;
+    let tmp: string | null = null;
+    if (crop && crop.w > 0 && crop.h > 0) {
+      const resolved = await this.processor.resolveCropAgainstSource(img.sourcePath, crop);
+      if (resolved.crop) {
+        tmp = (await this.processor.materializeCrop(img.sourcePath, resolved.crop)).path;
+        input = tmp;
+      }
     }
-    const resultPath = path.join(
-      task.outputFolder,
-      'results',
-      this.safeName(img.fileName) + '.png',
-    );
-    const thumbPath = path.join(
-      task.outputFolder,
-      'thumbs',
-      this.safeName(img.fileName) + '.jpg',
-    );
-    fs.mkdirSync(path.dirname(resultPath), { recursive: true });
-    fs.mkdirSync(path.dirname(thumbPath), { recursive: true });
+    const resultPath = this.aiPath(task, img);
+    const thumbPath = this.thumbPath(task, img);
     const started = Date.now();
     try {
-      const { usage } = await this.aliyun.cleanImage(img.sourcePath, resultPath, model);
-      const cost = this.aliyun.cost(model, usage);
+      let usage;
+      try {
+        ({ usage } = await this.aliyun.cleanImage(input, resultPath, model));
+      } catch (e) {
+        if (!retry || e instanceof AiConfigError) throw e;
+        this.logger.warn(`AI 图片处理失败，重试一次 image=${img.id}: ${(e as any)?.message || e}`);
+        await new Promise((r) => setTimeout(r, 3000));
+        ({ usage } = await this.aliyun.cleanImage(input, resultPath, model));
+      }
       await this.processor.makeThumb(resultPath, thumbPath);
+      const cost = this.aliyun.cost(model, usage) ?? 0;
+      img.cleanCost = String((Number(img.cleanCost || 0) || 0) + cost);
+      task.actualCost = String((Number(task.actualCost || 0) || 0) + cost);
+      img.aiResultPath = resultPath;
+      img.aiModelId = Number(model.id);
       img.resultPath = resultPath;
+      img.processMode = 'ai';
       img.thumbPath = thumbPath;
       img.processingTimeMs = Date.now() - started;
       img.status = 'ready';
       img.errorMessage = null;
       img.updatedAt = new Date();
-      if (cost != null) {
-        img.cost = String((Number(img.cost || 0) || 0) + cost);
-        const prev = Number(task.actualCost || 0) || 0;
-        task.actualCost = String(prev + cost);
+    } finally {
+      if (tmp) {
+        try {
+          fs.unlinkSync(tmp);
+        } catch {}
       }
-      task.cleanModelId = Number(model.id);
-      task.updatedAt = new Date();
-      await this.tasks.save(task);
-      await this.images.save(img);
-    } catch (e: any) {
-      if (e instanceof AiConfigError || e instanceof BadRequestException) {
-        throw e instanceof BadRequestException ? e : new BadRequestException(e.message);
-      }
-      throw new BadRequestException(e?.message || 'AI图片处理失败');
     }
-    const bust = '?t=' + Date.now();
+  }
+
+  /** 审核页「使用大模型处理」：只处理这一页，不改变整本任务的处理方式 */
+  async aiProcessImage(userId: number, taskId: number, imageId: number, body?: { modelId?: number }) {
+    const task = await this.get(userId, taskId);
+    const img = await this.getImage(userId, taskId, imageId);
+    if (img.status === 'processing') throw new BadRequestException('这一页正在处理中，请稍后');
+    const modelId = Number(body?.modelId || img.aiModelId || task.cleanModelId || 0);
+    let model = modelId ? await this.settings.getModel(modelId) : null;
+    if (!model || !model.enabled || model.purpose !== 'clean') {
+      model = await this.settings.defaultModel('clean');
+    }
+    if (!model) throw new BadRequestException('请先在「模型配置」添加并启用图片处理模型');
+    // 当前是算法结果时先记下来，便于「恢复算法结果」
+    if (img.processMode !== 'ai' && img.resultPath && fs.existsSync(img.resultPath) && !img.algoResultPath) {
+      img.algoResultPath = img.resultPath;
+    }
+    const costBefore = Number(img.cleanCost || 0) || 0;
+    try {
+      await this.aiProcessOne(task, img, model, false);
+    } catch (e: any) {
+      throw new BadRequestException(e?.message || '大模型处理失败');
+    }
+    await this.images.save(img);
+    // 只累加费用，不整行保存 task，避免覆盖整本处理中的进度
+    const delta = (Number(img.cleanCost || 0) || 0) - costBefore;
+    if (delta > 0) await this.tasks.increment({ id: task.id }, 'actualCost', delta);
+    await this.bumpTaskToReviewingIfNeeded(task);
+    await this.refreshConfirmed(taskId);
+    return this.imageView(img, model);
+  }
+
+  /** 在「算法结果」和「大模型结果」之间切换当前结果 */
+  async useResult(userId: number, taskId: number, imageId: number, mode: string) {
+    const task = await this.get(userId, taskId);
+    const img = await this.getImage(userId, taskId, imageId);
+    if (img.status === 'processing') throw new BadRequestException('这一页正在处理中，请稍后');
+    const target = mode === 'ai' ? img.aiResultPath : mode === 'algo' ? img.algoResultPath : null;
+    if (!target || !fs.existsSync(target)) {
+      throw new BadRequestException(mode === 'ai' ? '这一页还没有大模型结果' : '这一页还没有算法结果');
+    }
+    img.resultPath = target;
+    img.processMode = mode as 'ai' | 'algo';
+    const thumbPath = this.thumbPath(task, img);
+    await this.processor.makeThumb(target, thumbPath);
+    img.thumbPath = thumbPath;
+    // 换了结果图，审核结论需重新确认
+    if (img.status === 'confirmed' || img.status === 'rejected' || img.status === 'failed') img.status = 'ready';
+    img.updatedAt = new Date();
+    await this.images.save(img);
+    await this.refreshConfirmed(taskId);
+    return this.imageView(img);
+  }
+
+  /** 给前端的图片数据：附带访问地址与结果来源 */
+  imageView(img: TaskImage, aiModel?: AiModel | null) {
+    const bust = 't=' + new Date(img.updatedAt || Date.now()).getTime();
+    const withBust = (u: string | null) => (u ? u + (u.includes('?') ? '&' : '?') + bust : null);
+    const { algoResultPath, aiResultPath, ...rest } = img as any;
     return {
-      imageId: img.id,
-      model: { id: model.id, displayName: model.displayName, model: model.model },
-      cost: img.cost,
-      processingTimeMs: img.processingTimeMs,
-      resultUrl: this.fileUrl(img.resultPath) + bust,
-      thumbUrl: this.fileUrl(img.thumbPath) + bust,
+      ...rest,
       sourceUrl: this.fileUrl(img.sourcePath),
+      resultUrl: withBust(this.fileUrl(img.resultPath)),
+      thumbUrl: withBust(this.fileUrl(img.thumbPath)),
+      hasAlgoResult: !!(algoResultPath && fs.existsSync(algoResultPath)),
+      hasAiResult: !!(aiResultPath && fs.existsSync(aiResultPath)),
+      aiModelName: aiModel ? aiModel.displayName : undefined,
     };
+  }
+
+  private algoPath(task: Task, img: TaskImage) {
+    return path.join(task.outputFolder, 'results', this.safeName(img.fileName) + '.png');
+  }
+
+  private aiPath(task: Task, img: TaskImage) {
+    return path.join(task.outputFolder, 'results-ai', this.safeName(img.fileName) + '.png');
+  }
+
+  private thumbPath(task: Task, img: TaskImage) {
+    return path.join(task.outputFolder, 'thumbs', this.safeName(img.fileName) + '.jpg');
   }
 
   async aiRecognizeImage(userId: number, taskId: number, imageId: number, body?: { modelId?: number }) {
@@ -748,6 +825,8 @@ export class TasksService implements OnModuleInit {
 
     img.params = JSON.stringify(params);
     img.resultPath = resultPath;
+    img.algoResultPath = resultPath;
+    img.processMode = 'algo';
     img.thumbPath = thumbPath;
     // width/height remain original page dims (set by restoreOriginalSource)
     if (img.width == null || img.height == null) {
@@ -828,6 +907,8 @@ export class TasksService implements OnModuleInit {
 
     img.params = JSON.stringify(params);
     img.resultPath = resultPath;
+    img.algoResultPath = resultPath;
+    img.processMode = 'algo';
     img.thumbPath = thumbPath;
     if (img.width == null || img.height == null) {
       img.width = size.width;
