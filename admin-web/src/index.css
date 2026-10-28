@@ -145,13 +145,3 @@ input[type="range"]::-webkit-slider-thumb:active {
   animation: floatOrb2 12s ease-in-out infinite;
 }
 
-
-@keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
-/* 可选中文字的区域（全局默认不可选） */
-.selectable, .selectable * {
-  user-select: text;
-}
