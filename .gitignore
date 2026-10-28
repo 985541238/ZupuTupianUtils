@@ -73,3 +73,12 @@ _patches/
 
 # Credentials
 sql/credentials.txt
+
+# Extra build / venv (ensure compile artifacts stay out)
+build/
+**/build/
+.next/
+**/.next/
+.venv/
+venv/
+**/out/
