@@ -2,8 +2,7 @@ import React, { useState } from 'react';
 import { User } from '../types';
 import { BookOpen, KeyRound, User as UserIcon, ArrowRight, Eye, EyeOff, Loader2 } from 'lucide-react';
 import { LoginDynamicBackground } from './LoginDynamicBackground';
-import { api, setAuth } from '../api/client';
-import { mapUser } from '../api/mappers';
+import { api, mapUser, setAuth } from '../api/client';
 
 interface LoginViewProps {
   onLogin: (user: User) => void;
@@ -11,7 +10,7 @@ interface LoginViewProps {
 
 export const LoginView: React.FC<LoginViewProps> = ({ onLogin }) => {
   const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('admin123');
+  const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
@@ -43,10 +42,10 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLogin }) => {
               <div className="absolute inset-0 rounded-2xl border border-white/20 pointer-events-none" />
             </div>
             <h1 className="text-lg font-bold tracking-tight text-[#1D1D1F]">
-              古籍印刷扫描处理台
+              族谱数字化工作台
             </h1>
             <p className="text-xs text-[#86868B] font-medium mt-1">
-              档案数字化工作台
+              旧谱图片 → 文字数据
             </p>
           </div>
 
@@ -82,7 +81,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLogin }) => {
                   type={showPassword ? 'text' : 'password'}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="admin123"
+                  placeholder="请输入密码"
                   required
                   className="w-full pl-9 pr-10 py-2.5 text-xs bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/25 focus:border-[#0071E3] transition-all font-mono"
                 />
@@ -112,8 +111,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLogin }) => {
                 />
                 <span className="text-[11px] text-[#86868B]">保持登录状态</span>
               </label>
-              <span className="text-[11px] text-[#86868B] font-mono">默认 admin / admin123</span>
-            </div>
+                          </div>
 
             <button
               type="submit"
@@ -135,7 +133,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLogin }) => {
           </form>
 
           <div className="mt-7 pt-4 border-t border-black/[0.05] flex items-center justify-between text-[11px] text-[#86868B]">
-            <span>古籍扫描与净图还原</span>
+            <span>清理 · 识别 · 推送</span>
             <span className="font-mono">ZupuTupianUtils</span>
           </div>
         </div>

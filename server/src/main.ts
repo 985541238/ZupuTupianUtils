@@ -17,9 +17,14 @@ import * as path from 'path';
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module';
+import { NestExpressApplication } from '@nestjs/platform-express';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  if (!process.env.JWT_SECRET) {
+    console.warn('[安全提示] 没有设置 JWT_SECRET，正在使用默认密钥。正式部署前请在 server/.env 里设置一个随机长字符串。');
+  }
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  app.useBodyParser('json', { limit: '5mb' });
   app.enableCors({ origin: true, credentials: true });
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 

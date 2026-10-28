@@ -1,103 +1,52 @@
 import React from 'react';
-import { User } from '../types';
-import {
-  BookOpen,
-  LogOut,
-  ChevronLeft,
-} from 'lucide-react';
+import { BookOpen, LogOut, Settings, ListChecks } from 'lucide-react';
+import type { User } from '../types';
+import type { Route } from '../router';
 
-export type MainViewTab = 'tasks' | 'workbench';
-
-interface TopNavProps {
-  currentTab: MainViewTab;
-  onBackToTasks: () => void;
+interface Props {
   user: User;
+  route: Route;
   onLogout: () => void;
-  activeTaskName?: string;
-  activeTaskProgress?: { reviewed: number; total: number };
+  onNavigate: (path: string) => void;
 }
 
-export const TopNav: React.FC<TopNavProps> = ({
-  currentTab,
-  onBackToTasks,
-  user,
-  onLogout,
-  activeTaskName,
-  activeTaskProgress,
-}) => {
+export const TopNav: React.FC<Props> = ({ user, route, onLogout, onNavigate }) => {
+  const tab = route.name === 'settings' ? 'settings' : 'tasks';
+  const tabCls = (on: boolean) =>
+    `flex items-center gap-1.5 px-3.5 h-8 rounded-full text-[13px] font-semibold transition-all cursor-pointer ${
+      on ? 'bg-white text-[#1D1D1F] shadow-[0_1px_3px_rgba(0,0,0,0.1)]' : 'text-[#6E6E73] hover:text-[#1D1D1F]'
+    }`;
   return (
-    <header className="h-14 apple-glass border-b border-black/[0.06] px-5 flex items-center justify-between gap-4 select-none shrink-0 z-30">
-      {/* Zone 1: Brand mark or Workbench Back Navigation */}
-      <div className="flex items-center gap-3 shrink-0">
-        {currentTab === 'tasks' ? (
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-[#0071E3] flex items-center justify-center text-white shadow-[0_2px_8px_rgba(0,113,227,0.3)]">
-              <BookOpen className="w-4 h-4 stroke-[2.2]" />
-            </div>
-            <div className="flex flex-col">
-              <span className="font-semibold text-sm tracking-tight text-[#1D1D1F] whitespace-nowrap">
-                古籍印刷扫描处理台
-              </span>
-              <span className="text-[10px] text-[#86868B] font-mono leading-none">
-                ZupuTupianUtils · 档案还原工作台
-              </span>
-            </div>
-          </div>
-        ) : (
-          <div className="flex items-center gap-3">
-            <button
-              onClick={onBackToTasks}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white hover:bg-[#F5F5F7] border border-black/[0.08] text-xs font-semibold text-[#1D1D1F] transition-all cursor-pointer shadow-2xs hover:border-black/[0.15]"
-              title="返回任务与下载列表"
-            >
-              <ChevronLeft className="w-4 h-4 stroke-[2.2] text-[#0071E3]" />
-              <span>返回任务列表</span>
-            </button>
-
-            <div className="h-4 w-px bg-black/[0.08]" />
-
-            <div className="flex items-center gap-2 text-xs">
-              <span className="text-[#86868B] font-medium hidden sm:inline">正在审阅:</span>
-              <span className="text-[#1D1D1F] font-semibold max-w-[220px] md:max-w-[360px] truncate">
-                {activeTaskName || '未命名扫描卷'}
-              </span>
-              {activeTaskProgress && (
-                <span className="font-mono text-[11px] px-2 py-0.5 rounded-full bg-[#0071E3]/10 text-[#0071E3] font-semibold">
-                  {activeTaskProgress.reviewed}/{activeTaskProgress.total} 页已核
-                </span>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Zone 2: Center is intentionally empty per user request - no tabs on top! */}
-
-      {/* Zone 3: User Profile & Actions */}
-      <div className="flex items-center gap-2.5 shrink-0">
-        <div className="flex items-center gap-2">
-          <img
-            src={user.avatarUrl}
-            alt={user.displayName}
-            referrerPolicy="no-referrer"
-            className="w-7 h-7 rounded-full bg-[#E5E5EA] border border-black/[0.08] object-cover"
-          />
-          <div className="hidden lg:block text-left text-xs leading-none">
-            <div className="font-semibold text-[#1D1D1F] truncate max-w-[120px]">
-              {user.displayName || '管理员'}
-            </div>
-            <div className="text-[10px] text-[#86868B] font-mono mt-0.5">
-              系统总账号
-            </div>
-          </div>
+    <header className="h-14 apple-glass border-b border-black/[0.06] px-5 flex items-center justify-between gap-4 shrink-0 z-30">
+      <button className="flex items-center gap-2.5 cursor-pointer" onClick={() => onNavigate('/')}>
+        <div className="w-8 h-8 rounded-xl bg-[#0071E3] flex items-center justify-center text-white shadow-[0_2px_8px_rgba(0,113,227,0.3)]">
+          <BookOpen className="w-4 h-4 stroke-[2.2]" />
         </div>
+        <div className="text-left leading-tight">
+          <div className="font-semibold text-sm text-[#1D1D1F]">族谱数字化工作台</div>
+          <div className="text-[10px] text-[#86868B]">旧谱图片 → 文字数据</div>
+        </div>
+      </button>
 
+      <nav className="flex items-center p-0.5 bg-[#E5E5EA]/80 rounded-full">
+        <button className={tabCls(tab === 'tasks')} onClick={() => onNavigate('/')}>
+          <ListChecks className="w-4 h-4" />
+          任务
+        </button>
+        <button className={tabCls(tab === 'settings')} onClick={() => onNavigate('/settings')}>
+          <Settings className="w-4 h-4" />
+          配置
+        </button>
+      </nav>
+
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-medium text-[#3A3A3C]">{user.displayName}</span>
         <button
           onClick={onLogout}
           title="退出登录"
-          className="p-1.5 text-[#86868B] hover:text-[#1D1D1F] hover:bg-black/[0.04] rounded-lg transition-colors cursor-pointer"
+          className="p-1.5 text-[#86868B] hover:text-[#1D1D1F] hover:bg-black/[0.05] rounded-lg cursor-pointer"
         >
-          <LogOut className="w-3.5 h-3.5" />
+          <LogOut className="w-4 h-4" />
         </button>
       </div>
     </header>

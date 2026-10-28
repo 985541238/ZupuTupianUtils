@@ -1,82 +1,66 @@
-import {
-  BadRequestException,
-  Injectable,
-  Logger,
-  NotFoundException,
-  OnModuleInit,
-} from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, IsNull, Repository } from 'typeorm';
 import * as fs from 'fs';
 import * as path from 'path';
-import sharp from 'sharp';
-import archiver from 'archiver';
-import { Task } from './task.entity';
-import { TaskImage } from './task-image.entity';
-import {
-  DEFAULT_PARAMS,
-  ImageProcessService,
-  ProcessParams,
-  CropBox,
-} from './image-process.service';
+import { Task, TaskStatus } from './task.entity';
+import { PageStatus, TaskImage } from './task-image.entity';
+import { SettingsService } from '../settings/settings.service';
+import { AliyunService, OcrUncertain } from '../ai/aliyun.service';
+import { AiModel } from '../settings/ai-model.entity';
+import { applyColumnEdits, readOcr } from './ocr-utils';
+import { WorkerSignal } from './worker-signal';
+import { ImageProcessService } from './image-process.service';
 
-const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp']);
+export const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp']);
+
+/** multer 上传后的文件（不依赖 @types/multer） */
+export interface UploadedFileLike {
+  originalname: string;
+  path?: string;
+  buffer?: Buffer;
+  size: number;
+}
+
+/** 各状态下允许的操作，前端据此显示/置灰按钮，后端据此拦截 */
+export function taskActions(t: Pick<Task, 'status' | 'pushStatus' | 'uploadCount' | 'failedCount' | 'confirmedCount' | 'totalCount'>) {
+  const pushing = t.pushStatus === 'pushing';
+  const running = t.status === 'preparing' || t.status === 'processing' || t.status === 'pausing';
+  return {
+    canUpload: t.status === 'draft',
+    canStart: t.status === 'draft' && t.uploadCount > 0,
+    canPause: t.status === 'preparing' || t.status === 'processing',
+    canResume: t.status === 'paused' || t.status === 'pausing',
+    canRetryFailed: !running && t.failedCount > 0 && t.status !== 'draft',
+    canDelete: !running && !pushing,
+    canPush: !pushing && t.confirmedCount > 0,
+    canExport: t.totalCount > 0,
+    deleteBlockedReason: running ? '任务正在处理，请先暂停再删除' : pushing ? '正在推送，请等推送结束' : '',
+  };
+}
 
 @Injectable()
-export class TasksService implements OnModuleInit {
+export class TasksService {
   private readonly logger = new Logger(TasksService.name);
-  /** In-memory jobs — survives only while this Nest process is alive */
-  private readonly running = new Set<number>();
-  /** Tasks cancelled via delete while runProcess is mid-loop */
-  private readonly cancelled = new Set<number>();
 
   constructor(
     @InjectRepository(Task) private readonly tasks: Repository<Task>,
-    @InjectRepository(TaskImage) private readonly images: Repository<TaskImage>,
-    private readonly processor: ImageProcessService,
+    @InjectRepository(TaskImage) private readonly pages: Repository<TaskImage>,
+    private readonly settings: SettingsService,
+    private readonly aliyun: AliyunService,
+    private readonly signal: WorkerSignal,
+    private readonly images: ImageProcessService,
   ) {}
 
-  async onModuleInit() {
-    // Nest restart / crash leaves status=processing forever — resume remaining pages.
-    try {
-      await this.recoverInterruptedProcessing();
-    } catch (e) {
-      this.logger.error(`recoverInterruptedProcessing failed: ${e}`);
-    }
+  outputRoot() {
+    return process.env.OUTPUT_ROOT || path.join(process.cwd(), '..', 'data', 'output');
   }
 
-  /** Reset orphaned processing images and continue unfinished tasks. */
-  async recoverInterruptedProcessing() {
-    const stuck = await this.tasks.find({ where: { status: 'processing' } });
-    if (!stuck.length) return;
-    this.logger.warn(`Recovering ${stuck.length} interrupted processing task(s)`);
-    for (const task of stuck) {
-      await this.images
-        .createQueryBuilder()
-        .update(TaskImage)
-        .set({
-          status: 'pending',
-          errorMessage: '服务中断，已重新排队',
-          updatedAt: new Date(),
-        })
-        .where('task_id = :tid AND status = :st', { tid: task.id, st: 'processing' })
-        .execute();
-      const id = Number(task.id);
-      if (this.running.has(id)) continue;
-      this.running.add(id);
-      setImmediate(() =>
-        this.runProcess(id)
-          .catch((e) => this.logger.error(`resume task ${id}: ${e}`))
-          .finally(() => this.running.delete(id)),
-      );
-    }
-  }
+  // =============== 任务 ===============
 
-  list(userId: number) {
-    return this.tasks.find({
-      where: { userId },
-      order: { id: 'DESC' },
-    });
+  async list(userId: number) {
+    const rows = await this.tasks.find({ where: { userId }, order: { id: 'DESC' } });
+    return rows.map((t) => this.view(t));
   }
 
   async get(userId: number, id: number) {
@@ -85,687 +69,732 @@ export class TasksService implements OnModuleInit {
     return task;
   }
 
+  async detail(userId: number, id: number) {
+    const t = await this.get(userId, id);
+    const [cleanModel, ocrModel] = await Promise.all([
+      this.settings.getModel(t.cleanModelId),
+      this.settings.getModel(t.ocrModelId),
+    ]);
+    return {
+      ...this.view(t),
+      cleanModelName: cleanModel?.displayName || null,
+      ocrModelName: ocrModel?.displayName || null,
+      uploads: t.status === 'draft' ? this.listUploads(t).map((f) => f.name) : undefined,
+    };
+  }
+
+  view(t: Task) {
+    const { sourceFolder, outputFolder, ...rest } = t as any;
+    return {
+      ...rest,
+      estimatedCost: t.estimatedCost != null ? Number(t.estimatedCost) : null,
+      actualCost: Number(t.actualCost || 0),
+      actions: taskActions(t),
+    };
+  }
+
+  /** 老任务（升级前创建）没有记录识别模型，用默认模型补上 */
+  private async ensureModels(t: Task) {
+    let changed = false;
+    if (!t.ocrModelId) {
+      t.ocrModelId = (await this.settings.defaultModel('ocr'))?.id ?? null;
+      changed = true;
+    }
+    if (t.cleanMode === 'ai' && !t.cleanModelId) {
+      t.cleanModelId = (await this.settings.defaultModel('clean'))?.id ?? null;
+      changed = true;
+    }
+    if (changed) await this.tasks.save(t);
+  }
+
+  private async checkModels(cleanMode: string, cleanModelId: number | null, ocrModelId: number | null) {
+    const ocr = await this.settings.getModel(ocrModelId);
+    if (!ocr || ocr.purpose !== 'ocr') throw new BadRequestException('请选择文字识别模型');
+    if (!ocr.enabled) throw new BadRequestException(`识别模型「${ocr.displayName}」已停用，请换一个`);
+    let clean: AiModel | null = null;
+    if (cleanMode === 'ai') {
+      clean = await this.settings.getModel(cleanModelId);
+      if (!clean || clean.purpose !== 'clean') throw new BadRequestException('选择了 AI 清理，请选择清理模型');
+      if (!clean.enabled) throw new BadRequestException(`清理模型「${clean.displayName}」已停用，请换一个`);
+    }
+    return { ocr, clean };
+  }
+
   async create(
     userId: number,
-    dto: {
-      name: string;
-      sourceFolder: string;
-      description?: string;
-      genealogyNote?: string;
-    },
+    dto: { name: string; surname: string; remark?: string; cleanMode?: string; cleanModelId?: number; ocrModelId?: number; splitDouble?: boolean },
   ) {
-    const name = dto.name;
-    const sourceFolder = dto.sourceFolder;
-    const description =
-      dto.description != null && String(dto.description).trim()
-        ? String(dto.description).trim()
-        : '旧族谱复印页去污去褶皱清晰化，供后续 OCR 识别与数据化';
-    const genealogyNote =
-      dto.genealogyNote != null && String(dto.genealogyNote).trim()
-        ? String(dto.genealogyNote).trim()
-        : null;
-    const folder = path.resolve(sourceFolder);
-    if (!fs.existsSync(folder) || !fs.statSync(folder).isDirectory()) {
-      throw new BadRequestException('图片文件夹不存在: ' + folder);
-    }
-    const files = fs
-      .readdirSync(folder)
-      .filter((f) => IMAGE_EXT.has(path.extname(f).toLowerCase()))
-      .sort((a, b) => a.localeCompare(b, 'zh'));
-    if (!files.length) throw new BadRequestException('文件夹内没有图片');
+    const name = String(dto.name || '').trim();
+    const surname = String(dto.surname || '').trim();
+    if (!name) throw new BadRequestException('请填写书名');
+    if (!surname) throw new BadRequestException('请填写姓氏');
+    const cleanMode = dto.cleanMode === 'ai' ? 'ai' : 'algo';
+    const { ocr, clean } = await this.checkModels(cleanMode, dto.cleanModelId ?? null, dto.ocrModelId ?? null);
 
-    const outputRoot = process.env.OUTPUT_ROOT || path.join(process.cwd(), '..', 'data', 'output');
-    const stamp = Date.now();
-    const outputFolder = path.join(outputRoot, `task-${stamp}`);
-    fs.mkdirSync(path.join(outputFolder, 'results'), { recursive: true });
-    fs.mkdirSync(path.join(outputFolder, 'thumbs'), { recursive: true });
-    fs.mkdirSync(path.join(outputFolder, 'sources'), { recursive: true });
-
-    const now = new Date();
+    const folder = path.join(this.outputRoot(), `task-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`);
+    fs.mkdirSync(path.join(folder, 'uploads'), { recursive: true });
     const task = this.tasks.create({
       userId,
-      name: name || path.basename(folder),
-      description,
-      genealogyNote,
-      sourceFolder: folder,
-      outputFolder,
-      status: 'pending',
-      totalCount: files.length,
-      doneCount: 0,
-      confirmedCount: 0,
-      defaultParams: JSON.stringify(DEFAULT_PARAMS),
-      createdAt: now,
-      updatedAt: now,
+      name: name.slice(0, 128),
+      surname: surname.slice(0, 32),
+      remark: dto.remark ? String(dto.remark).trim().slice(0, 2000) : null,
+      cleanMode,
+      cleanModelId: clean?.id ?? null,
+      ocrModelId: ocr.id,
+      splitDouble: dto.splitDouble === false ? 0 : 1,
+      sourceFolder: path.join(folder, 'uploads'),
+      outputFolder: folder,
+      status: 'draft',
+      pushStatus: 'none',
+      actualCost: '0',
     });
     const saved = await this.tasks.save(task);
+    return this.detail(userId, saved.id);
+  }
 
-    const rows = [];
-    for (let i = 0; i < files.length; i++) {
-      const fileName = files[i];
-      const sourcePath = path.join(folder, fileName);
-      let width: number | null = null;
-      let height: number | null = null;
+  async update(userId: number, id: number, dto: { name?: string; surname?: string; remark?: string }) {
+    const t = await this.get(userId, id);
+    if (dto.name != null) {
+      const v = String(dto.name).trim();
+      if (!v) throw new BadRequestException('书名不能为空');
+      t.name = v.slice(0, 128);
+    }
+    if (dto.surname != null) {
+      const v = String(dto.surname).trim();
+      if (!v) throw new BadRequestException('姓氏不能为空');
+      t.surname = v.slice(0, 32);
+    }
+    if (dto.remark != null) t.remark = String(dto.remark).trim().slice(0, 2000) || null;
+    await this.tasks.save(t);
+    return this.detail(userId, id);
+  }
+
+  // ---------- 上传 ----------
+
+  listUploads(t: Task) {
+    if (!fs.existsSync(t.sourceFolder)) return [];
+    return fs
+      .readdirSync(t.sourceFolder)
+      .filter((f) => IMAGE_EXT.has(path.extname(f).toLowerCase()))
+      .sort((a, b) => a.localeCompare(b, 'zh', { numeric: true }))
+      .map((name) => ({ name, path: path.join(t.sourceFolder, name) }));
+  }
+
+  async addFiles(userId: number, id: number, files: UploadedFileLike[], relPaths: string[]) {
+    const t = await this.get(userId, id);
+    if (t.status !== 'draft') {
+      cleanupTemp(files);
+      throw new ConflictException('任务已经开始处理，不能再上传图片');
+    }
+    const added: string[] = [];
+    const skipped: { name: string; reason: string }[] = [];
+    files.forEach((f, i) => {
+      const rel = relPaths[i] || f.originalname;
+      const ext = path.extname(rel).toLowerCase();
       try {
-        const meta = await sharp(sourcePath, { failOn: 'none' }).metadata();
-        width = meta.width || null;
-        height = meta.height || null;
-      } catch {
-        /* ignore */
-      }
-      rows.push(
-        this.images.create({
-          taskId: saved.id,
-          fileName,
-          sourcePath,
-          status: 'pending',
-          sortOrder: i,
-          width,
-          height,
-          params: JSON.stringify(DEFAULT_PARAMS),
-          createdAt: now,
-          updatedAt: now,
-        }),
-      );
-    }
-    await this.images.save(rows);
-    return this.get(userId, Number(saved.id));
-  }
-
-  async listImages(userId: number, taskId: number) {
-    const task = await this.get(userId, taskId);
-    const list = await this.images.find({
-      where: { taskId },
-      order: { sortOrder: 'ASC', id: 'ASC' },
-    });
-    // Repair any rows whose source_path was wrongly rewritten to a baked crop
-    for (const img of list) {
-      const before = img.sourcePath;
-      const beforeW = img.width;
-      const beforeH = img.height;
-      await this.restoreOriginalSource(task, img);
-      if (
-        img.sourcePath !== before ||
-        img.width !== beforeW ||
-        img.height !== beforeH
-      ) {
-        await this.images.save(img);
-      }
-    }
-    return list;
-  }
-
-  async getImage(userId: number, taskId: number, imageId: number) {
-    await this.get(userId, taskId);
-    const img = await this.images.findOne({ where: { id: imageId, taskId } });
-    if (!img) throw new NotFoundException('图片不存在');
-    return img;
-  }
-
-  async processTask(userId: number, taskId: number) {
-    const task = await this.get(userId, taskId);
-    const id = Number(task.id);
-
-    if (this.running.has(id)) {
-      return { message: '正在处理中', task };
-    }
-
-    // Allow re-run when DB says processing but no live job (stale after crash),
-    // or when failed / pending / reviewing with unfinished pages.
-    if (task.status === 'processing') {
-      this.logger.warn(`Task ${id} marked processing but no live job — resuming`);
-    }
-
-    task.status = 'processing';
-    task.errorMessage = null;
-    task.updatedAt = new Date();
-    await this.tasks.save(task);
-
-    this.running.add(id);
-    setImmediate(() =>
-      this.runProcess(id)
-        .catch((e) => this.logger.error(`runProcess ${id}: ${e}`))
-        .finally(() => this.running.delete(id)),
-    );
-    return { message: '已开始处理', task };
-  }
-
-  private async runProcess(taskId: number) {
-    const task = await this.tasks.findOne({ where: { id: taskId } });
-    if (!task) return;
-
-    const DONE_OK = new Set(['ready', 'confirmed']);
-    let imgs: TaskImage[] = [];
-    // Wall-clock for this batch; on cancel we still persist elapsed so far
-    const batchStartedAt = Date.now();
-
-    try {
-      imgs = await this.images.find({
-        where: { taskId },
-        order: { sortOrder: 'ASC' },
-      });
-
-      // Any image left in 'processing' from a prior crash → pending so we retry
-      for (const img of imgs) {
-        if (img.status === 'processing') {
-          img.status = 'pending';
-          img.errorMessage = img.errorMessage || '服务中断，已重新排队';
-          img.updatedAt = new Date();
-          await this.images.save(img);
-        }
-      }
-
-      let success = imgs.filter((i) => DONE_OK.has(i.status)).length;
-      task.doneCount = success;
-      task.updatedAt = new Date();
-      await this.tasks.save(task);
-
-      const defaults = this.processor.parseParams(task.defaultParams);
-
-      for (const img of imgs) {
-        if (this.cancelled.has(taskId)) {
-          this.logger.warn(`Task ${taskId} cancelled during processing`);
-          // Persist elapsed wall-clock even on cancel (not a full successful batch)
-          task.processingTimeMs = Date.now() - batchStartedAt;
-          task.updatedAt = new Date();
-          await this.tasks.save(task);
+        if (!IMAGE_EXT.has(ext)) {
+          skipped.push({ name: rel, reason: '不是图片' });
           return;
         }
-        if (DONE_OK.has(img.status)) {
-          continue;
-        }
-
-        try {
-          img.status = 'processing';
-          img.updatedAt = new Date();
-          await this.images.save(img);
-
-          const params = this.processor.parseParams(img.params, defaults);
-          const crop = this.processor.parseCrop(img.cropBox);
-          const resultPath = path.join(
-            task.outputFolder,
-            'results',
-            this.safeName(img.fileName) + '.png',
-          );
-          const thumbPath = path.join(
-            task.outputFolder,
-            'thumbs',
-            this.safeName(img.fileName) + '.jpg',
-          );
-
-          const imgStartedAt = Date.now();
-          const size = await this.processor.processToFile(
-            img.sourcePath,
-            resultPath,
-            params,
-            crop,
-          );
-          await this.processor.makeThumb(resultPath, thumbPath);
-          img.processingTimeMs = Date.now() - imgStartedAt;
-
-          img.resultPath = resultPath;
-          img.thumbPath = thumbPath;
-          if (img.width == null || img.height == null) {
-            img.width = size.width;
-            img.height = size.height;
+        let name = safeName(rel);
+        if (fs.existsSync(path.join(t.sourceFolder, name))) {
+          // 同名文件：内容相同就跳过，不同就加后缀
+          const existing = fs.statSync(path.join(t.sourceFolder, name)).size;
+          if (existing === f.size) {
+            skipped.push({ name: rel, reason: '重复，已跳过' });
+            return;
           }
-          img.status = 'ready';
-          img.errorMessage = null;
-          img.params = JSON.stringify(params);
-          img.updatedAt = new Date();
-          await this.images.save(img);
-          success++;
-        } catch (e: any) {
-          this.logger.warn(
-            `Task ${taskId} image ${img.id} (${img.fileName}) failed: ${e?.message || e}`,
-          );
-          img.status = 'failed';
-          img.errorMessage = e?.message || String(e);
-          img.updatedAt = new Date();
-          await this.images.save(img);
+          const base = name.slice(0, -ext.length);
+          let k = 2;
+          while (fs.existsSync(path.join(t.sourceFolder, `${base}_${k}${ext}`))) k++;
+          name = `${base}_${k}${ext}`;
         }
-
-        // Advance progress for every finished attempt (success or fail)
-        const finished = imgs.filter(
-          (i) => DONE_OK.has(i.status) || i.status === 'failed',
-        ).length;
-        task.doneCount = finished;
-        task.updatedAt = new Date();
-        await this.tasks.save(task);
+        const dest = path.join(t.sourceFolder, name);
+        if (f.path) moveFile(f.path, dest);
+        else if (f.buffer) fs.writeFileSync(dest, f.buffer);
+        added.push(name);
+      } catch (e: any) {
+        skipped.push({ name: rel, reason: '保存失败：' + (e?.message || e) });
       }
-
-      if (this.cancelled.has(taskId)) {
-        task.processingTimeMs = Date.now() - batchStartedAt;
-        task.updatedAt = new Date();
-        await this.tasks.save(task);
-        return;
-      }
-
-      // Reload statuses from what we mutated in-memory
-      const failed = imgs.filter((i) => i.status === 'failed').length;
-      const ok = imgs.filter((i) => DONE_OK.has(i.status)).length;
-      if (ok === 0 && failed > 0) {
-        task.status = 'failed';
-        task.errorMessage = `全部 ${failed} 张处理失败`;
-      } else {
-        task.status = 'reviewing';
-        task.errorMessage = failed ? `${failed} 张失败，其余已就绪` : null;
-      }
-      task.doneCount = ok;
-      task.processingTimeMs = Date.now() - batchStartedAt;
-      task.updatedAt = new Date();
-      await this.tasks.save(task);
-      this.logger.log(
-        `Task ${taskId} finished: ok=${ok} failed=${failed} status=${task.status}`,
-      );
-    } catch (e: any) {
-      this.logger.error(`runProcess fatal task ${taskId}: ${e?.message || e}`);
-      try {
-        // Ensure we never leave the task eternally processing
-        const t = await this.tasks.findOne({ where: { id: taskId } });
-        if (t && t.status === 'processing') {
-          t.status = 'failed';
-          t.errorMessage = e?.message || String(e) || '处理中断';
-          t.updatedAt = new Date();
-          await this.tasks.save(t);
-        }
-        // Unstick any image still marked processing
-        await this.images
-          .createQueryBuilder()
-          .update(TaskImage)
-          .set({
-            status: 'failed',
-            errorMessage: '处理中断',
-            updatedAt: new Date(),
-          })
-          .where('task_id = :tid AND status = :st', { tid: taskId, st: 'processing' })
-          .execute();
-      } catch (inner) {
-        this.logger.error(`runProcess cleanup failed: ${inner}`);
-      }
-    }
+    });
+    cleanupTemp(files);
+    t.uploadCount = this.listUploads(t).length;
+    await this.tasks.save(t);
+    return { uploadCount: t.uploadCount, added: added.length, skipped };
   }
 
+  async removeUpload(userId: number, id: number, name: string) {
+    const t = await this.get(userId, id);
+    if (t.status !== 'draft') throw new ConflictException('任务已经开始处理，不能再删除上传的图片');
+    const file = path.join(t.sourceFolder, path.basename(name));
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+    t.uploadCount = this.listUploads(t).length;
+    await this.tasks.save(t);
+    return { uploadCount: t.uploadCount };
+  }
 
-  async deleteTask(userId: number, taskId: number) {
-    const task = await this.get(userId, taskId);
-    const id = Number(task.id);
+  // ---------- 开始 / 暂停 / 继续 / 重试 ----------
 
-    // Stop in-flight processing if any
-    this.cancelled.add(id);
-    this.running.delete(id);
+  async start(userId: number, id: number) {
+    const t = await this.get(userId, id);
+    await this.ensureModels(t);
+    if (t.status !== 'draft') throw new ConflictException('任务已经开始过了');
+    t.uploadCount = this.listUploads(t).length;
+    if (!t.uploadCount) throw new BadRequestException('还没有上传图片');
+    await this.checkModels(t.cleanMode, t.cleanModelId, t.ocrModelId);
+    await this.aliyun.assertReady().catch((e) => {
+      throw new BadRequestException(e.message);
+    });
+    const est = await this.estimate({
+      pages: t.uploadCount * (t.splitDouble ? 2 : 1),
+      cleanMode: t.cleanMode,
+      cleanModelId: t.cleanModelId,
+      ocrModelId: t.ocrModelId,
+    });
+    t.estimatedCost = est.total != null ? String(est.total) : null;
+    t.status = 'preparing';
+    t.startedAt = new Date();
+    t.errorMessage = null;
+    await this.tasks.save(t);
+    this.signal.kick();
+    return this.detail(userId, id);
+  }
 
-    try {
-      await this.images.delete({ taskId: id });
-      await this.tasks.delete({ id, userId });
-      this.safeRemoveOutputFolder(task.outputFolder, task.sourceFolder);
-      this.logger.log(`Deleted task ${id} (${task.name})`);
-      return { ok: true, id };
-    } finally {
-      // Keep cancelled briefly so a late runProcess iteration still aborts
-      setTimeout(() => this.cancelled.delete(id), 5000);
+  async pause(userId: number, id: number) {
+    const t = await this.get(userId, id);
+    if (t.status !== 'preparing' && t.status !== 'processing') {
+      throw new ConflictException('只有处理中的任务可以暂停');
     }
+    const running = await this.pages.count({ where: { taskId: id, status: 'processing', action: IsNull() } });
+    t.status = running > 0 || t.status === 'preparing' ? 'pausing' : 'paused';
+    await this.tasks.save(t);
+    this.signal.pausing(id);
+    return this.detail(userId, id);
+  }
+
+  async resume(userId: number, id: number) {
+    const t = await this.get(userId, id);
+    await this.ensureModels(t);
+    if (t.status !== 'paused' && t.status !== 'pausing') throw new ConflictException('只有已暂停的任务可以继续');
+    await this.checkModels(t.cleanMode, t.cleanModelId, t.ocrModelId);
+    await this.aliyun.assertReady().catch((e) => {
+      throw new BadRequestException(e.message);
+    });
+    // 拆页没做完就接着拆，否则接着处理
+    const unprepared = (await this.unpreparedUploads(t)).length;
+    t.status = unprepared > 0 ? 'preparing' : 'processing';
+    t.errorMessage = null;
+    await this.tasks.save(t);
+    await this.recount(id);
+    this.signal.kick();
+    return this.detail(userId, id);
+  }
+
+  async unpreparedUploads(t: Task) {
+    const done = new Set((await this.pages.find({ where: { taskId: t.id }, select: ['fileName'] })).map((p) => p.fileName));
+    return this.listUploads(t).filter((u) => !done.has(u.name));
+  }
+
+  async retryFailed(userId: number, id: number) {
+    const t = await this.get(userId, id);
+    await this.ensureModels(t);
+    if (['draft', 'preparing', 'processing', 'pausing'].includes(t.status)) throw new ConflictException('任务还在处理中');
+    const failed = await this.pages.find({ where: { taskId: id, status: 'failed' } });
+    if (!failed.length) throw new BadRequestException('没有失败的页');
+    await this.checkModels(t.cleanMode, t.cleanModelId, t.ocrModelId);
+    await this.pages.update({ taskId: id, status: 'failed' }, { status: 'pending', action: null, actionArgs: null, errorMessage: null });
+    t.status = 'processing';
+    t.errorMessage = null;
+    await this.tasks.save(t);
+    await this.recount(id);
+    this.signal.kick();
+    return this.detail(userId, id);
+  }
+
+  async remove(userId: number, id: number) {
+    const t = await this.get(userId, id);
+    const a = taskActions(t);
+    if (!a.canDelete) throw new ConflictException(a.deleteBlockedReason || '当前不能删除');
+    const busy = await this.pages.count({ where: { taskId: id, status: In(['processing', 'queued']) } });
+    if (busy > 0) throw new ConflictException(`还有 ${busy} 页正在做单页处理，请稍等再删除`);
+    await this.pages.delete({ taskId: id });
+    await this.tasks.delete({ id });
+    const root = path.resolve(this.outputRoot());
+    const folder = path.resolve(t.outputFolder || '');
+    if (folder.startsWith(root + path.sep) && fs.existsSync(folder)) {
+      fs.rmSync(folder, { recursive: true, force: true });
+    }
+    return { ok: true, id };
+  }
+
+  // ---------- 费用预估 ----------
+
+  async estimate(q: { pages: number; cleanMode: string; cleanModelId?: number | null; ocrModelId?: number | null }) {
+    const pages = Math.max(0, Math.round(Number(q.pages) || 0));
+    const ocrModel = await this.settings.getModel(q.ocrModelId ?? null);
+    const cleanModel = q.cleanMode === 'ai' ? await this.settings.getModel(q.cleanModelId ?? null) : null;
+    const ocr = this.aliyun.perPageEstimate(ocrModel);
+    const clean = q.cleanMode === 'ai' ? this.aliyun.perPageEstimate(cleanModel) : { cost: 0, priced: true };
+    const ocrTotal = ocr.cost != null ? round4(ocr.cost * pages) : null;
+    const cleanTotal = clean.cost != null ? round4(clean.cost * pages) : null;
+    const missing: string[] = [];
+    if (!ocr.priced) missing.push(ocrModel ? `识别模型「${ocrModel.displayName}」没填单价` : '没选识别模型');
+    if (q.cleanMode === 'ai' && !clean.priced) missing.push(cleanModel ? `清理模型「${cleanModel.displayName}」没填单价` : '没选清理模型');
+    return {
+      pages,
+      ocr: ocrTotal,
+      clean: q.cleanMode === 'ai' ? cleanTotal : 0,
+      total: ocrTotal != null && cleanTotal != null ? round4(ocrTotal + cleanTotal) : null,
+      perPage: ocr.cost != null && clean.cost != null ? round4(ocr.cost + clean.cost) : null,
+      missing,
+    };
+  }
+
+  // =============== 页 ===============
+
+  async listPages(userId: number, taskId: number) {
+    await this.get(userId, taskId);
+    const rows = await this.pages.find({ where: { taskId }, order: { sortOrder: 'ASC', id: 'ASC' } });
+    return rows.map((p, i) => this.pageLite(p, i + 1));
+  }
+
+  pageLite(p: TaskImage, pageNo?: number) {
+    return {
+      id: Number(p.id),
+      taskId: Number(p.taskId),
+      pageNo,
+      fileName: p.fileName,
+      side: p.side,
+      status: p.status,
+      action: p.action,
+      uncertainCount: p.uncertainCount,
+      edited: !!p.edited,
+      hasCandidate: !!p.candidatePath,
+      cleanUsed: p.cleanUsed,
+      errorMessage: p.errorMessage,
+      pushStatus: p.pushStatus,
+      cost: Number(p.cost || 0),
+      width: p.width,
+      height: p.height,
+      hasResult: !!p.resultPath,
+      updatedAt: p.updatedAt,
+    };
+  }
+
+  async getPageOwned(userId: number, pageId: number) {
+    const p = await this.pages.findOne({ where: { id: pageId } });
+    if (!p) throw new NotFoundException('页面不存在');
+    const t = await this.get(userId, p.taskId);
+    return { page: p, task: t };
+  }
+
+  async pageDetail(userId: number, pageId: number) {
+    const { page, task } = await this.getPageOwned(userId, pageId);
+    const all = await this.pages.find({ where: { taskId: task.id }, select: ['id', 'sortOrder'], order: { sortOrder: 'ASC', id: 'ASC' } });
+    const idx = all.findIndex((x) => Number(x.id) === Number(page.id));
+    const ocr = readOcr(page.ocrJson);
+    const candidate = page.candidatePath ? readOcr(page.candidateOcr) : null;
+    const ocrModel = await this.settings.getModel(page.ocrModelId);
+    return {
+      ...this.pageLite(page, idx + 1),
+      total: all.length,
+      prevId: idx > 0 ? Number(all[idx - 1].id) : null,
+      nextId: idx >= 0 && idx < all.length - 1 ? Number(all[idx + 1].id) : null,
+      gutter: page.gutter,
+      hasOrigin: !!page.originPath,
+      ocr,
+      candidate,
+      candidateCost: Number(page.candidateCost || 0),
+      ocrModelName: ocrModel?.displayName || null,
+      tokensIn: page.tokensIn,
+      tokensOut: page.tokensOut,
+      processingTimeMs: page.processingTimeMs,
+      task: {
+        id: Number(task.id),
+        name: task.name,
+        status: task.status,
+        cleanMode: task.cleanMode,
+        cleanModelId: task.cleanModelId,
+        ocrModelId: task.ocrModelId,
+      },
+    };
+  }
+
+  private assertEditable(p: TaskImage) {
+    if (p.status === 'processing' || p.status === 'queued') throw new ConflictException('这一页正在处理，请等处理完');
+    if (p.status === 'pending') throw new ConflictException('这一页还没处理');
+  }
+
+  async saveText(userId: number, pageId: number, columns: string[]) {
+    const { page } = await this.getPageOwned(userId, pageId);
+    this.assertEditable(page);
+    if (!Array.isArray(columns)) throw new BadRequestException('参数错误');
+    const ocr = applyColumnEdits(readOcr(page.ocrJson), columns);
+    page.ocrJson = JSON.stringify(ocr);
+    page.uncertainCount = ocr.uncertain.length;
+    page.edited = 1;
+    await this.pages.save(page);
+    await this.recount(page.taskId);
+    return this.pageDetail(userId, pageId);
+  }
+
+  /** 处理一个疑似错字：改成某个字，或确认原字无误 */
+  async resolveChar(userId: number, pageId: number, body: { col: number; index: number; char?: string }) {
+    const { page } = await this.getPageOwned(userId, pageId);
+    this.assertEditable(page);
+    const ocr = readOcr(page.ocrJson);
+    const col = Number(body.col);
+    const index = Number(body.index);
+    const column = ocr.columns[col];
+    if (!column) throw new BadRequestException('列不存在');
+    const chars = Array.from(column.text);
+    if (index < 0 || index >= chars.length) throw new BadRequestException('字的位置不对');
+    const replacement = body.char != null ? String(body.char).trim() : '';
+    if (replacement && replacement !== chars[index]) {
+      const rc = Array.from(replacement);
+      chars.splice(index, 1, ...rc);
+      column.text = chars.join('');
+      page.edited = 1;
+      const delta = rc.length - 1;
+      // 同一列后面的标记位置跟着移
+      ocr.uncertain = ocr.uncertain
+        .filter((u: OcrUncertain) => !(u.col === col && u.index === index))
+        .map((u: OcrUncertain) => (u.col === col && u.index > index ? { ...u, index: u.index + delta } : u));
+    } else {
+      ocr.uncertain = ocr.uncertain.filter((u: OcrUncertain) => !(u.col === col && u.index === index));
+    }
+    page.ocrJson = JSON.stringify(ocr);
+    page.uncertainCount = ocr.uncertain.length;
+    await this.pages.save(page);
+    await this.recount(page.taskId);
+    return this.pageDetail(userId, pageId);
+  }
+
+  async approve(userId: number, pageId: number) {
+    const { page } = await this.getPageOwned(userId, pageId);
+    if (page.status !== 'review') {
+      if (page.status === 'approved') return this.pageDetail(userId, pageId);
+      throw new ConflictException('这一页现在不能通过（' + statusText(page.status) + '）');
+    }
+    if (page.candidatePath) throw new ConflictException('这一页还有 AI 处理结果没选，请先选择保留哪个版本');
+    page.status = 'approved';
+    await this.pages.save(page);
+    await this.recount(page.taskId);
+    return this.pageDetail(userId, pageId);
+  }
+
+  async unapprove(userId: number, pageId: number) {
+    const { page } = await this.getPageOwned(userId, pageId);
+    if (page.status !== 'approved') throw new ConflictException('这一页还没通过');
+    page.status = 'review';
+    await this.pages.save(page);
+    await this.recount(page.taskId);
+    return this.pageDetail(userId, pageId);
+  }
+
+  /** 没有疑似错字、没有待选 AI 结果的待审核页一键通过 */
+  async approveClean(userId: number, taskId: number) {
+    await this.get(userId, taskId);
+    const rows = await this.pages.find({ where: { taskId, status: 'review', uncertainCount: 0 } });
+    const ok = rows.filter((p) => !p.candidatePath);
+    if (ok.length) await this.pages.update({ id: In(ok.map((p) => p.id)) }, { status: 'approved' });
+    await this.recount(taskId);
+    return { approved: ok.length };
+  }
+
+  private async queueAction(page: TaskImage, action: 'ai_clean' | 'reocr', args: any) {
+    page.status = 'queued';
+    page.action = action;
+    page.actionArgs = JSON.stringify(args || {});
+    page.errorMessage = null;
+    await this.pages.save(page);
+    await this.recount(page.taskId);
+    this.signal.kick();
+  }
+
+  async aiClean(userId: number, pageId: number, body: { cleanModelId?: number; ocrModelId?: number }) {
+    const { page, task } = await this.getPageOwned(userId, pageId);
+    this.assertEditable(page);
+    if (page.candidatePath) throw new ConflictException('上一次 AI 处理的结果还没选择，请先选择保留哪个版本');
+    const clean =
+      (await this.settings.getModel(body.cleanModelId ?? task.cleanModelId ?? null)) || (await this.settings.defaultModel('clean'));
+    if (!clean || clean.purpose !== 'clean' || !clean.enabled) throw new BadRequestException('没有可用的清理模型，请先到配置页添加');
+    const ocr = (await this.settings.getModel(body.ocrModelId ?? task.ocrModelId ?? null)) || (await this.settings.defaultModel('ocr'));
+    if (!ocr || !ocr.enabled) throw new BadRequestException('没有可用的识别模型');
+    await this.aliyun.assertReady().catch((e) => {
+      throw new BadRequestException(e.message);
+    });
+    await this.queueAction(page, 'ai_clean', { cleanModelId: clean.id, ocrModelId: ocr.id, prevStatus: page.status });
+    return this.pageDetail(userId, pageId);
+  }
+
+  async reocr(userId: number, pageId: number, body: { ocrModelId?: number }) {
+    const { page, task } = await this.getPageOwned(userId, pageId);
+    if (page.status === 'processing' || page.status === 'queued') throw new ConflictException('这一页正在处理，请等处理完');
+    if (!page.resultPath) throw new ConflictException('这一页还没有清理结果，请先重试处理');
+    const ocr = (await this.settings.getModel(body.ocrModelId ?? task.ocrModelId ?? null)) || (await this.settings.defaultModel('ocr'));
+    if (!ocr || ocr.purpose !== 'ocr' || !ocr.enabled) throw new BadRequestException('没有可用的识别模型');
+    await this.aliyun.assertReady().catch((e) => {
+      throw new BadRequestException(e.message);
+    });
+    await this.queueAction(page, 'reocr', { ocrModelId: ocr.id, prevStatus: page.status });
+    return this.pageDetail(userId, pageId);
+  }
+
+  /** 单页重新处理（清理 + 识别），用于失败的页 */
+  async retryPage(userId: number, pageId: number) {
+    const { page, task } = await this.getPageOwned(userId, pageId);
+    if (page.status === 'processing' || page.status === 'queued') throw new ConflictException('这一页正在处理');
+    if (page.status === 'approved') throw new ConflictException('这一页已通过，如需重做请先撤销通过');
+    if (!page.sourcePath || !fs.existsSync(page.sourcePath)) throw new BadRequestException('这一页的原图丢失了，只能删除');
+    await this.checkModels(task.cleanMode, task.cleanModelId, task.ocrModelId);
+    await this.aliyun.assertReady().catch((e) => {
+      throw new BadRequestException(e.message);
+    });
+    page.status = 'queued';
+    page.action = 'process';
+    page.actionArgs = null;
+    page.errorMessage = null;
+    await this.pages.save(page);
+    await this.recount(page.taskId);
+    this.signal.kick();
+    return this.pageDetail(userId, pageId);
+  }
+
+  /** 选择保留 AI 处理后的版本，还是之前的版本 */
+  async chooseCandidate(userId: number, pageId: number, keep: 'ai' | 'current') {
+    const { page } = await this.getPageOwned(userId, pageId);
+    if (!page.candidatePath) throw new ConflictException('没有待选择的 AI 结果');
+    if (keep === 'ai') {
+      const old = page.resultPath;
+      page.resultPath = page.candidatePath;
+      page.ocrJson = page.candidateOcr;
+      page.uncertainCount = readOcr(page.candidateOcr).uncertain.length;
+      page.cleanUsed = 'ai';
+      page.edited = 0;
+      const ocrArgs = safeJson(page.actionArgs);
+      if (ocrArgs?.ocrModelId) page.ocrModelId = ocrArgs.ocrModelId;
+      if (old && old !== page.resultPath) tryUnlink(old);
+    } else {
+      tryUnlink(page.candidatePath);
+    }
+    page.candidatePath = null;
+    page.candidateOcr = null;
+    page.candidateCost = '0';
+    page.status = 'review';
+    await this.pages.save(page);
+    await this.refreshThumb(page);
+    await this.recount(page.taskId);
+    return this.pageDetail(userId, pageId);
   }
 
   /**
-   * Remove task output dir only. Never touch the user's source_folder originals.
-   * Only deletes paths under OUTPUT_ROOT (or default data/output) that look like task-*.
+   * 拆页不对时的补救，三种情况都能回到正确状态：
+   *   split + ratio：按指定中缝重新拆（原来是单页的也能拆成两页）
+   *   merge：其实是单页，不该拆，合回一页
+   * 改完的页重新排队处理。
    */
-  private safeRemoveOutputFolder(outputFolder: string | null | undefined, sourceFolder: string) {
-    if (!outputFolder) return;
-    try {
-      const out = path.resolve(outputFolder);
-      const src = path.resolve(sourceFolder || '');
-      if (src && (out === src || out.startsWith(src + path.sep))) {
-        this.logger.warn(`Skip output cleanup — equals/under source: ${out}`);
-        return;
-      }
-      const outputRoot = path.resolve(
-        process.env.OUTPUT_ROOT || path.join(process.cwd(), '..', 'data', 'output'),
-      );
-      const rel = path.relative(outputRoot, out);
-      if (
-        !rel ||
-        rel.startsWith('..') ||
-        path.isAbsolute(rel) ||
-        !/^task[-_]/i.test(path.basename(out))
-      ) {
-        this.logger.warn(`Skip unsafe output path: ${out}`);
-        return;
-      }
-      if (fs.existsSync(out)) {
-        fs.rmSync(out, { recursive: true, force: true });
-        this.logger.log(`Removed output folder ${out}`);
-      }
-    } catch (e) {
-      this.logger.warn(`Output folder cleanup failed: ${e}`);
+  async resplit(userId: number, pageId: number, body: { mode?: 'split' | 'merge'; ratio?: number }) {
+    const { page, task } = await this.getPageOwned(userId, pageId);
+    if (!page.originPath || !fs.existsSync(page.originPath)) throw new BadRequestException('找不到这一页的上传原图');
+    const siblings = await this.pages.find({ where: { taskId: task.id, fileName: page.fileName } });
+    if (siblings.some((s) => s.status === 'processing' || s.status === 'queued')) {
+      throw new ConflictException('这张图正在处理，请稍等');
     }
-  }
-
-  safeName(name: string) {
-    return path.basename(name, path.extname(name)).replace(/[<>:"/\\|?*]/g, '_');
-  }
-
-  /**
-   * Ensure source_path always points at the untouched import original.
-   * Undoes any earlier mistake that baked a crop into outputFolder/sources.
-   */
-  private async restoreOriginalSource(task: Task, img: TaskImage) {
-    const importPath = path.join(task.sourceFolder, img.fileName);
-    const sourcesDir = path.join(task.outputFolder, 'sources');
-    const baked = path.join(sourcesDir, this.safeName(img.fileName) + '.png');
-
-    if (fs.existsSync(importPath)) {
-      if (img.sourcePath !== importPath) {
-        img.sourcePath = importPath;
-      }
-      try {
-        const meta = await sharp(importPath, { failOn: 'none' }).rotate().metadata();
-        if (meta.width) img.width = meta.width;
-        if (meta.height) img.height = meta.height;
-      } catch {
-        /* ignore */
-      }
-    }
-
-    if (fs.existsSync(baked)) {
-      try {
-        fs.unlinkSync(baked);
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-
-  async reprocessImage(
-    userId: number,
-    taskId: number,
-    imageId: number,
-    body: { params?: ProcessParams; cropBox?: CropBox | null },
-  ) {
-    const task = await this.get(userId, taskId);
-    const img = await this.getImage(userId, taskId, imageId);
-    const params = {
-      ...DEFAULT_PARAMS,
-      ...(body.params || this.processor.parseParams(img.params)),
+    await this.aliyun.assertReady().catch((e) => {
+      throw new BadRequestException(e.message);
+    });
+    const pagesDir = path.join(task.outputFolder, 'pages');
+    const base = path.basename(page.fileName, path.extname(page.fileName));
+    const reset = (s: TaskImage) => {
+      s.status = 'queued';
+      s.action = 'process';
+      s.actionArgs = null;
+      s.errorMessage = null;
+      s.edited = 0;
+      s.ocrJson = null;
+      s.uncertainCount = 0;
+      if (s.candidatePath) tryUnlink(s.candidatePath);
+      s.candidatePath = null;
+      s.candidateOcr = null;
+      s.candidateCost = '0';
     };
 
-    // Original must never change — always process from the import file
-    await this.restoreOriginalSource(task, img);
-
-    let processCrop: CropBox | null = null;
-
-    if (body.cropBox === null) {
-      img.cropBox = null;
-      processCrop = null;
-    } else {
-      const rawCrop =
-        body.cropBox === undefined
-          ? this.processor.parseCrop(img.cropBox)
-          : body.cropBox;
-      if (rawCrop && (rawCrop.w > 0 || rawCrop.h > 0)) {
-        const resolved = await this.processor.resolveCropAgainstSource(
-          img.sourcePath,
-          rawCrop,
-        );
-        if (!resolved.crop) {
-          throw new BadRequestException('裁剪区域无效，请重新框选');
-        }
-        // Persist crop_box for re-preview / param adjust; do NOT replace source
-        img.cropBox = JSON.stringify(resolved.crop);
-        processCrop = resolved.crop;
-        params.autoCrop = false;
-      } else {
-        processCrop = null;
+    if (body.mode === 'merge') {
+      const keep = siblings.find((s) => s.side === 'R') || siblings[0];
+      const single = path.join(pagesDir, `${base}.png`);
+      const size = await this.images.normalize(page.originPath, single);
+      for (const s of siblings) {
+        if (s.id === keep.id) continue;
+        for (const f of [s.resultPath, s.thumbPath]) tryUnlink(f);
+        await this.pages.delete({ id: s.id });
       }
+      if (keep.sourcePath !== single) tryUnlink(keep.sourcePath);
+      keep.sourcePath = single;
+      keep.side = null;
+      keep.gutter = null;
+      keep.width = size.width;
+      keep.height = size.height;
+      reset(keep);
+      await this.pages.save(keep);
+      await this.recount(task.id);
+      this.signal.kick();
+      return this.pageDetail(userId, keep.id);
     }
 
-    const resultPath = path.join(
-      task.outputFolder,
-      'results',
-      this.safeName(img.fileName) + '.png',
-    );
-    const thumbPath = path.join(
-      task.outputFolder,
-      'thumbs',
-      this.safeName(img.fileName) + '.jpg',
-    );
-    // Clean/result is the cropped processed image; source stays full original
-    // Single-image reprocess only updates this image's timing; task.processingTimeMs stays last batch wall-clock
-    const imgStartedAt = Date.now();
-    const size = await this.processor.processToFile(
-      img.sourcePath,
-      resultPath,
-      params,
-      processCrop,
-    );
-    await this.processor.makeThumb(resultPath, thumbPath);
-    img.processingTimeMs = Date.now() - imgStartedAt;
-
-    img.params = JSON.stringify(params);
-    img.resultPath = resultPath;
-    img.thumbPath = thumbPath;
-    // width/height remain original page dims (set by restoreOriginalSource)
-    if (img.width == null || img.height == null) {
-      img.width = size.width;
-      img.height = size.height;
-    }
-    img.status = 'ready';
-    img.errorMessage = null;
-    img.updatedAt = new Date();
-    await this.images.save(img);
-    return img;
-  }
-
-  async previewImage(
-    userId: number,
-    taskId: number,
-    imageId: number,
-    body: { params?: ProcessParams; cropBox?: CropBox | null },
-  ) {
-    const task = await this.get(userId, taskId);
-    const img = await this.getImage(userId, taskId, imageId);
-    await this.restoreOriginalSource(task, img);
-
-    const params = {
-      ...DEFAULT_PARAMS,
-      ...(body.params || this.processor.parseParams(img.params)),
-    };
-    // Manual crop only; never let autoCrop fight WeChat selection
-    params.autoCrop = false;
-
-    // cropBox: undefined → fall back to DB; null → explicit clear; object → use it
-    let processCrop: CropBox | null = null;
-    if (body.cropBox === undefined) {
-      processCrop = this.processor.parseCrop(img.cropBox);
-    } else if (body.cropBox === null) {
-      processCrop = null;
-      img.cropBox = null;
-    } else {
-      processCrop = body.cropBox;
-    }
-
-    if (processCrop && (processCrop.w > 0 || processCrop.h > 0)) {
-      const resolved = await this.processor.resolveCropAgainstSource(
-        img.sourcePath,
-        processCrop,
-      );
-      if (!resolved.crop) {
-        throw new BadRequestException('裁剪区域无效，请重新框选');
-      }
-      processCrop = resolved.crop;
-      img.cropBox = JSON.stringify(resolved.crop);
-      params.autoCrop = false;
-    } else {
-      processCrop = null;
-      img.cropBox = null;
-    }
-
-    // Persist processed result to disk so leave→re-enter keeps the clean image
-    const resultPath = path.join(
-      task.outputFolder,
-      'results',
-      this.safeName(img.fileName) + '.png',
-    );
-    const thumbPath = path.join(
-      task.outputFolder,
-      'thumbs',
-      this.safeName(img.fileName) + '.jpg',
-    );
-    const imgStartedAt = Date.now();
-    const size = await this.processor.processToFile(
-      img.sourcePath,
-      resultPath,
-      params,
-      processCrop,
-    );
-    await this.processor.makeThumb(resultPath, thumbPath);
-    img.processingTimeMs = Date.now() - imgStartedAt;
-
-    img.params = JSON.stringify(params);
-    img.resultPath = resultPath;
-    img.thumbPath = thumbPath;
-    if (img.width == null || img.height == null) {
-      img.width = size.width;
-      img.height = size.height;
-    }
-    // Param/crop tweak resets decision → 未处理 until 通过/未通过 again
-    if (img.status === 'confirmed' || img.status === 'rejected') {
-      img.status = 'ready';
-    } else if (img.status !== 'ready') {
-      img.status = 'ready';
-    }
-    img.errorMessage = null;
-    img.updatedAt = new Date();
-    await this.images.save(img);
-    await this.bumpTaskToReviewingIfNeeded(task);
-
-    return fs.readFileSync(resultPath);
-  }
-
-  async rejectImage(userId: number, taskId: number, imageId: number) {
-    const img = await this.getImage(userId, taskId, imageId);
-    if (!img.resultPath || !fs.existsSync(img.resultPath)) {
-      throw new BadRequestException('请先处理生成结果图');
-    }
-    img.status = 'rejected';
-    img.updatedAt = new Date();
-    await this.images.save(img);
-    await this.refreshConfirmed(taskId);
-    return img;
-  }
-
-  async confirmImage(userId: number, taskId: number, imageId: number) {
-    const img = await this.getImage(userId, taskId, imageId);
-    if (!img.resultPath || !fs.existsSync(img.resultPath)) {
-      throw new BadRequestException('请先处理生成结果图');
-    }
-    img.status = 'confirmed';
-    img.updatedAt = new Date();
-    await this.images.save(img);
-    await this.refreshConfirmed(taskId);
-    return img;
-  }
-
-  async confirmAll(userId: number, taskId: number) {
-    const task = await this.get(userId, taskId);
-    const imgs = await this.images.find({ where: { taskId } });
-    if (!imgs.length) throw new BadRequestException('任务没有图片');
-    const undecided = imgs.filter(
-      (img) => img.status !== 'confirmed' && img.status !== 'rejected',
-    );
-    if (undecided.length) {
-      throw new BadRequestException(
-        `还有 ${undecided.length} 张未标记通过或未通过，全部确认后才能完成`,
-      );
-    }
-    const noResult = imgs.filter(
-      (img) => !img.resultPath || !fs.existsSync(img.resultPath),
-    );
-    if (noResult.length) {
-      throw new BadRequestException(`还有 ${noResult.length} 张未处理出结果图`);
-    }
-    task.confirmedCount = imgs.filter((img) => img.status === 'confirmed').length;
-    task.status = 'completed';
-    task.updatedAt = new Date();
-    await this.tasks.save(task);
-    return this.get(userId, taskId);
-  }
-
-  private async bumpTaskToReviewingIfNeeded(task: Task) {
-    if (task.status === 'completed') {
-      task.status = 'reviewing';
-      task.updatedAt = new Date();
-      await this.tasks.save(task);
-    }
-  }
-
-  private async refreshConfirmed(taskId: number) {
-    const confirmed = await this.images.count({ where: { taskId, status: 'confirmed' } });
-    await this.tasks.update(taskId, { confirmedCount: confirmed, updatedAt: new Date() });
-  }
-
-  async downloadZip(
-    userId: number,
-    taskId: number,
-    res: any,
-    filter: 'all' | 'passed' | 'failed' = 'all',
-  ) {
-    const task = await this.get(userId, taskId);
-    const imgs = await this.images.find({
-      where: { taskId },
-      order: { sortOrder: 'ASC' },
-    });
-    let ready = imgs.filter((img) => img.resultPath && fs.existsSync(img.resultPath));
-    if (filter === 'passed') {
-      ready = ready.filter((img) => img.status === 'confirmed');
-    } else if (filter === 'failed') {
-      ready = ready.filter((img) => img.status === 'rejected');
-    }
-    if (!ready.length) {
-      throw new BadRequestException(
-        filter === 'passed'
-          ? '没有已通过的结果图可下载'
-          : filter === 'failed'
-            ? '没有未通过的结果图可下载'
-            : '没有可下载的结果图',
-      );
-    }
-
-    const suffix =
-      filter === 'passed' ? 'passed' : filter === 'failed' ? 'failed' : 'results';
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="task-${taskId}-${suffix}.zip"`,
-    );
-    const archive = archiver('zip', { zlib: { level: 9 } });
-    archive.on('error', (err) => {
-      throw err;
-    });
-    archive.pipe(res);
-    for (const img of ready) {
-      archive.file(img.resultPath!, {
-        name: 'results/' + this.safeName(img.fileName) + '.png',
+    const r = Number(body.ratio);
+    if (!(r > 0.05 && r < 0.95)) throw new BadRequestException('中缝位置不对');
+    if (!(await this.images.pythonAvailable())) throw new BadRequestException('服务器没有 Python + OpenCV，不能拆页');
+    const { width } = await this.images.size(page.originPath);
+    if (!width) throw new BadRequestException('原图读取失败');
+    const gutter = Math.round(width * r);
+    let right = siblings.find((s) => s.side === 'R') || null;
+    let left = siblings.find((s) => s.side === 'L') || null;
+    const rightPath = path.join(pagesDir, `${base}_R.png`);
+    const leftPath = path.join(pagesDir, `${base}_L.png`);
+    const res = await this.images.split(page.originPath, rightPath, leftPath, gutter);
+    if (!res.split) throw new BadRequestException('重新拆页失败');
+    if (!right) {
+      // 原来是单页：当前这行变成右页，再加一行左页
+      right = siblings[0];
+      if (right.sourcePath !== rightPath && right.sourcePath !== leftPath) tryUnlink(right.sourcePath);
+      left = this.pages.create({
+        taskId: task.id,
+        fileName: right.fileName,
+        originPath: right.originPath,
+        side: 'L',
+        sourcePath: leftPath,
+        sortOrder: right.sortOrder + 5,
+        status: 'queued',
+        pushStatus: 'none',
+        cost: '0',
+        candidateCost: '0',
       });
-      const importPath = path.join(task.sourceFolder, img.fileName);
-      const original =
-        fs.existsSync(importPath)
-          ? importPath
-          : fs.existsSync(img.sourcePath)
-            ? img.sourcePath
-            : null;
-      if (original && !original.includes(`${path.sep}sources${path.sep}`)) {
-        const ext = path.extname(original) || '.jpg';
-        archive.file(original, {
-          name: 'originals/' + this.safeName(img.fileName) + ext,
-        });
-      }
     }
-    await archive.finalize();
+    right.side = 'R';
+    right.sourcePath = rightPath;
+    left!.side = 'L';
+    left!.sourcePath = leftPath;
+    for (const s of [right, left!]) {
+      const size = await this.images.size(s.sourcePath);
+      s.width = size.width;
+      s.height = size.height;
+      s.gutter = gutter;
+      reset(s);
+      await this.pages.save(s);
+    }
+    await this.recount(task.id);
+    this.signal.kick();
+    return this.pageDetail(userId, pageId);
   }
 
-  fileUrl(absPath: string | null) {
-    if (!absPath) return null;
-    return '/files/local?path=' + encodeURIComponent(absPath);
+  /** 删掉某页（空白页、封底等不需要的页） */
+  async deletePage(userId: number, pageId: number) {
+    const { page } = await this.getPageOwned(userId, pageId);
+    if (page.status === 'processing' || page.status === 'queued') throw new ConflictException('这一页正在处理，请等处理完');
+    await this.pages.delete({ id: page.id });
+    for (const p of [page.resultPath, page.thumbPath, page.candidatePath]) if (p) tryUnlink(p);
+    await this.recount(page.taskId);
+    return { ok: true };
+  }
+
+  async reorder(userId: number, taskId: number, pageIds: number[]) {
+    const t = await this.get(userId, taskId);
+    if (t.pushStatus === 'pushing') throw new ConflictException('正在推送，请稍后再调整顺序');
+    const rows = await this.pages.find({ where: { taskId }, select: ['id', 'sortOrder'] });
+    const known = new Set(rows.map((r) => Number(r.id)));
+    const ordered = (pageIds || []).map(Number).filter((id) => known.has(id));
+    if (ordered.length !== rows.length) throw new BadRequestException('页列表已变化，请刷新后再调整');
+    for (let i = 0; i < ordered.length; i++) {
+      await this.pages.update({ id: ordered[i] }, { sortOrder: (i + 1) * 10 });
+    }
+    return { ok: true };
+  }
+
+  async refreshThumb(page: TaskImage) {
+    // 由 worker 注入的生成器负责；这里只在结果图变化后打标记
+    this.signal.thumb(page.id);
+  }
+
+  // =============== 计数与状态流转 ===============
+
+  async recount(taskId: number) {
+    const t = await this.tasks.findOne({ where: { id: taskId } });
+    if (!t) return;
+    const rows = await this.pages.find({
+      where: { taskId },
+      select: ['id', 'status', 'action', 'uncertainCount', 'cost', 'candidateCost'],
+    });
+    const count = (s: PageStatus) => rows.filter((r) => r.status === s).length;
+    t.totalCount = rows.length;
+    t.confirmedCount = count('approved');
+    t.failedCount = count('failed');
+    t.doneCount = count('review') + t.confirmedCount + t.failedCount;
+    t.uncertainPages = rows.filter((r) => r.status === 'review' && r.uncertainCount > 0).length;
+    t.actualCost = String(round4(rows.reduce((s, r) => s + Number(r.cost || 0), 0)));
+
+    // 批量处理的页 action 为空；单页操作（AI 处理本页等）有 action，不影响任务状态
+    const batchLeft = rows.filter((r) => r.status === 'pending' || (r.status === 'processing' && !r.action)).length;
+    const batchRunning = rows.filter((r) => r.status === 'processing' && !r.action).length;
+    let next: TaskStatus = t.status;
+    if (t.status === 'processing' && batchLeft === 0) next = 'reviewing';
+    if (t.status === 'pausing' && batchRunning === 0 && !this.signal.isPreparing(taskId)) next = 'paused';
+    if ((next === 'reviewing' || next === 'completed') && rows.length > 0) {
+      const allApproved = t.confirmedCount === rows.length;
+      const anyLeft = rows.some((r) => r.status === 'pending');
+      next = anyLeft ? next : allApproved ? 'completed' : 'reviewing';
+    }
+    if (next !== t.status) {
+      if (next === 'reviewing' && t.status === 'processing') t.finishedAt = new Date();
+      t.status = next;
+    }
+    await this.tasks.save(t);
+  }
+}
+
+export function statusText(s: string) {
+  return (
+    { pending: '等待处理', queued: '排队中', processing: '处理中', review: '待审核', approved: '已通过', failed: '失败' } as any
+  )[s] || s;
+}
+
+function round4(n: number) {
+  return Math.round(n * 10000) / 10000;
+}
+
+function safeName(rel: string) {
+  const parts = String(rel).replace(/\\/g, '/').split('/').filter(Boolean);
+  const joined = parts.map((s) => s.replace(/[:*?"<>|]/g, '_').trim()).join('__');
+  const ext = path.extname(joined);
+  const base = joined.slice(0, joined.length - ext.length).slice(0, 160);
+  return (base || 'image') + ext.toLowerCase();
+}
+
+function moveFile(from: string, to: string) {
+  try {
+    fs.renameSync(from, to);
+  } catch {
+    fs.copyFileSync(from, to);
+    fs.unlinkSync(from);
+  }
+}
+
+function cleanupTemp(files: UploadedFileLike[]) {
+  for (const f of files) if (f.path && fs.existsSync(f.path)) tryUnlink(f.path);
+}
+
+export function tryUnlink(p: string | null | undefined) {
+  if (!p) return;
+  try {
+    fs.unlinkSync(p);
+  } catch {}
+}
+
+function safeJson(s: string | null | undefined): any {
+  if (!s) return null;
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
   }
 }
