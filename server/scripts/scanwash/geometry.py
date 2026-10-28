@@ -14,29 +14,34 @@ class GeometryResult:
     angle: float
     warnings: list[str]
     outside_ratio: float
+    # Aligned color frame (same geometry as gray) for LAB destain.
+    bgr: np.ndarray | None = None
 
 
 def correct(bgr: np.ndarray, tier: str) -> GeometryResult:
     """老化档在有黑边或红边时透视；干净档和老化档再纠偏。残页保持原几何。"""
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    work_bgr = bgr
+    gray = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2GRAY)
     if tier == "damaged":
-        return GeometryResult(gray=gray, angle=0.0, warnings=[], outside_ratio=0.0)
+        return GeometryResult(gray=gray, angle=0.0, warnings=[], outside_ratio=0.0, bgr=work_bgr)
 
     warnings: list[str] = []
     outside_ratio = 0.0
     if tier == "aged":
         quad, outside_ratio, page_ratio = _detect_page(bgr)
         if quad is not None and page_ratio < 0.97:
-            gray = cv2.cvtColor(_warp(bgr, quad), cv2.COLOR_BGR2GRAY)
+            work_bgr = _warp(bgr, quad)
+            gray = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2GRAY)
         elif outside_ratio > 0.05 and page_ratio < 0.97:
             warnings.append("geometry_skipped")
 
     angle = _skew_angle(gray)
     if abs(angle) >= 0.3:
         gray = _rotate(gray, angle)
+        work_bgr = _rotate(work_bgr, angle)
     else:
         angle = 0.0
-    return GeometryResult(gray=gray, angle=angle, warnings=warnings, outside_ratio=outside_ratio)
+    return GeometryResult(gray=gray, angle=angle, warnings=warnings, outside_ratio=outside_ratio, bgr=work_bgr)
 
 
 def crop_text_block(
@@ -202,17 +207,23 @@ def _projection_var(ink: np.ndarray) -> float:
     return float(projection.var())
 
 
-def _rotate(gray: np.ndarray, angle: float) -> np.ndarray:
-    height, width = gray.shape[:2]
+def _rotate(image: np.ndarray, angle: float) -> np.ndarray:
+    height, width = image.shape[:2]
     matrix = cv2.getRotationMatrix2D((width / 2, height / 2), angle, 1.0)
-    fill = int(np.median(gray))
+    if image.ndim == 2:
+        fill = int(np.median(image))
+        border = fill
+    else:
+        # Median per channel keeps paper-ish border on color frames.
+        fill = [int(np.median(image[:, :, c])) for c in range(image.shape[2])]
+        border = tuple(fill)
     return cv2.warpAffine(
-        gray,
+        image,
         matrix,
         (width, height),
         flags=cv2.INTER_LANCZOS4,
         borderMode=cv2.BORDER_CONSTANT,
-        borderValue=fill,
+        borderValue=border,
     )
 
 

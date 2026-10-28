@@ -6,6 +6,8 @@ export interface NestParams {
   threshold: number;
   denoise: number;
   contrast: number;
+  /** 0~1 destain strength */
+  stain: number;
   autoCrop: boolean;
   cropPadding: number;
 }
@@ -24,16 +26,19 @@ export const DEFAULT_UI_PARAMS: ProcessParams = {
   denoiseStrength: 55,
   contrastThreshold: 60,
   sharpenStrength: 35,
+  stainStrength: 40,
 };
 
 export function uiToNestParams(p: ProcessParams): NestParams {
   // Wider Nest spans so 0%↔100% visibly differ after ScanWash mapping.
   // Recommended UI marks: denoise 55%→8.8, threshold 60%→168, sharpen 35%→1.52
+  const stainPct = typeof p.stainStrength === 'number' ? p.stainStrength : 40;
   return {
     preset: 'auto',
     denoise: (p.denoiseStrength / 100) * 16,
     threshold: 60 + (p.contrastThreshold / 100) * 180,
     contrast: 0.4 + (p.sharpenStrength / 100) * 3.2,
+    stain: Math.max(0, Math.min(1, stainPct / 100)),
     autoCrop: false,
     cropPadding: DEFAULT_CROP_PADDING,
   };
@@ -53,10 +58,12 @@ export function nestToUiParams(raw: any): ProcessParams {
   const denoise = typeof p.denoise === 'number' ? p.denoise : 8.8;
   const threshold = typeof p.threshold === 'number' ? p.threshold : 168;
   const contrast = typeof p.contrast === 'number' ? p.contrast : 1.52;
+  const stain = typeof p.stain === 'number' ? p.stain : 0.4;
   return {
     denoiseStrength: Math.round(Math.max(0, Math.min(100, (denoise / 16) * 100))),
     contrastThreshold: Math.round(Math.max(0, Math.min(100, ((threshold - 60) / 180) * 100))),
     sharpenStrength: Math.round(Math.max(0, Math.min(100, ((contrast - 0.4) / 3.2) * 100))),
+    stainStrength: Math.round(Math.max(0, Math.min(100, stain * 100))),
   };
 }
 

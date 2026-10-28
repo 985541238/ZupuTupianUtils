@@ -11,6 +11,7 @@ from scanwash.composite import apply_gutter, composite, refine_thin_strokes
 from scanwash.geometry import correct, crop_text_block
 from scanwash.mask import build_mask
 from scanwash.paper import normalize
+from scanwash.stain import destain_gray_with_color
 from scanwash.presets import PRESETS
 from scanwash.qa import evaluate
 
@@ -46,7 +47,8 @@ def run_page(path: Path, preset_name: str = "auto") -> tuple[np.ndarray, dict]:
 
     preset = PRESETS[tier]
     geometry = correct(source, tier)
-    gray = normalize(geometry.gray, preset)
+    gray0 = destain_gray_with_color(geometry.gray, geometry.bgr, preset.stain_strength)
+    gray = normalize(gray0, preset)
     ink = build_mask(gray, preset)
     warnings = list(geometry.warnings)
 

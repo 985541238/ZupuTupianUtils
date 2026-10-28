@@ -17,6 +17,8 @@ export interface ProcessParams {
   denoiseStrength: number; // 0 - 100
   contrastThreshold: number; // 0 - 100
   sharpenStrength: number; // 0 - 100
+  /** Destain (dot mold / yellow-brown blot), 0-100. Default ~40. */
+  stainStrength: number;
 }
 
 export interface PageStats {

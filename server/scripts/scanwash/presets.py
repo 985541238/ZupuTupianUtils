@@ -15,6 +15,8 @@ class Preset:
     deskew: bool
     crop_text_block: bool
     keep_gutter: bool
+    # 0~1: mid-scale destain / color blot / round-blob filter. Mild default.
+    stain_strength: float = 0.4
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -32,6 +34,7 @@ PRESETS: dict[str, Preset] = {
         deskew=True,
         crop_text_block=False,
         keep_gutter=True,
+        stain_strength=0.35,
     ),
     "aged": Preset(
         name="aged",
@@ -44,6 +47,7 @@ PRESETS: dict[str, Preset] = {
         deskew=True,
         crop_text_block=False,
         keep_gutter=True,
+        stain_strength=0.45,
     ),
     "damaged": Preset(
         name="damaged",
@@ -56,6 +60,7 @@ PRESETS: dict[str, Preset] = {
         deskew=False,
         crop_text_block=True,
         keep_gutter=False,
+        stain_strength=0.42,
     ),
 }
 

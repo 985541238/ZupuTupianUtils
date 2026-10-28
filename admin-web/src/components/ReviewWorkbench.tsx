@@ -64,13 +64,25 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   const [currentStats, setCurrentStats] = useState(task.items[currentPageIndex]?.stats);
 
   const currentItem = task.items[currentPageIndex] || task.items[0];
-  const [localParams, setLocalParams] = useState<ProcessParams>(
-    currentItem ? { ...currentItem.params } : {
-      denoiseStrength: 55,
-      contrastThreshold: 60,
-      sharpenStrength: 35,
+  const [localParams, setLocalParams] = useState<ProcessParams>(() => {
+    if (!currentItem) {
+      return {
+        denoiseStrength: 55,
+        contrastThreshold: 60,
+        sharpenStrength: 35,
+        stainStrength: 40,
+      };
     }
-  );
+    return {
+      denoiseStrength: currentItem.params?.denoiseStrength ?? 55,
+      contrastThreshold: currentItem.params?.contrastThreshold ?? 60,
+      sharpenStrength: currentItem.params?.sharpenStrength ?? 35,
+      stainStrength:
+        typeof currentItem.params?.stainStrength === 'number'
+          ? currentItem.params.stainStrength
+          : 40,
+    };
+  });
   const [applyScope, setApplyScope] = useState<'current' | 'remaining'>('current');
 
 
@@ -189,7 +201,25 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
     confirmedCropRef.current = loaded;
     setConfirmedCrop(loaded);
 
-    setLocalParams(sess?.params ? { ...sess.params } : { ...currentItem.params });
+    setLocalParams(
+      sess?.params
+        ? {
+            denoiseStrength: sess.params.denoiseStrength ?? 55,
+            contrastThreshold: sess.params.contrastThreshold ?? 60,
+            sharpenStrength: sess.params.sharpenStrength ?? 35,
+            stainStrength:
+              typeof sess.params.stainStrength === 'number' ? sess.params.stainStrength : 40,
+          }
+        : {
+            denoiseStrength: currentItem.params?.denoiseStrength ?? 55,
+            contrastThreshold: currentItem.params?.contrastThreshold ?? 60,
+            sharpenStrength: currentItem.params?.sharpenStrength ?? 35,
+            stainStrength:
+              typeof currentItem.params?.stainStrength === 'number'
+                ? currentItem.params.stainStrength
+                : 40,
+          }
+    );
     setCurrentStats(currentItem.stats);
 
     // Restore preview: always keep a visible frame (never blank).
@@ -1518,6 +1548,31 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                 <span>轻度</span>
                 <span>标准印刷去渍(55%)</span>
                 <span>深度脱除</span>
+              </div>
+            </div>
+
+            <div className="p-3 bg-white rounded-2xl border border-black/[0.06] shadow-2xs space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <label className="text-[#1D1D1F] font-semibold">去渍（点渍 / 黄褐斑）</label>
+                <span className="font-mono text-[#0071E3] font-semibold tabular-nums text-xs">
+                  {localParams.stainStrength ?? 40}%
+                </span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                value={localParams.stainStrength ?? 40}
+                onChange={(e) =>
+                  handleParamChange('stainStrength', parseInt(e.target.value, 10))
+                }
+                className="w-full"
+              />
+              <div className="flex justify-between text-[10px] text-[#86868B] font-mono">
+                <span>关闭</span>
+                <span>温和去渍(40%)</span>
+                <span>强去渍</span>
               </div>
             </div>
 

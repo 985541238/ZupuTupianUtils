@@ -8,6 +8,8 @@ export type ProcessParams = {
   threshold: number; // 80-220, maps to adaptive C bias around 168
   denoise: number; // 0-12 NLM strength (legacy blur 0-3 still accepted)
   contrast: number; // CLAHE clipLimit ~0.8-3
+  /** 0~1 destain strength (mid-scale / LAB blot / round-blob filter). Mild default. */
+  stain?: number;
   autoCrop: boolean;
   cropPadding: number;
   method?: 'adaptive' | 'sauvola' | 'relative';
@@ -21,6 +23,7 @@ export const DEFAULT_PARAMS: ProcessParams = {
   threshold: 176,
   denoise: 6,
   contrast: 1.5,
+  stain: 0.4,
   // Product: only WeChat/manual cropBox may crop. Never auto content-crop.
   autoCrop: false,
   cropPadding: 16,
@@ -44,6 +47,11 @@ export class ImageProcessService {
       }
       // force-disable autoCrop — cropping only via cropBox
       p.autoCrop = false;
+      if (typeof p.stain !== 'number' || Number.isNaN(p.stain)) {
+        p.stain = fallback.stain ?? 0.4;
+      } else {
+        p.stain = Math.max(0, Math.min(1, p.stain));
+      }
       return p;
     } catch {
       return { ...fallback };
@@ -209,6 +217,8 @@ export class ImageProcessService {
       String(params.denoise ?? 6),
       '--contrast',
       String(params.contrast ?? 1.5),
+      '--stain',
+      String(params.stain ?? 0.4),
       '--min-area',
       String(params.minArea ?? 40),
       // Never ask ScanWash to content-crop; Nest applies cropBox before this call.

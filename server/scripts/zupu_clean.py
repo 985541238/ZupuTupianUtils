@@ -21,15 +21,24 @@ from scanwash.composite import apply_gutter, composite, refine_thin_strokes
 from scanwash.geometry import correct, crop_text_block
 from scanwash.mask import build_mask
 from scanwash.paper import normalize
+from scanwash.stain import destain_gray_with_color
 from scanwash.pipeline import imread, imwrite_gray
 from scanwash.presets import PRESETS
 from scanwash.qa import evaluate
 
 
-def map_overrides(base, threshold: float, denoise: float, contrast: float, auto_crop: bool):
-    """审阅页三滑块 → ScanWash Preset。
+def map_overrides(
+    base,
+    threshold: float,
+    denoise: float,
+    contrast: float,
+    auto_crop: bool,
+    stain: float | None = None,
+    yellow_b: float | None = None,
+):
+    """审阅页滑块 → ScanWash Preset（含去渍 stain_strength）。
 
-    UI 推荐档（约 denoise 55% / threshold 60% / sharpen 35%）仍落在族谱复印常用区间；
+    UI 推荐档（约 denoise 55% / threshold 60% / sharpen 35% / stain 40%）仍落在族谱复印常用区间；
     两端故意拉得很开，拖动时预览差异明显。
     """
 
@@ -60,6 +69,18 @@ def map_overrides(base, threshold: float, denoise: float, contrast: float, auto_
     # 锐度：左近原迹 → 右高锐利。推荐 → sharpen≈0.60（近 clean）
     sharpen = through_mid(c_norm, 0.35, 0.0, 0.60, 2.4)
 
+    # stain: Nest/CLI 0~1; missing → keep preset default (mild).
+    if stain is None:
+        stain_strength = float(getattr(base, "stain_strength", 0.4))
+    else:
+        stain_strength = float(np.clip(stain, 0.0, 1.0))
+    # Auto: very yellow pages get a mild bump (skipped when stain~0 for regression).
+    if stain_strength > 0.02 and yellow_b is not None:
+        if yellow_b >= 140:
+            stain_strength = float(np.clip(stain_strength + 0.08, 0.0, 1.0))
+        elif yellow_b >= 132:
+            stain_strength = float(np.clip(stain_strength + 0.04, 0.0, 1.0))
+
     return replace(
         base,
         keep_dark_pct=float(np.clip(keep_dark, 8, 99)),
@@ -68,6 +89,7 @@ def map_overrides(base, threshold: float, denoise: float, contrast: float, auto_
         sauvola_k=float(np.clip(sauvola_k, 0.04, 0.48)),
         bh_percentile=float(np.clip(bh, 80.0, 99.5)),
         crop_text_block=bool(auto_crop),
+        stain_strength=stain_strength,
     )
 
 
@@ -78,6 +100,7 @@ def run_page_overridden(
     denoise: float,
     contrast: float,
     auto_crop: bool,
+    stain: float | None = None,
 ):
     started = time.perf_counter()
     source = imread(path)
@@ -91,9 +114,15 @@ def run_page_overridden(
     else:
         raise ValueError(f"未知预设: {preset_name}")
 
-    preset = map_overrides(PRESETS[tier], threshold, denoise, contrast, auto_crop)
+    yellow_b = None
+    if feature_dict:
+        yellow_b = feature_dict.get("yellow_b")
+    preset = map_overrides(
+        PRESETS[tier], threshold, denoise, contrast, auto_crop, stain=stain, yellow_b=yellow_b
+    )
     geometry = correct(source, tier)
-    gray = normalize(geometry.gray, preset)
+    gray0 = destain_gray_with_color(geometry.gray, geometry.bgr, preset.stain_strength)
+    gray = normalize(gray0, preset)
     ink = build_mask(gray, preset)
     warnings = list(geometry.warnings)
 
@@ -131,6 +160,7 @@ def run_page_overridden(
             "sharpen": preset.sharpen,
             "sauvola_k": preset.sauvola_k,
             "crop_text_block": preset.crop_text_block,
+            "stain_strength": preset.stain_strength,
         },
     }
     return png, meta
@@ -179,6 +209,8 @@ def main() -> int:
     p.add_argument("--threshold", type=float, default=176)
     p.add_argument("--denoise", type=float, default=6)
     p.add_argument("--contrast", type=float, default=1.2)
+    # Destain 0~1 (UI 0~100% → Nest stain → here). Default mild ~0.40.
+    p.add_argument("--stain", type=float, default=0.4)
     p.add_argument("--min-area", type=float, default=35)
     # Product: full page unless Nest already carved a manual cropBox. Default OFF.
     p.add_argument("--auto-crop", type=int, default=0)
@@ -203,6 +235,7 @@ def main() -> int:
             args.denoise,
             args.contrast,
             bool(args.auto_crop) and not manual_crop,
+            stain=float(args.stain),
         )
 
         if manual_crop:
