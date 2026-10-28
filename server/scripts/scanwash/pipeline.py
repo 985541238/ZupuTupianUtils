@@ -56,6 +56,7 @@ def process_page(source: np.ndarray, tier: str, params: InkParams, auto_crop: bo
         "stroke_width": round(result.stroke_width, 2),
         "t_high": round(result.t_high, 3),
         "t_low": round(result.t_low, 3),
+        "stain": result.info or {},
         "ink_params": asdict(params),
     }
     return image, meta

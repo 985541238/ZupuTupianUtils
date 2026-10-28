@@ -48,6 +48,7 @@ class InkResult:
     stroke_width: float
     t_high: float
     t_low: float
+    info: dict | None = None
 
 
 def luminance(bgr: np.ndarray, stain: float) -> np.ndarray:
@@ -157,22 +158,147 @@ def filter_components(mask: np.ndarray, d: np.ndarray, stroke_w: float, t_high: 
         if a > 3 * stroke_w * stroke_w and dmean[i] < ref * (0.45 + 0.25 * den) and dmax[i] < ref * 1.05:
             keep[i] = False
             continue
-        # 贴边的大块：扫描黑边、书口阴影
-        touches = x <= 1 or y <= 1 or x + bw >= w - 1 or y + bh >= h - 1
-        if touches:
-            fill = a / max(bw * bh, 1)
-            thick = min(bw, bh) > 4 * stroke_w
-            if thick and fill > 0.35:
-                keep[i] = False
-                continue
-            # 书页侧边/上下边的暗条：贴边、细长、整条落在外缘带内
-            band_x, band_y = 0.06 * w, 0.06 * h
-            in_lr = (x <= 1 and x + bw <= band_x) or (x + bw >= w - 1 and x >= w - band_x)
-            in_tb = (y <= 1 and y + bh <= band_y) or (y + bh >= h - 1 and y >= h - band_y)
-            if (in_lr and bh > 0.15 * h) or (in_tb and bw > 0.15 * w):
-                keep[i] = False
-                continue
+        # 贴边的大块：扫描仪黑底、书口阴影。只删“沿着那条边”的条带或实心黑块，
+        # 横贯整页的边框粗线、被裁到的邻页标题列都保留。
+        fill = a / max(bw * bh, 1)
+        at_l, at_r = x <= 1, x + bw >= w - 1
+        at_t, at_b = y <= 1, y + bh >= h - 1
+        side_strip = (at_l or at_r) and bh > 0.3 * h and bw < 0.08 * w and fill > 0.5
+        tb_strip = (at_t or at_b) and bw > 0.3 * w and bh < 0.08 * h and fill > 0.5
+        solid_bg = (at_l or at_r or at_t or at_b) and a > 0.01 * h * w and fill > 0.6 and dmean[i] > ref * 0.9
+        if side_strip or tb_strip or solid_bg:
+            keep[i] = False
+            continue
     return keep[labels]
+
+
+def remove_stain_blobs(mask: np.ndarray, lum: np.ndarray, stroke_w: float, p: InkParams) -> tuple[np.ndarray, int]:
+    """霉斑、水渍、墨渍团：比笔画粗得多、轮廓破碎的黑块。
+
+    用直径约 2.6 倍笔宽的圆盘做开运算，笔画会被整笔开掉，只剩粗块。
+    粗块里外形规整的（世系框、黑底标签、粗边框）保留；轮廓破碎的判为污渍。
+    污渍范围内不直接清空：字常压在污渍上，按局部灰度重新二分，墨比污渍黑就留下。
+    """
+    strength = float(np.clip(p.stain, 0.0, 1.0))
+    if strength < 0.05:
+        return mask, 0
+    D = int(round(2.6 * stroke_w)) | 1
+    disk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (D, D))
+    opened = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_OPEN, disk)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(opened, connectivity=8)
+    if n <= 1:
+        return mask, 0
+    solid_min = 0.70 + 0.15 * strength
+    bad = np.zeros(n, bool)
+    for i in range(1, n):
+        x, y, bw, bh, a = (int(v) for v in st[i])
+        if max(bw, bh) > 30 * stroke_w or max(bw, bh) / max(min(bw, bh), 1) > 5:
+            continue  # 边框线、书口折线
+        comp = (lab[y : y + bh, x : x + bw] == i).astype(np.uint8)
+        cnts, _ = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        c0 = max(cnts, key=cv2.contourArea)
+        hull_area = cv2.contourArea(cv2.convexHull(c0))
+        solidity = cv2.contourArea(c0) / max(hull_area, 1.0)
+        bad[i] = solidity < solid_min
+    if not bad.any():
+        return mask, 0
+    blob = bad[lab].astype(np.uint8)
+    r = int(round(0.9 * stroke_w)) * 2 + 1
+    zone = cv2.dilate(blob, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (r, r))).astype(bool)
+    zone &= mask
+    out = mask & ~zone
+    # 污渍区内重新分墨：每块单独做 Otsu，墨明显比污渍黑才留
+    zl = lum.astype(np.float32)
+    nz, zlab = cv2.connectedComponents(zone.astype(np.uint8), connectivity=8)
+    for j in range(1, nz):
+        sel = zlab == j
+        vals = zl[sel]
+        if vals.size < 50:
+            continue
+        u8 = np.clip(vals, 0, 255).astype(np.uint8).reshape(-1, 1)
+        t, _ = cv2.threshold(u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        dark = vals[vals < t]
+        light = vals[vals >= t]
+        if dark.size < 20 or light.size < 20:
+            continue
+        if float(light.mean() - dark.mean()) < 45.0:
+            continue  # 墨和污渍一样黑，分不开，整块按污渍处理
+        keep = sel & (zl < t - 6.0)
+        out |= keep
+    # 重新分出的碎点去掉
+    k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    out = cv2.morphologyEx(out.astype(np.uint8), cv2.MORPH_OPEN, k3).astype(bool) | (mask & ~zone & out)
+    return out, int(bad.sum())
+
+
+def split_stain_layer(mask: np.ndarray, lum: np.ndarray, stroke_w: float, p: InkParams) -> tuple[np.ndarray, dict]:
+    """逐个连通域区分“字”和“污渍”。
+
+    刻本字边缘是刀刻出来的，墨和纸之间一步到位；霉斑、水渍、折痕边缘是渐变的。
+    用“边界平均梯度 / 该块与纸的反差”衡量边缘锐利度，与反差无关，淡墨字也成立。
+    - 锐利：字，原样保留（淡墨字也不动）。
+    - 发虚且没有墨黑的核心：纯污渍，整块去掉。
+    - 发虚但有墨黑核心：字黏着污渍，只留墨黑核心再向外长半个笔宽。
+    """
+    info: dict = {"stain_layer": False}
+    strength = float(np.clip(p.stain, 0.0, 1.0))
+    if strength < 0.1 or int(mask.sum()) < 500:
+        return mask, info
+    m8 = mask.astype(np.uint8)
+    lum = lum.astype(np.float32)
+    k_bg = int(7 * stroke_w) | 1
+    bg = cv2.morphologyEx(lum, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_bg, k_bg)))
+    gx = cv2.Sobel(lum, cv2.CV_32F, 1, 0)
+    gy = cv2.Sobel(lum, cv2.CV_32F, 0, 1)
+    gm = np.sqrt(gx * gx + gy * gy)
+    edge = (m8 - cv2.erode(m8, np.ones((3, 3), np.uint8))).astype(bool)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(m8, connectivity=8)
+    area = np.maximum(st[:, cv2.CC_STAT_AREA].astype(np.float64), 1)
+    flat = lab.ravel()
+    gmean = np.bincount(flat, lum.ravel(), n) / area
+    bgm = np.bincount(flat, bg.ravel(), n) / area
+    ecnt = np.maximum(np.bincount(lab[edge], minlength=n), 1)
+    esh = np.bincount(lab[edge], gm[edge], n) / ecnt
+    contrast = np.maximum(bgm - gmean, 5.0)
+    sharp = esh / contrast
+    sizable = area >= 2 * stroke_w * stroke_w
+    sizable[0] = False
+    if sizable.sum() < 10:
+        return mask, info
+    # 页面参考：高反差块的锐利度（按面积加权中位数）
+    hi = sizable & (contrast >= np.percentile(contrast[sizable], 60))
+    order = np.argsort(sharp[hi])
+    cw = np.cumsum(area[hi][order])
+    ref = float(sharp[hi][order][np.searchsorted(cw, cw[-1] / 2)])
+    # 墨黑阈值：掩膜内亮度 Otsu
+    vals = np.clip(lum[mask], 0, 255).astype(np.uint8).reshape(-1, 1)
+    t_ink, _ = cv2.threshold(vals, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    soft_thr = ref * (0.80 + 0.08 * strength)
+    soft = sizable & (sharp < soft_thr)
+    # 小碎块：只按锐利度判断
+    tiny = ~sizable
+    tiny[0] = False
+    tiny_soft = tiny & (sharp < ref * 0.75)
+    info.update(ref_sharp=round(ref, 2), ink_cut=float(t_ink))
+    if not soft.any() and not tiny_soft.any():
+        return mask, info
+    info["stain_layer"] = True
+    soft_px = soft[lab]
+    core = (soft_px & (lum < float(t_ink))).astype(np.uint8)
+    nc, clab, cst, _ = cv2.connectedComponentsWithStats(core, connectivity=8)
+    okc = cst[:, cv2.CC_STAT_AREA] >= max(4, int(0.6 * stroke_w * stroke_w))
+    okc[0] = False
+    core = okc[clab].astype(np.uint8)
+    region = soft_px.astype(np.uint8)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    grown = core
+    for _ in range(max(1, int(round(0.5 * stroke_w)))):
+        grown = cv2.dilate(grown, k) & region
+    keep_lbl = ~(soft | tiny_soft)
+    keep_lbl[0] = False
+    out = keep_lbl[lab] | grown.astype(bool)
+    info.update(soft_components=int(soft.sum()), tiny_dropped=int(tiny_soft.sum()))
+    return out, info
 
 
 def render(d: np.ndarray, mask: np.ndarray, t_low: float, stroke_w: float, p: InkParams) -> np.ndarray:
@@ -215,6 +341,13 @@ def extract(bgr: np.ndarray, p: InkParams) -> InkResult:
     mask, t_high, t_low = hysteresis_mask(d, p)
     # 补一像素断笔
     mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))).astype(bool)
+    lum_raw = luminance(work, p.stain)
+    lum_med = cv2.medianBlur(np.clip(lum_raw, 0, 255).astype(np.uint8), 3)
+    mask, _blobs = remove_stain_blobs(mask, lum_med, sw, p)
+    mask, layer_info = split_stain_layer(mask, lum_med.astype(np.float32), sw, p)
     mask = filter_components(mask, d, sw, t_high, p)
     out = render(d, mask, t_low, sw, p)
-    return InkResult(image=out, mask=mask, darkness=d, scale=scale, stroke_width=sw, t_high=t_high, t_low=t_low)
+    return InkResult(
+        image=out, mask=mask, darkness=d, scale=scale, stroke_width=sw, t_high=t_high, t_low=t_low,
+        info={"stain_blobs": _blobs, **layer_info},
+    )
