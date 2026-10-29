@@ -141,13 +141,22 @@ def warp_one(img: np.ndarray, qn: np.ndarray) -> np.ndarray:
     area = 0.5 * abs(cross(tr - tl, bl - tl)) + 0.5 * abs(cross(br - tr, br - bl))
     if area < 0.01 * W * H:
         raise RuntimeError("选的四个点围出的范围太小，请重新选")
-    m = max(ow, oh)
-    if m > 8000:
-        k = 8000.0 / m
-        ow, oh = int(ow * k), int(oh * k)
     dst = np.array([[0, 0], [ow - 1, 0], [ow - 1, oh - 1], [0, oh - 1]], dtype=np.float32)
     M = cv2.getPerspectiveTransform(q, dst)
     return cv2.warpPerspective(img, M, (ow, oh), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+
+def fit_to_size(out: np.ndarray, W: int, H: int) -> np.ndarray:
+    """输出尺寸保持和原图一致：等比缩放放进 W×H 的画布，空出的地方补白（不拉伸，字不会变形）。"""
+    oh, ow = out.shape[:2]
+    k = min(W / ow, H / oh)
+    nw, nh = max(1, int(round(ow * k))), max(1, int(round(oh * k)))
+    if (nw, nh) != (ow, oh):
+        out = cv2.resize(out, (nw, nh), interpolation=cv2.INTER_CUBIC if k > 1 else cv2.INTER_AREA)
+    canvas = np.full((H, W, 3), 255, np.uint8)
+    x0, y0 = (W - nw) // 2, (H - nh) // 2
+    canvas[y0 : y0 + nh, x0 : x0 + nw] = out
+    return canvas
 
 
 def cmd_warp(a) -> dict:
@@ -157,14 +166,14 @@ def cmd_warp(a) -> dict:
         # 两页：各自拉正，缩放到同样的高度后左右拼成一张（左页在左、右页在右）
         out2 = warp_one(img, parse_quad(a.quad2))
         hh = max(out.shape[0], out2.shape[0])
-        if hh > 8000:
-            hh = 8000
 
         def fit(o):
             k = hh / o.shape[0]
             return cv2.resize(o, (max(1, int(round(o.shape[1] * k))), hh), interpolation=cv2.INTER_CUBIC if k > 1 else cv2.INTER_AREA)
 
         out = np.hstack([fit(out), fit(out2)])
+    H0, W0 = img.shape[:2]
+    out = fit_to_size(out, W0, H0)
     imwrite_png(a.out, out)
     return {"ok": True, "width": int(out.shape[1]), "height": int(out.shape[0])}
 

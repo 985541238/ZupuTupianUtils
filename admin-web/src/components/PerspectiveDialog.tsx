@@ -235,7 +235,7 @@ export const PerspectiveDialog: React.FC<{
               </button>
             </div>
           </div>
-          <p className="text-[11px] text-[#86868B] mt-2">确定后这一页的裁剪框会清除（拉正后图的尺寸变了），之后可以再裁剪；随时可以「恢复原图」。</p>
+          <p className="text-[11px] text-[#86868B] mt-2">拉正后图片尺寸保持和原图一致（等比缩放，空出的地方补白，字不会变形）。确定后这一页的裁剪框会清除，之后可以再裁剪；随时可以「恢复原图」。</p>
         </div>
       </div>
     </div>
