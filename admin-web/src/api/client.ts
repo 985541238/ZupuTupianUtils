@@ -199,5 +199,8 @@ export async function previewImageBlob(
     body: JSON.stringify(body || {}),
   });
   if (!res.ok) throw new Error('预览失败');
-  return await res.blob();
+  const blob = await res.blob();
+  // ai = 这一页仍以大模型结果为准（调参数只更新备用的算法结果）
+  (blob as any).resultMode = res.headers.get('X-Result-Mode') || 'algo';
+  return blob;
 }

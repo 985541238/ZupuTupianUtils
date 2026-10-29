@@ -327,6 +327,9 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
         const previewStartedAt = performance.now();
         const blob = await previewImageBlob(task.id, pageIdAtStart, body);
         const clientPreviewMs = Math.round(performance.now() - previewStartedAt);
+        if ((blob as any).resultMode === 'ai') {
+          triggerToast('这一页以大模型结果为准：调整参数只更新备用的算法结果。如需改用算法结果，请在右侧「大模型处理」里切换');
+        }
         // Always stash under the page that requested preview (even if user navigated away).
         const url = URL.createObjectURL(blob);
         const prevSess = pageSessionRef.current.get(pageIdAtStart);

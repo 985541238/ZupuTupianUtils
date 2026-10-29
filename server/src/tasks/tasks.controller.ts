@@ -117,9 +117,11 @@ export class TasksController {
     @Body() body: any,
     @Res() res: Response,
   ) {
-    const buf = await this.tasks.previewImage(req.user.id, id, imageId, body || {});
+    const r = await this.tasks.previewImage(req.user.id, id, imageId, body || {});
     res.setHeader('Content-Type', 'image/png');
-    res.send(buf);
+    res.setHeader('X-Result-Mode', r.mode);
+    res.setHeader('Access-Control-Expose-Headers', 'X-Result-Mode');
+    res.send(r.buf);
   }
 
   @Post(':id/images/:imageId/ai-recognize')

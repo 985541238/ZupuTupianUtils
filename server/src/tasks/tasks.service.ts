@@ -946,6 +946,33 @@ export class TasksService implements OnModuleInit {
     }
   }
 
+  /**
+   * 算法重新出图后决定「当前结果」：
+   * - 已有大模型结果、当前用的是它、裁剪框没变 → 继续用大模型结果（优先 AI），算法图只更新备用
+   * - 裁剪框变了 → 旧的大模型结果对应旧区域，作废；改用新的算法结果
+   * - 其他 → 用算法结果
+   * 返回当前结果是否为大模型结果。
+   */
+  private async settleAfterAlgo(task: Task, img: TaskImage, algoPath: string, thumbPath: string, prevCrop: string | null) {
+    img.algoResultPath = algoPath;
+    const cropChanged = (prevCrop || null) !== (img.cropBox || null);
+    const hasAi = !!(img.aiResultPath && fs.existsSync(img.aiResultPath));
+    if (hasAi && cropChanged) {
+      this.logger.log(`image ${img.id} 裁剪框已改，旧的大模型结果作废`);
+      img.aiResultPath = null as any;
+    }
+    if (hasAi && !cropChanged && img.processMode === 'ai') {
+      img.resultPath = img.aiResultPath;
+      await this.processor.makeThumb(img.aiResultPath!, thumbPath); // 缩略图仍显示大模型结果
+      img.thumbPath = thumbPath;
+      return true;
+    }
+    img.resultPath = algoPath;
+    img.processMode = 'algo';
+    img.thumbPath = thumbPath;
+    return false;
+  }
+
   async reprocessImage(
     userId: number,
     taskId: number,
@@ -954,6 +981,7 @@ export class TasksService implements OnModuleInit {
   ) {
     const task = await this.get(userId, taskId);
     const img = await this.getImage(userId, taskId, imageId);
+    const prevCrop = img.cropBox || null;
     const params = {
       ...DEFAULT_PARAMS,
       ...(body.params || this.processor.parseParams(img.params)),
@@ -1012,16 +1040,13 @@ export class TasksService implements OnModuleInit {
     img.processingTimeMs = Date.now() - imgStartedAt;
 
     img.params = JSON.stringify(params);
-    img.resultPath = resultPath;
-    img.algoResultPath = resultPath;
-    img.processMode = 'algo';
-    img.thumbPath = thumbPath;
+    const keptAi = await this.settleAfterAlgo(task, img, resultPath, thumbPath, prevCrop);
     // width/height remain original page dims (set by restoreOriginalSource)
     if (img.width == null || img.height == null) {
       img.width = size.width;
       img.height = size.height;
     }
-    img.status = 'ready';
+    if (!keptAi || (img.status !== 'confirmed' && img.status !== 'rejected')) img.status = 'ready';
     img.errorMessage = null;
     img.updatedAt = new Date();
     await this.images.save(img);
@@ -1036,6 +1061,7 @@ export class TasksService implements OnModuleInit {
   ) {
     const task = await this.get(userId, taskId);
     const img = await this.getImage(userId, taskId, imageId);
+    const prevCrop = img.cropBox || null;
     await this.restoreOriginalSource(task, img);
 
     const params = {
@@ -1094,18 +1120,14 @@ export class TasksService implements OnModuleInit {
     img.processingTimeMs = Date.now() - imgStartedAt;
 
     img.params = JSON.stringify(params);
-    img.resultPath = resultPath;
-    img.algoResultPath = resultPath;
-    img.processMode = 'algo';
-    img.thumbPath = thumbPath;
+    const keptAi = await this.settleAfterAlgo(task, img, resultPath, thumbPath, prevCrop);
     if (img.width == null || img.height == null) {
       img.width = size.width;
       img.height = size.height;
     }
     // Param/crop tweak resets decision → 未处理 until 通过/未通过 again
-    if (img.status === 'confirmed' || img.status === 'rejected') {
-      img.status = 'ready';
-    } else if (img.status !== 'ready') {
+    // 当前仍用大模型结果（下载的图没变）时，不打回审阅结论
+    if (!keptAi || (img.status !== 'confirmed' && img.status !== 'rejected')) {
       img.status = 'ready';
     }
     img.errorMessage = null;
@@ -1113,7 +1135,8 @@ export class TasksService implements OnModuleInit {
     await this.images.save(img);
     await this.bumpTaskToReviewingIfNeeded(task);
 
-    return fs.readFileSync(resultPath);
+    // 当前仍用大模型结果时返回它（下载、通过用的都是它），并告诉前端
+    return { buf: fs.readFileSync(img.resultPath || resultPath), mode: keptAi ? 'ai' : 'algo' };
   }
 
   async rejectImage(userId: number, taskId: number, imageId: number) {
