@@ -550,18 +550,22 @@ export class AliyunService {
 
     let body: any;
     switch (platform) {
-      case 'ark':
+      case 'ark': {
+        // Seedream 5.x 不支持 sequential_image_generation（会 400 InvalidParameter）；仅旧版 4.x 需要
+        const isSeedream5 = /seedream-5/i.test(model.model || '');
         body = {
           model: model.model,
           prompt,
           image,
-          size: size || '2K',
-          sequential_image_generation: 'disabled',
+          // 5.0 官方推荐档位 2K
+          size: isSeedream5 ? '2K' : size || '2K',
+          ...(isSeedream5 ? {} : { sequential_image_generation: 'disabled' }),
           response_format: 'url',
           stream: false,
           watermark: false,
         };
         break;
+      }
       case 'aliyun':
         body = {
           model: model.model,
