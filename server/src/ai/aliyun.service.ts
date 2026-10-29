@@ -101,7 +101,7 @@ export function classifyAiError(status: number, code: string, rawMsg: string, pl
   }
   if (status === 400) {
     return new AiConfigError(
-      `${name}不接受这次请求的参数（多为图片尺寸或格式不符合要求）。可在模型设置里填写「输出尺寸」后重试，或换一个推荐模型。`,
+      `${name}不接受这次请求的参数（多为图片尺寸或格式不符合要求）。可稍后重试，或换一个推荐模型。`,
       'param', platform, detail,
     );
   }
@@ -367,8 +367,8 @@ export class AliyunService {
   }
 
   /**
-   * 输出尺寸：按原图（裁剪后）比例计算，满足各平台像素范围，避免模型自行改变宽高比。
-   * 模型里填了「输出尺寸」时以填写为准。
+   * 输出尺寸：按原图（裁剪后）比例自动计算，满足各平台像素范围，避免模型自行改变宽高比。
+   * 不让用户设置；最终结果都会缩放回原图（裁剪后）的像素尺寸。
    */
   private outputSize(platform: PlatformCode, w: number, h: number, override?: string | null): string | null {
     const sepPlatform = platform;
@@ -449,7 +449,7 @@ export class AliyunService {
     const prompt = (model.prompt || DEFAULT_CLEAN_PROMPT).trim();
     const url = this.imageEditEndpoint(platform, cfg);
     const size =
-      platform === 'siliconflow' ? siliconflowSize(model.model, input.width, input.height, model.outputSize) : this.outputSize(platform, input.width, input.height, model.outputSize);
+      platform === 'siliconflow' ? siliconflowSize(model.model, input.width, input.height) : this.outputSize(platform, input.width, input.height);
 
     let published: { url: string; file: string } | null = null;
     let image: string;
@@ -501,20 +501,30 @@ export class AliyunService {
 
     this.logger.debug(`cleanImage POST ${url} model=${model.model} platform=${platform} size=${size}`);
     try {
-      const res = await this.fetchWithTimeout(
-        url,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: 'Bearer ' + cfg.apiKey,
-            // 硅基流动默认在图上加显式「AI 生成」水印，会盖住谱文，这里关闭（隐式水印平台始终保留）
-            ...(platform === 'siliconflow' ? { 'X-Enable-Watermark': '0' } : {}),
+      const post = () =>
+        this.fetchWithTimeout(
+          url,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + cfg.apiKey,
+              // 硅基流动默认在图上加显式「AI 生成」水印，会盖住谱文，这里关闭（隐式水印平台始终保留）
+              ...(platform === 'siliconflow' ? { 'X-Enable-Watermark': '0' } : {}),
+            },
+            body: JSON.stringify(body),
           },
-          body: JSON.stringify(body),
-        },
-        cfg.timeoutSec * 1000,
-      );
+          cfg.timeoutSec * 1000,
+        );
+      let res = await post();
+      // 平台不接受自动算出的尺寸时，去掉尺寸再试一次（按模型默认出图，结果仍会缩放回原图尺寸）
+      if (res.status === 400 && (body.image_size || body.size || body.parameters?.size)) {
+        this.logger.warn(`${platform} 不接受尺寸 ${size}，去掉尺寸重试`);
+        delete body.image_size;
+        delete body.size;
+        if (body.parameters) delete body.parameters.size;
+        res = await post();
+      }
       if (!res.ok) throw await this.httpError(res, platform);
       const data: any = await res.json();
       if (data.error) {
@@ -750,13 +760,10 @@ export class AliyunService {
 }
 
 /**
- * 硅基流动出图尺寸：Qwen-Image-Edit 系列不需要（按原图比例出图）；
- * 其他模型（如 Kolors）必填，取官方推荐尺寸里比例最接近原图的。模型里填了「输出尺寸」以填写为准。
+ * 硅基流动出图尺寸：按原图比例，从官方推荐尺寸里挑比例最接近的，避免模型改画面比例
+ * （Qwen-Image-Edit 文档说可不传；传了不被接受时会自动去掉重试）。
  */
-function siliconflowSize(id: string, w: number, h: number, override?: string | null): string | null {
-  const o = (override || '').trim().match(/^(\d{2,5})\s*[x*:×]\s*(\d{2,5})$/i);
-  if (o) return `${o[1]}x${o[2]}`;
-  if (/qwen-image-edit/i.test(id)) return null;
+function siliconflowSize(id: string, w: number, h: number): string | null {
   const opts = /kolors/i.test(id)
     ? ['1024x1024', '960x1280', '768x1024', '720x1440', '720x1280']
     : ['1328x1328', '1664x928', '928x1664', '1472x1140', '1140x1472', '1584x1056', '1056x1584'];

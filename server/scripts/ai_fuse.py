@@ -123,25 +123,53 @@ def local_refine(o_ink: np.ndarray, a_ink: np.ndarray, grid: int = 8) -> np.ndar
     return out
 
 
-def align(o_ink_s: np.ndarray, a_ink_s: np.ndarray) -> np.ndarray:
-    """ECC 仿射对齐（小图上），失败或变换离谱时返回单位阵"""
-    eye = np.eye(2, 3, dtype=np.float32)
-    t = cv2.GaussianBlur(o_ink_s.astype(np.float32), (0, 0), 2.0)
-    m = cv2.GaussianBlur(a_ink_s.astype(np.float32), (0, 0), 2.0)
-    warp = eye.copy()
+def content_box(ink: np.ndarray) -> tuple[float, float, float, float] | None:
+    """版面范围：按行/列的墨量取 1%~99% 分位，忽略零星噪点"""
+    ys, xs = np.nonzero(ink)
+    if xs.size < 50:
+        return None
+    return (float(np.percentile(xs, 1)), float(np.percentile(ys, 1)), float(np.percentile(xs, 99)), float(np.percentile(ys, 99)))
+
+
+def ecc(t: np.ndarray, m: np.ndarray, init: np.ndarray) -> np.ndarray | None:
+    warp = init.astype(np.float32).copy()
     try:
         _, warp = cv2.findTransformECC(
             t, m, warp, cv2.MOTION_AFFINE,
-            (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 80, 1e-5), None, 5,
+            (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 100, 1e-5), None, 5,
         )
     except cv2.error:
-        return eye
-    sx = float(np.hypot(warp[0, 0], warp[1, 0]))
-    sy = float(np.hypot(warp[0, 1], warp[1, 1]))
-    h, w = o_ink_s.shape
-    if not (0.85 < sx < 1.15 and 0.85 < sy < 1.15) or abs(warp[0, 2]) > w * 0.08 or abs(warp[1, 2]) > h * 0.08:
-        return eye
+        return None
+    # 与初值相比变化不能太离谱
+    s0x, s0y = float(np.hypot(*init[:, 0])), float(np.hypot(*init[:, 1]))
+    sx, sy = float(np.hypot(warp[0, 0], warp[1, 0])), float(np.hypot(warp[0, 1], warp[1, 1]))
+    h, w = t.shape
+    if not (0.85 < sx / s0x < 1.15 and 0.85 < sy / s0y < 1.15):
+        return None
+    if abs(warp[0, 2] - init[0, 2]) > w * 0.1 or abs(warp[1, 2] - init[1, 2]) > h * 0.1:
+        return None
     return warp
+
+
+def align(o_ink_s: np.ndarray, a_ink_s: np.ndarray) -> list[np.ndarray]:
+    """候选对齐：①直接拉伸到原图尺寸 ②按版面范围对齐（模型加了白边、裁了边、缩放了画面时）。各自再做 ECC 细调。"""
+    eye = np.eye(2, 3, dtype=np.float32)
+    t = cv2.GaussianBlur(o_ink_s.astype(np.float32), (0, 0), 2.0)
+    m = cv2.GaussianBlur(a_ink_s.astype(np.float32), (0, 0), 2.0)
+    inits = [eye]
+    bo, ba = content_box(o_ink_s), content_box(a_ink_s)
+    if bo and ba and bo[2] > bo[0] and bo[3] > bo[1]:
+        sx = (ba[2] - ba[0]) / (bo[2] - bo[0])
+        sy = (ba[3] - ba[1]) / (bo[3] - bo[1])
+        if 0.4 < sx < 2.5 and 0.4 < sy < 2.5:
+            inits.append(np.float32([[sx, 0, ba[0] - sx * bo[0]], [0, sy, ba[1] - sy * bo[1]]]))
+    out = []
+    for init in inits:
+        out.append(init)
+        r = ecc(t, m, init)
+        if r is not None:
+            out.append(r)
+    return out
 
 
 def main() -> int:
@@ -149,8 +177,6 @@ def main() -> int:
     p.add_argument("--orig", required=True)
     p.add_argument("--ai", required=True)
     p.add_argument("--out", required=True)
-    p.add_argument("--min-recall", type=float, default=0.7)
-    p.add_argument("--max-dropped", type=int, default=2)
     a = p.parse_args()
 
     o = read_gray(a.orig)
@@ -170,30 +196,53 @@ def main() -> int:
     sw, sh = max(1, int(w * s)), max(1, int(h * s))
     o_s = cv2.resize(o_ink.astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST).astype(bool)
     a_s = cv2.resize(a_ink.astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST).astype(bool)
-    warp = align(o_s, a_s)
     flags = cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP
-    a_s2 = cv2.warpAffine(a_s.astype(np.uint8), warp, (sw, sh), flags=flags, borderValue=0).astype(bool)
-
     tol = disk(max(2, round(min(sh, sw) * 0.004)))
-    recall = ratio(cv2.dilate(o_s.astype(np.uint8), tol).astype(bool), a_s2)  # 模型画的字，原图那里有没有
+    o_dil = cv2.dilate(o_s.astype(np.uint8), tol).astype(bool)
+    best = None
+    for cand in align(o_s, a_s):
+        a_c = cv2.warpAffine(a_s.astype(np.uint8), cand, (sw, sh), flags=flags, borderValue=0).astype(bool)
+        a_c = local_refine(o_s, a_c.astype(np.uint8)).astype(bool)
+        r = ratio(o_dil, a_c)  # 模型画的字，原图那里有没有
+        if best is None or r > best[0]:
+            best = (r, cand, a_c)
+    recall, warp, a_s2 = best
     g = glyph_mask(o_s)
     a_near = cv2.dilate(a_s2.astype(np.uint8), disk(max(3, round(min(sh, sw) * 0.01)))).astype(bool)
     coverage = ratio(a_near, g)  # 原图里像字的东西，模型保留了多少
 
-    # 分块检查：原图字很密、模型结果却几乎空白 → 模型丢了内容
-    dropped = 0
-    gy, gx = 4, 4
+    # 分块评估：字密的块里，模型对不上（画错位置或没画）→ 这一块不用模型结果，保持原图
+    gy, gx = 6, 6
+    bad = np.zeros((gy, gx), bool)
+    text_tiles = 0
+    stats_dbg = []
     for i in range(gy):
         for j in range(gx):
             ys, ye = sh * i // gy, sh * (i + 1) // gy
             xs, xe = sw * j // gx, sw * (j + 1) // gx
-            gc = int(np.count_nonzero(g[ys:ye, xs:xe]))
-            if gc > (ye - ys) * (xe - xs) * 0.02 and np.count_nonzero(a_near[ys:ye, xs:xe] & g[ys:ye, xs:xe]) < gc * 0.15:
-                dropped += 1
+            gt = g[ys:ye, xs:xe]
+            gc = int(np.count_nonzero(gt))
+            if gc <= (ye - ys) * (xe - xs) * 0.015:
+                continue
+            text_tiles += 1
+            at = a_s2[ys:ye, xs:xe]
+            cov = np.count_nonzero(a_near[ys:ye, xs:xe] & gt) / gc
+            rec = ratio(o_dil[ys:ye, xs:xe], at) if np.count_nonzero(at) > 20 else 0.0
+            a_cnt = int(np.count_nonzero(at))
+            dens = gc / float((ye - ys) * (xe - xs))
+            # ①模型在这里画了东西，但和原图对不上 → 画错了
+            misdrawn = a_cnt > gc * 0.15 and rec < 0.6
+            # ②原图这里字很密（像正文），模型几乎没画 → 丢了内容。
+            #   零散污点密度低，模型去掉它们是对的，不算丢内容
+            dropped = dens > 0.05 and cov < 0.2
+            if misdrawn or dropped:
+                bad[i, j] = True
+            stats_dbg.append((i, j, round(dens, 3), round(cov, 2), round(rec, 2), a_cnt))
+    nbad = int(bad.sum())
 
-    meta = {"recall": round(recall, 3), "coverage": round(coverage, 3), "dropped": dropped,
+    meta = {"recall": round(recall, 3), "coverage": round(coverage, 3), "bad_tiles": nbad, "text_tiles": text_tiles,
             "shift": [round(float(warp[0, 2] / s), 1), round(float(warp[1, 2] / s), 1)], "width": w, "height": h}
-    if int(np.count_nonzero(a_s2)) < sw * sh * 0.002 or recall < a.min_recall or dropped > a.max_dropped:
+    if int(np.count_nonzero(a_s2)) < sw * sh * 0.002 or text_tiles == 0 or nbad > text_tiles * 0.4 or recall < 0.7:
         print(json.dumps({"ok": False, "error": "mismatch", **meta}))
         return 2
 
@@ -208,6 +257,15 @@ def main() -> int:
     sw_px = stroke_width(a_full)
     gate = cv2.dilate(a_full, disk(max(1, round(sw_px * 0.25)))).astype(bool)
     keep = o_ink & gate
+    if nbad:
+        # 对不上的块：保持原图（只去掉明显的大片污渍），不冒险用模型结果
+        orig_keep = glyph_mask(o_ink)
+        for i in range(gy):
+            for j in range(gx):
+                if bad[i, j]:
+                    ys, ye = h * i // gy, h * (i + 1) // gy
+                    xs, xe = w * j // gx, w * (j + 1) // gx
+                    keep[ys:ye, xs:xe] = orig_keep[ys:ye, xs:xe]
 
     # 去掉孤立小点
     cnt, lab, stats, _ = cv2.connectedComponentsWithStats(keep.astype(np.uint8), 8)

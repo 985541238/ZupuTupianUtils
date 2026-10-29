@@ -580,7 +580,6 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
         displayName: String(editing.displayName).trim(),
         model: String(editing.model).trim(),
         platform: editing.platform || null,
-        outputSize: purpose === 'clean' ? String(editing.outputSize || '').trim() : undefined,
         // 图片处理模型地址可留空 = 用平台账号的地址
         baseUrl: String(editing.baseUrl || '').trim(),
         billing: editing.billing || (purpose === 'clean' ? 'image' : 'token'),
@@ -1148,15 +1147,10 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
                 </div>
                 {!editingIsOcr ? (
                   <div>
-                    <label className="block text-xs font-semibold mb-1">
-                      输出尺寸 <span className="font-normal text-[#86868B]">（可不填）</span>
-                    </label>
-                    <input
-                      value={editing.outputSize || ''}
-                      onChange={(e) => setEditing({ ...editing, outputSize: e.target.value })}
-                      className={`${inputCls} font-mono`}
-                      placeholder="自动：按原图比例"
-                    />
+                    <label className="block text-xs font-semibold mb-1">输出尺寸</label>
+                    <div className="h-[38px] px-3 flex items-center rounded-xl bg-[#F5F5F7] text-[13px] text-[#6E6E73]">
+                      自动：与原图（或裁剪后的区域）一致
+                    </div>
                   </div>
                 ) : null}
               </div>

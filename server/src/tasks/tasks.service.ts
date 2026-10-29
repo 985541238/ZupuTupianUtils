@@ -570,7 +570,7 @@ export class TasksService implements OnModuleInit {
         this.logger.log(`AI 保真合成 image=${img.id} ${JSON.stringify(fuse)}`);
         if (!fuse.ok) {
           throw new AiMismatchError(
-            `大模型这次改动了版面或文字（与原图对不上），为保证不改字，没有采用它的结果` +
+            `大模型这次画出的页面和原图大部分对不上（重画了版面或丢了内容），为保证不改字，没有采用它的结果` +
               (cost ? `（本次已产生费用 ¥${cost.toFixed(2)}）` : '') +
               '。可以再试一次，或换一个图片处理模型。',
           );

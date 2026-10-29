@@ -487,14 +487,8 @@ export class SettingsService implements OnModuleInit {
     if (purpose === 'clean' && platform && !getPlatformDef(platform)!.imageEdit.supported) {
       throw new BadRequestException(`${getPlatformDef(platform)!.name}不支持图生图，不能用作图片处理模型`);
     }
-    let outputSize = existing?.outputSize ?? null;
-    if ((body as any).outputSize !== undefined) {
-      const os = String((body as any).outputSize || '').trim();
-      if (os && !/^\d{2,5}\s*[x*:×]\s*\d{2,5}$/i.test(os) && !/^(1|1\.5|2|3|4)K$/i.test(os)) {
-        throw new BadRequestException('输出尺寸格式如 2048x2048、2K，留空为按原图比例自动计算');
-      }
-      outputSize = os || null;
-    }
+    // 输出尺寸不再让用户设置：一律按原图（或裁剪后的区域）自动计算
+    const outputSize = null;
     const model = String(body.model ?? existing?.model ?? '').trim();
     const displayName = String(body.displayName ?? existing?.displayName ?? '').trim();
     if (!model) throw new BadRequestException('请填写模型名');
