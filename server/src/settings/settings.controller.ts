@@ -51,12 +51,12 @@ export class SettingsController {
 
   /** 拉取平台模型列表：可带弹窗里尚未保存的 Key / 地址 */
   @Post('platforms/:code/models')
-  async platformModels(@Param('code') code: string, @Body() body: { apiKey?: string; baseUrl?: string }) {
+  async platformModels(@Param('code') code: string, @Body() body: { apiKey?: string; baseUrl?: string; purpose?: string }) {
     try {
       const r = await this.aliyun.listPlatformModels(code, {
         apiKey: String(body?.apiKey || '').trim() || undefined,
         baseUrl: String(body?.baseUrl || '').trim() || undefined,
-      });
+      }, body?.purpose === 'ocr' ? 'ocr' : 'clean');
       return { ok: true, ...r };
     } catch (e: any) {
       return { ok: false, error: e?.message || String(e), kind: e?.kind || null, models: [] };

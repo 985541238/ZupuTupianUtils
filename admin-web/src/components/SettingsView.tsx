@@ -3,6 +3,7 @@ import { api } from '../api/client';
 import { parseCurlExample } from '../utils/parseCurlExample';
 import { AiSetupWizard } from './AiSetupWizard';
 import { SecretInput } from './SecretInput';
+import { looksTextOnly } from './OcrModelPicker';
 import { Plus, Save, Trash2, RefreshCw, ScanText, Wand2, CheckCircle2, AlertCircle, X, KeyRound, ExternalLink } from 'lucide-react';
 
 type AiModel = {
@@ -417,6 +418,7 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
     error: string;
     list: { id: string; image: boolean; suggested: boolean }[];
   } | null>(null);
+  const [showAllRemote, setShowAllRemote] = useState(false);
   const [testMsg, setTestMsg] = useState('');
   const [testOk, setTestOk] = useState<boolean | null>(null);
 
@@ -526,7 +528,9 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
       const r = await api.listPlatformModels(editing.platform, {
         apiKey: String(editing.apiKey || '').trim() || undefined,
         baseUrl: editing.purpose === 'clean' ? String(editing.baseUrl || '').trim() || undefined : undefined,
+        purpose: editing.purpose === 'ocr' ? 'ocr' : 'clean',
       });
+      setShowAllRemote(false);
       if (!r.ok) setRemoteModels({ loading: false, note: '', error: r.error || '拉取失败', list: [] });
       else setRemoteModels({ loading: false, note: r.note || '', error: '', list: r.models || [] });
     } catch (e: any) {
@@ -1078,6 +1082,11 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
                   className={`${inputCls} font-mono`}
                   placeholder={editingIsOcr ? 'qwen3-vl-plus' : editingPlatform?.imageEdit.suggestedModels?.[0] || ''}
                 />
+                {editingIsOcr && editing.model && looksTextOnly({ model: editing.model }) ? (
+                  <p className="text-[11px] text-[#C93400] mt-1">
+                    「{editing.model}」看起来是纯文字模型，不能看图，识别会失败或乱编。文字识别请选带视觉的模型（名字里常有 VL / V / OCR / Omni）。
+                  </p>
+                ) : null}
                 {remoteModels && !remoteModels.loading ? (
                   <div className="mt-1.5 p-2.5 rounded-xl bg-[#F5F5F7]/90 border border-black/[0.05] space-y-1.5">
                     {remoteModels.error ? (
@@ -1087,7 +1096,7 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
                         {remoteModels.note ? <p className="text-[11px] text-[#86868B]">{remoteModels.note}</p> : null}
                         <div className="flex flex-wrap gap-1.5 max-h-[132px] overflow-y-auto">
                           {remoteModels.list
-                            .filter((m) => (editingIsOcr ? !m.image : m.image || m.suggested))
+                            .filter((m) => (editingIsOcr ? showAllRemote || m.image : m.image || m.suggested))
                             .map((m) => (
                               <button
                                 key={m.id}
@@ -1112,6 +1121,11 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
                               </button>
                             ))}
                         </div>
+                        {editingIsOcr && remoteModels.list.some((m) => !m.image) ? (
+                          <button type="button" onClick={() => setShowAllRemote((v) => !v)} className="text-[11px] text-[#0071E3] hover:underline cursor-pointer">
+                            {showAllRemote ? '只看能看图的模型' : `显示全部（含 ${remoteModels.list.filter((m) => !m.image).length} 个按名字看不出能否看图的，多为纯文字模型）`}
+                          </button>
+                        ) : null}
                       </>
                     )}
                   </div>

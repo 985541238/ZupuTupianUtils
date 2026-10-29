@@ -744,9 +744,13 @@ export class AliyunService {
     return { ok: true, ms, reply: list.length ? `Key 有效（${list.length} 个模型）` : 'Key 有效' };
   }
 
-  private modelsUrlFor(code: string, base: string): string {
+  private modelsUrlFor(code: string, base: string, purpose: 'ocr' | 'clean' = 'clean'): string {
     try {
       const u = new URL(base);
+      // 文字识别用的是「看图的对话模型」。硅基流动文档（GET /models）：type=text|image|audio|video，
+      // sub_type=chat|embedding|reranker|text-to-image|image-to-image|speech-to-text|text-to-video。
+      // 文字识别拉全部 chat（能看图的在后面按名字挑出来），不能再按图片类筛，否则只有几个出图模型
+      if (purpose === 'ocr' && code === 'siliconflow') return base.replace(/\/(images\/generations|chat\/completions)$/i, '') + '/models?sub_type=chat';
       if (code === 'aliyun') return u.origin + '/compatible-mode/v1/models';
       if (code === 'ark') return u.origin + '/api/v3/models';
       // 硅基流动：按图片类筛选（sub_type=image-to-image 实测返回空，不用）
@@ -764,10 +768,12 @@ export class AliyunService {
   async listPlatformModels(
     code: string,
     override?: { apiKey?: string; baseUrl?: string },
+    purpose: 'ocr' | 'clean' = 'clean',
   ): Promise<{ source: 'api' | 'suggested'; note: string; models: { id: string; image: boolean; suggested: boolean }[] }> {
     const def = getPlatformDef(code);
     if (!def) throw new AiConfigError('未知平台');
-    const suggested = def.imageEdit.suggestedModels || [];
+    const isOcr = purpose === 'ocr';
+    const suggested = isOcr ? [] : def.imageEdit.suggestedModels || [];
     const fallback = (note: string) => ({
       source: 'suggested' as const,
       note,
@@ -779,15 +785,18 @@ export class AliyunService {
     const base = String(override?.baseUrl || saved?.baseUrl || def.defaultBaseUrl).trim().replace(/\/+$/, '');
     if (!apiKey) throw new AiConfigError('请先填写 API Key', 'auth', def.code);
     const res = await this.fetchWithTimeout(
-      this.modelsUrlFor(def.code, base),
+      this.modelsUrlFor(def.code, base, purpose),
       { method: 'GET', headers: { Authorization: 'Bearer ' + apiKey } },
       30 * 1000,
     );
     if (res.status === 401 || res.status === 403) throw await this.httpError(res, def.code);
-    if (!res.ok) return fallback(`${def.name}没有提供模型列表接口，下面是推荐的图片处理模型`);
+    if (!res.ok) {
+      if (isOcr) return { source: 'suggested', note: `${def.name}没有提供模型列表接口，请直接填写模型代码（要选能看图的模型）`, models: [] };
+      return fallback(`${def.name}没有提供模型列表接口，下面是推荐的图片处理模型`);
+    }
     const data: any = await res.json().catch(() => ({}));
     let raw: any[] = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
-    if (!raw.length && def.code === 'siliconflow') {
+    if (!raw.length && def.code === 'siliconflow' && !isOcr) {
       // 按类型筛选为空时拉全部模型，让用户自己挑
       const all = await this.fetchWithTimeout(
         base.replace(/\/images\/generations$/i, '') + '/models',
@@ -806,8 +815,9 @@ export class AliyunService {
       if (!id || seen.has(id)) continue;
       seen.add(id);
       const meta = `${id} ${m?.task_type || ''} ${m?.domain || ''} ${m?.type || ''} ${(m?.modalities || []).join?.(' ') || ''} ${(m?.supported_endpoint_types || []).join?.(' ') || ''}`;
-      const image =
-        def.code === 'siliconflow'
+      const image = isOcr
+        ? isVisionModelId(id, meta)
+        : def.code === 'siliconflow'
           ? /image-edit|kolors/i.test(id) // 硅基流动上能传原图做处理的：Qwen-Image-Edit 系列、Kolors
           : !/video|t2v|i2v|r2v|tts|speech|transcribe|embedding/i.test(id) &&
         /seedream|seededit|image[-_ ]?(gen|edit)|imagegeneration|qwen-image|wanx|wan\d(\.\d)?-image|wan2\.\d.*(i2i|image)|hy-image|hunyuan.*image|flux|kontext|cogview|text_to_image|image_to_image|gpt-image|gemini.*image|banana|grok-imagine-image/i.test(meta);
@@ -816,9 +826,12 @@ export class AliyunService {
     // 推荐的放最前；列表里没有的推荐模型也补上（可能是列表接口没返回出图模型）
     for (const id of suggested) if (!seen.has(id)) models.push({ id, image: true, suggested: true });
     models.sort((a, b) => Number(b.suggested) - Number(a.suggested) || Number(b.image) - Number(a.image) || a.id.localeCompare(b.id));
+    const visionN = models.filter((m) => m.image).length;
     return {
       source: 'api',
-      note: `已从${def.name}拉取 ${raw.length} 个模型；能做图片处理的排在前面。列表里有不代表已开通，请以控制台为准`,
+      note: isOcr
+        ? `已从${def.name}拉取 ${raw.length} 个对话模型，其中按名字判断能看图的有 ${visionN} 个（排在前面）。名字判断可能有遗漏，其余可点「显示全部」；列表里有不代表已开通，请以控制台为准`
+        : `已从${def.name}拉取 ${raw.length} 个模型；能做图片处理的排在前面。列表里有不代表已开通，请以控制台为准`,
       models,
     };
   }
@@ -1031,4 +1044,14 @@ function normBox(b: any): [number, number, number, number] | null {
   const [x1, y1, x2, y2] = n.map((v) => Math.max(0, Math.min(1000, Math.round(v * scale))));
   if (x2 <= x1 || y2 <= y1) return null;
   return [x1, y1, x2, y2];
+}
+
+/**
+ * 按模型名/元数据判断是不是「能看图」的对话模型（用于文字识别）。接口一般不给能力标记，只能按名字挑，
+ * 宁可多放进来（用户可在列表里看到 · 并可手动填写），也不漏掉常见的看图模型。
+ */
+function isVisionModelId(id: string, meta = ''): boolean {
+  const s = `${id} ${meta}`.toLowerCase();
+  if (/embed|rerank|bge|tts|speech|whisper|asr|sensevoice|cosyvoice|flux|stable-diffusion|kolors|z-image|image-edit|text-to-image|video|wan2|t2v|i2v/.test(s)) return false;
+  return /(^|[^a-z])(vl|vlm|vision|visual|omni|ocr)([^a-z]|$)|-vl-|vl-|qwen3-vl|qwen2\.5-vl|qvq|glm-\d(\.\d)?v|glm-4v|glm-4\.\dv|internvl|minicpm-v|llava|pixtral|step-?1v|step3|kimi-vl|mimo-vl|paddleocr|deepseek-ocr|got-ocr|gpt-4o|gpt-4\.1|gpt-5|claude|gemini|doubao.*(vision|seed-1[.-]6|seed-1[.-]8|1-5-ui)|seed-1[.-]6|seed-1[.-]8|hunyuan.*vision|hunyuan-t1-vision|ernie.*vl|spark.*vision|llama-?3\.2.*vision|llama-?4|phi-?4-multimodal|molmo|ovis|gemma-?3/.test(s);
 }

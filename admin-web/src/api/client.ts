@@ -149,7 +149,7 @@ export const api = {
     body: { baseUrl?: string; imageTransport?: 'base64' | 'url'; values?: Record<string, string>; clear?: string[] },
   ) => request<any>('/settings/platforms/' + code, { method: 'PUT', body: JSON.stringify(body || {}) }),
   /** 从平台拉取模型列表（Key 可用弹窗里尚未保存的） */
-  listPlatformModels: (code: string, body: { apiKey?: string; baseUrl?: string } = {}) =>
+  listPlatformModels: (code: string, body: { apiKey?: string; baseUrl?: string; purpose?: 'ocr' | 'clean' } = {}) =>
     request<{
       ok: boolean;
       error?: string;
