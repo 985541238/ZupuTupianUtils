@@ -90,10 +90,13 @@ export const api = {
   getTaskImages: (id: string | number) => request<any[]>('/tasks/' + id + '/images'),
   getTaskImage: (taskId: string | number, imageId: string | number) =>
     request<any>(`/tasks/${taskId}/images/${imageId}`),
-  detectPerspective: (taskId: string | number, imageId: string | number) =>
-    request<{ found: boolean; quad?: number[][]; method?: string }>(`/tasks/${taskId}/images/${imageId}/perspective/detect`, { method: 'POST' }),
-  applyPerspective: (taskId: string | number, imageId: string | number, quad: number[][]) =>
-    request<any>(`/tasks/${taskId}/images/${imageId}/perspective`, { method: 'POST', body: JSON.stringify({ quad }) }),
+  detectPerspective: (taskId: string | number, imageId: string | number, pages: 1 | 2 = 1) =>
+    request<{ found: boolean; quad?: number[][]; quads?: number[][][]; method?: string }>(`/tasks/${taskId}/images/${imageId}/perspective/detect`, {
+      method: 'POST',
+      body: JSON.stringify({ pages }),
+    }),
+  applyPerspective: (taskId: string | number, imageId: string | number, quads: number[][][]) =>
+    request<any>(`/tasks/${taskId}/images/${imageId}/perspective`, { method: 'POST', body: JSON.stringify({ quads }) }),
   resetPerspective: (taskId: string | number, imageId: string | number) =>
     request<any>(`/tasks/${taskId}/images/${imageId}/perspective/reset`, { method: 'POST' }),
   reprocessImage: (

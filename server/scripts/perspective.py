@@ -116,12 +116,16 @@ def cmd_detect(a) -> dict:
     return {"ok": True, "found": True, "method": method, "quad": q.round(5).tolist()}
 
 
-def cmd_warp(a) -> dict:
-    img = imread(a.inp)
-    H, W = img.shape[:2]
-    q = np.array([[float(v) for v in p.split(",")] for p in a.quad.split(";")], dtype=np.float32)
+def parse_quad(txt: str) -> np.ndarray:
+    q = np.array([[float(v) for v in p.split(",")] for p in txt.split(";")], dtype=np.float32)
     if q.shape != (4, 2):
         raise RuntimeError("需要四个点")
+    return q
+
+
+def warp_one(img: np.ndarray, qn: np.ndarray) -> np.ndarray:
+    H, W = img.shape[:2]
+    q = qn.copy()
     q[:, 0] *= W
     q[:, 1] *= H
     q = order_quad(q)
@@ -130,12 +134,12 @@ def cmd_warp(a) -> dict:
     oh = int(round(max(np.linalg.norm(bl - tl), np.linalg.norm(br - tr))))
     if ow < 50 or oh < 50:
         raise RuntimeError("选的四个点范围太小")
-    # 面积太小/点太挤（比如三点共线）会算出畸形图
+
     def cross(u, v):
         return float(u[0] * v[1] - u[1] * v[0])
 
     area = 0.5 * abs(cross(tr - tl, bl - tl)) + 0.5 * abs(cross(br - tr, br - bl))
-    if area < 0.02 * W * H:
+    if area < 0.01 * W * H:
         raise RuntimeError("选的四个点围出的范围太小，请重新选")
     m = max(ow, oh)
     if m > 8000:
@@ -143,20 +147,75 @@ def cmd_warp(a) -> dict:
         ow, oh = int(ow * k), int(oh * k)
     dst = np.array([[0, 0], [ow - 1, 0], [ow - 1, oh - 1], [0, oh - 1]], dtype=np.float32)
     M = cv2.getPerspectiveTransform(q, dst)
-    out = cv2.warpPerspective(img, M, (ow, oh), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    return cv2.warpPerspective(img, M, (ow, oh), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+
+def cmd_warp(a) -> dict:
+    img = imread(a.inp)
+    out = warp_one(img, parse_quad(a.quad))
+    if a.quad2:
+        # 两页：各自拉正，缩放到同样的高度后左右拼成一张（左页在左、右页在右）
+        out2 = warp_one(img, parse_quad(a.quad2))
+        hh = max(out.shape[0], out2.shape[0])
+        if hh > 8000:
+            hh = 8000
+
+        def fit(o):
+            k = hh / o.shape[0]
+            return cv2.resize(o, (max(1, int(round(o.shape[1] * k))), hh), interpolation=cv2.INTER_CUBIC if k > 1 else cv2.INTER_AREA)
+
+        out = np.hstack([fit(out), fit(out2)])
     imwrite_png(a.out, out)
-    return {"ok": True, "width": ow, "height": oh}
+    return {"ok": True, "width": int(out.shape[1]), "height": int(out.shape[0])}
+
+
+def find_gutter(gray: np.ndarray) -> float:
+    """两页之间的缝：中间 30%~70% 里墨迹最少的竖条（返回 0~1 的横坐标）。"""
+    h, w = gray.shape
+    th = cv2.adaptiveThreshold(cv2.GaussianBlur(gray, (3, 3), 0), 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 15)
+    prof = th.sum(axis=0).astype(np.float32)
+    k = max(5, int(w * 0.03))
+    prof = np.convolve(prof, np.ones(k, np.float32) / k, mode="same")
+    lo, hi = int(w * 0.3), int(w * 0.7)
+    x = lo + int(np.argmin(prof[lo:hi]))
+    return x / w
+
+
+def cmd_detect2(a) -> dict:
+    img = imread(a.inp)
+    H, W = img.shape[:2]
+    s = min(1.0, 1200.0 / max(H, W))
+    small = cv2.resize(img, (int(W * s), int(H * s)), interpolation=cv2.INTER_AREA) if s < 1 else img
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    sh, sw = gray.shape
+    g = find_gutter(gray)
+    gx = int(g * sw)
+    res = []
+    for x0, x1 in ((0, gx), (gx, sw)):
+        half = gray[:, x0:x1]
+        quad = detect_text_block(half)
+        if quad is None:
+            res.append(None)
+            continue
+        q = order_quad(quad)
+        q[:, 0] = np.clip((q[:, 0] + x0) / sw, 0, 1)
+        q[:, 1] = np.clip(q[:, 1] / sh, 0, 1)
+        res.append(q.round(5).tolist())
+    if res[0] is None or res[1] is None:
+        return {"ok": True, "found": False, "gutter": round(g, 4)}
+    return {"ok": True, "found": True, "method": "text", "quads": res, "gutter": round(g, 4)}
 
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("cmd", choices=["detect", "warp"])
+    p.add_argument("cmd", choices=["detect", "detect2", "warp"])
     p.add_argument("--in", dest="inp", required=True)
     p.add_argument("--out", default="")
     p.add_argument("--quad", default="")
+    p.add_argument("--quad2", default="")
     a = p.parse_args()
     try:
-        r = cmd_detect(a) if a.cmd == "detect" else cmd_warp(a)
+        r = {"detect": cmd_detect, "detect2": cmd_detect2, "warp": cmd_warp}[a.cmd](a)
     except Exception as e:  # noqa: BLE001
         r = {"ok": False, "error": str(e)}
     sys.stdout.write(json.dumps(r, ensure_ascii=False) + "\n")

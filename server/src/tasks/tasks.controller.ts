@@ -126,8 +126,13 @@ export class TasksController {
 
   /** 透视修正：自动找四个角（本地，不花钱） */
   @Post(':id/images/:imageId/perspective/detect')
-  perspectiveDetect(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Param('imageId', ParseIntPipe) imageId: number) {
-    return this.tasks.detectPerspective(req.user.id, id, imageId);
+  perspectiveDetect(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('imageId', ParseIntPipe) imageId: number,
+    @Body() body: { pages?: number },
+  ) {
+    return this.tasks.detectPerspective(req.user.id, id, imageId, Number(body?.pages) === 2 ? 2 : 1);
   }
 
   /** 透视修正：按四个点拉正 */
@@ -136,9 +141,9 @@ export class TasksController {
     @Req() req: any,
     @Param('id', ParseIntPipe) id: number,
     @Param('imageId', ParseIntPipe) imageId: number,
-    @Body() body: { quad?: number[][] },
+    @Body() body: { quads?: number[][][] },
   ) {
-    return this.tasks.applyPerspective(req.user.id, id, imageId, body?.quad || []);
+    return this.tasks.applyPerspective(req.user.id, id, imageId, body?.quads || []);
   }
 
   /** 透视修正：恢复原图 */

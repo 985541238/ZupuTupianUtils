@@ -70,7 +70,7 @@ export function mapImage(raw: any, taskId: string | number, pageNumber: number):
     thumbnailUrl: authImageUrl(raw.thumbUrl || raw.sourceUrl),
     trueOriginalUrl: authImageUrl(raw.trueOriginalUrl || raw.sourceUrl),
     perspectiveApplied: !!raw.perspectiveApplied,
-    perspectiveQuad: raw.perspectiveQuad || null,
+    perspectiveQuads: raw.perspectiveQuads || null,
     reviewStatus,
     params: { ...DEFAULT_UI_PARAMS, ...params },
     originalWidth: w,

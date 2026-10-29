@@ -798,12 +798,12 @@ export class TasksService implements OnModuleInit {
     // 做过透视修正：sourcePath 是拉正后的图，旁边的 json 里记着真正的原图（选四个点要在原图上选）
     const perspApplied = /[\\/]persp[\\/]/.test(img.sourcePath || '');
     let trueOriginal = img.sourcePath;
-    let perspQuad: number[][] | null = null;
+    let perspQuads: number[][][] | null = null;
     if (perspApplied) {
       try {
         const j = JSON.parse(fs.readFileSync(img.sourcePath.replace(/\.png$/, '.json'), 'utf8'));
         if (j?.original) trueOriginal = j.original;
-        perspQuad = j?.quad || null;
+        perspQuads = j?.quads || (j?.quad ? [j.quad] : null);
       } catch {
         /* 没有记录就用拉正后的图 */
       }
@@ -812,7 +812,7 @@ export class TasksService implements OnModuleInit {
       ...rest,
       sourceUrl: perspApplied ? withBust(this.fileUrl(img.sourcePath)) : this.fileUrl(img.sourcePath),
       perspectiveApplied: perspApplied,
-      perspectiveQuad: perspQuad,
+      perspectiveQuads: perspQuads,
       trueOriginalUrl: perspApplied ? withBust(this.fileUrl(trueOriginal)) : this.fileUrl(trueOriginal),
       resultUrl: withBust(this.fileUrl(img.resultPath)),
       thumbUrl: withBust(this.fileUrl(img.thumbPath)),
@@ -831,24 +831,28 @@ export class TasksService implements OnModuleInit {
     return path.join(task.outputFolder, 'persp', this.safeName(img.fileName) + '.png');
   }
 
-  async detectPerspective(userId: number, taskId: number, imageId: number) {
+  async detectPerspective(userId: number, taskId: number, imageId: number, pages = 1) {
     const task = await this.get(userId, taskId);
     const img = await this.getImage(userId, taskId, imageId);
     const importPath = path.join(task.sourceFolder, img.fileName);
     const src = fs.existsSync(importPath) ? importPath : img.sourcePath;
     try {
-      return await this.processor.detectPerspective(src);
+      return await this.processor.detectPerspective(src, pages === 2 ? 2 : 1);
     } catch (e: any) {
       throw new BadRequestException(e?.message || '自动识别失败');
     }
   }
 
-  /** 按四个点（0~1，左上 右上 右下 左下）把原图拉正；裁剪框作废；用当前参数重新处理一次（本地算法，不花钱） */
-  async applyPerspective(userId: number, taskId: number, imageId: number, quad: number[][]) {
-    if (!Array.isArray(quad) || quad.length !== 4 || quad.some((p) => !Array.isArray(p) || !Number.isFinite(+p[0]) || !Number.isFinite(+p[1]))) {
-      throw new BadRequestException('需要四个点');
+  /**
+   * 按四个点（0~1，左上 右上 右下 左下）把原图拉正；quads 传两组 = 双页，各自拉正后左右拼成一张。
+   * 裁剪框作废；用当前参数重新处理一次（本地算法，不花钱）。
+   */
+  async applyPerspective(userId: number, taskId: number, imageId: number, quads: number[][][]) {
+    const okQuad = (q: any) => Array.isArray(q) && q.length === 4 && q.every((p) => Array.isArray(p) && Number.isFinite(+p[0]) && Number.isFinite(+p[1]));
+    if (!Array.isArray(quads) || ![1, 2].includes(quads.length) || !quads.every(okQuad)) {
+      throw new BadRequestException('需要四个点（双页需要两组）');
     }
-    const q = quad.map((p) => [Math.min(1, Math.max(0, +p[0])), Math.min(1, Math.max(0, +p[1]))]);
+    const qs = quads.map((q) => q.map((p) => [Math.min(1, Math.max(0, +p[0])), Math.min(1, Math.max(0, +p[1]))]));
     const task = await this.get(userId, taskId);
     const img = await this.getImage(userId, taskId, imageId);
     const importPath = path.join(task.sourceFolder, img.fileName);
@@ -856,13 +860,13 @@ export class TasksService implements OnModuleInit {
     const out = this.perspPath(task, img);
     const tmpOut = out + '.tmp.png';
     try {
-      await this.processor.warpPerspective(importPath, tmpOut, q);
+      await this.processor.warpPerspective(importPath, tmpOut, qs);
     } catch (e: any) {
       fs.promises.unlink(tmpOut).catch(() => {});
       throw new BadRequestException(e?.message || '透视修正失败');
     }
     fs.renameSync(tmpOut, out);
-    fs.writeFileSync(out.replace(/\.png$/, '.json'), JSON.stringify({ original: importPath, quad: q }));
+    fs.writeFileSync(out.replace(/\.png$/, '.json'), JSON.stringify({ original: importPath, quads: qs }));
     return this.afterPerspectiveChange(userId, taskId, imageId);
   }
 

@@ -2044,7 +2044,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
           taskId={task.id}
           imageId={currentItem.id}
           imageUrl={currentItem.trueOriginalUrl || currentItem.originalUrl}
-          savedQuad={currentItem.perspectiveQuad}
+          savedQuads={currentItem.perspectiveQuads}
           applied={!!currentItem.perspectiveApplied}
           onClose={() => setPerspOpen(false)}
           onDone={handlePerspectiveDone}

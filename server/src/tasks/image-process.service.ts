@@ -210,22 +210,24 @@ export class ImageProcessService {
     return tmp;
   }
 
-  async detectPerspective(srcPath: string): Promise<{ found: boolean; quad?: number[][]; method?: string }> {
+  async detectPerspective(srcPath: string, pages = 1): Promise<{ found: boolean; quad?: number[][]; quads?: number[][][]; method?: string }> {
     const tmp = await this.orientedTmp(srcPath);
     try {
-      const r = await this.runPerspective(['detect', '--in', tmp]);
-      return { found: !!r.found, quad: r.quad, method: r.method };
+      const r = await this.runPerspective([pages === 2 ? 'detect2' : 'detect', '--in', tmp]);
+      return { found: !!r.found, quad: r.quad, quads: r.quads, method: r.method };
     } finally {
       fs.promises.unlink(tmp).catch(() => {});
     }
   }
 
-  async warpPerspective(srcPath: string, outPath: string, quad: number[][]): Promise<{ width: number; height: number }> {
+  /** quads：一个 = 单页；两个 = 双页，各自拉正后左右拼成一张 */
+  async warpPerspective(srcPath: string, outPath: string, quads: number[][][]): Promise<{ width: number; height: number }> {
     const tmp = await this.orientedTmp(srcPath);
     try {
       fs.mkdirSync(path.dirname(outPath), { recursive: true });
-      const q = quad.map((p) => `${p[0]},${p[1]}`).join(';');
-      const r = await this.runPerspective(['warp', '--in', tmp, '--out', outPath, '--quad', q]);
+      const fmt = (q: number[][]) => q.map((p) => `${p[0]},${p[1]}`).join(';');
+      const extra = quads.length > 1 ? ['--quad2', fmt(quads[1])] : [];
+      const r = await this.runPerspective(['warp', '--in', tmp, '--out', outPath, '--quad', fmt(quads[0]), ...extra]);
       return { width: r.width, height: r.height };
     } finally {
       fs.promises.unlink(tmp).catch(() => {});
