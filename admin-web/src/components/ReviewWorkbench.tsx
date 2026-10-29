@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Task, ScanItem, ProcessParams, CropRect } from '../types';
 import { api, previewImageBlob } from '../api/client';
 import { buildPreviewBody, nestCropToUi } from '../api/params';
+import { PerspectiveDialog } from './PerspectiveDialog';
 import { mapImage, formatProcessingTime } from '../api/mappers';
 import {
   ChevronLeft,
@@ -12,6 +13,7 @@ import {
   ZoomOut,
   Maximize2,
   Crop,
+  Scan,
   Sparkles,
   Columns,
   PanelLeftClose,
@@ -99,6 +101,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
 
   /** WeChat-style crop: selecting on original; confirmedCrop drives Nest cropBox */
   const [cropSelecting, setCropSelecting] = useState(false);
+  const [perspOpen, setPerspOpen] = useState(false);
   const [draftCrop, setDraftCrop] = useState<CropRect | null>(null);
   const [confirmedCrop, setConfirmedCrop] = useState<CropRect | null>(null);
   /** Always-current crop for debounce/in-flight previews (avoids stale closure → full page). */
@@ -595,6 +598,18 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
     if (mid && cleanModels.some((m: any) => Number(m.id) === Number(mid))) setSelectedCleanModelId(Number(mid));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentItem?.id, cleanModels.length]);
+
+  /** 透视修正/恢复完成：原图换了，裁剪框作废，刷新这一页 */
+  const handlePerspectiveDone = (raw: any) => {
+    const item = currentItemRef.current;
+    if (!item) return;
+    confirmedCropRef.current = null;
+    setConfirmedCrop(null);
+    setDraftCrop(null);
+    const sess = pageSessionRef.current.get(item.id);
+    if (sess) pageSessionRef.current.set(item.id, { ...sess, crop: null });
+    applyServerImage(raw, item);
+  };
 
   /** 服务端返回的图片数据 → 刷新当前页显示（结果图、缓存、会话预览） */
   const applyServerImage = (raw: any, item: ScanItem) => {
@@ -1342,6 +1357,18 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                 {cropSelecting ? '框选中…' : confirmedCrop ? '已裁剪' : '剪裁'}
               </span>
             </button>
+            <button
+              type="button"
+              disabled={!currentItem || cropSelecting}
+              onClick={() => setPerspOpen(true)}
+              className={`px-3 py-1 text-xs font-medium rounded-full transition-all flex items-center gap-1 cursor-pointer disabled:opacity-40 ${
+                currentItem?.perspectiveApplied ? 'bg-[#0071E3] text-white shadow-xs' : 'text-[#1D1D1F] hover:bg-black/[0.05]'
+              }`}
+              title="页面拍斜/扫歪了：框选四个角，自动拉正成矩形（本地处理，不花钱）"
+            >
+              <Scan className="w-3 h-3" />
+              <span>{currentItem?.perspectiveApplied ? '已透视修正' : '透视修正'}</span>
+            </button>
           </div>
 
           {/* Canvas Viewport */}
@@ -2010,6 +2037,19 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
           </div>
         </div>
       )}
+
+      {currentItem ? (
+        <PerspectiveDialog
+          open={perspOpen}
+          taskId={task.id}
+          imageId={currentItem.id}
+          imageUrl={currentItem.trueOriginalUrl || currentItem.originalUrl}
+          savedQuad={currentItem.perspectiveQuad}
+          applied={!!currentItem.perspectiveApplied}
+          onClose={() => setPerspOpen(false)}
+          onDone={handlePerspectiveDone}
+        />
+      ) : null}
 
     </div>
   );

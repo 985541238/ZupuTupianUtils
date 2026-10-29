@@ -3,6 +3,7 @@ import sharp from 'sharp';
 import * as fs from 'fs';
 import * as path from 'path';
 import { spawn } from 'child_process';
+import * as os from 'os';
 
 export type ProcessParams = {
   threshold: number; // 80-220, maps to adaptive C bias around 168
@@ -163,6 +164,72 @@ export class ImageProcessService {
       throw new Error('裁剪提取失败');
     }
     return { path: dest, width, height };
+  }
+
+  /** 透视修正：调本地 OpenCV 脚本（detect 找四角 / warp 拉正），不调用任何模型 */
+  private async runPerspective(args: string[]): Promise<any> {
+    const bin = await this.detectPython();
+    if (!bin) throw new Error('服务器缺少 Python OpenCV（opencv-python），无法做透视修正');
+    const script = path.join(__dirname, '..', '..', 'scripts', 'perspective.py');
+    if (!fs.existsSync(script)) throw new Error('缺少脚本 scripts/perspective.py，请重新部署');
+    return new Promise((resolve, reject) => {
+      const child = spawn(bin, [script, ...args], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = '';
+      let err = '';
+      const timer = setTimeout(() => {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* ignore */
+        }
+        reject(new Error('透视修正超时'));
+      }, 60000);
+      child.stdout.on('data', (d) => (out += d.toString()));
+      child.stderr.on('data', (d) => (err += d.toString()));
+      child.on('error', (e) => {
+        clearTimeout(timer);
+        reject(e);
+      });
+      child.on('close', () => {
+        clearTimeout(timer);
+        try {
+          const r = JSON.parse(out.trim().split(/\r?\n/).filter(Boolean).pop() || '{}');
+          if (r.ok) resolve(r);
+          else reject(new Error(r.error || err || '透视修正失败'));
+        } catch {
+          reject(new Error(err || out || '透视修正失败'));
+        }
+      });
+    });
+  }
+
+  /** 先按 EXIF 方向转正成临时 PNG（脚本和界面看到的方向要一致） */
+  private async orientedTmp(srcPath: string): Promise<string> {
+    const tmp = path.join(os.tmpdir(), `zupu-persp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`);
+    await sharp(srcPath, { failOn: 'none' }).rotate().flatten({ background: '#ffffff' }).png().toFile(tmp);
+    return tmp;
+  }
+
+  async detectPerspective(srcPath: string): Promise<{ found: boolean; quad?: number[][]; method?: string }> {
+    const tmp = await this.orientedTmp(srcPath);
+    try {
+      const r = await this.runPerspective(['detect', '--in', tmp]);
+      return { found: !!r.found, quad: r.quad, method: r.method };
+    } finally {
+      fs.promises.unlink(tmp).catch(() => {});
+    }
+  }
+
+  async warpPerspective(srcPath: string, outPath: string, quad: number[][]): Promise<{ width: number; height: number }> {
+    const tmp = await this.orientedTmp(srcPath);
+    try {
+      fs.mkdirSync(path.dirname(outPath), { recursive: true });
+      const q = quad.map((p) => `${p[0]},${p[1]}`).join(';');
+      const r = await this.runPerspective(['warp', '--in', tmp, '--out', outPath, '--quad', q]);
+      return { width: r.width, height: r.height };
+    } finally {
+      fs.promises.unlink(tmp).catch(() => {});
+    }
   }
 
   private scriptPath() {

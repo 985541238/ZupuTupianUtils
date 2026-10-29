@@ -124,6 +124,29 @@ export class TasksController {
     res.send(r.buf);
   }
 
+  /** 透视修正：自动找四个角（本地，不花钱） */
+  @Post(':id/images/:imageId/perspective/detect')
+  perspectiveDetect(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Param('imageId', ParseIntPipe) imageId: number) {
+    return this.tasks.detectPerspective(req.user.id, id, imageId);
+  }
+
+  /** 透视修正：按四个点拉正 */
+  @Post(':id/images/:imageId/perspective')
+  perspectiveApply(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('imageId', ParseIntPipe) imageId: number,
+    @Body() body: { quad?: number[][] },
+  ) {
+    return this.tasks.applyPerspective(req.user.id, id, imageId, body?.quad || []);
+  }
+
+  /** 透视修正：恢复原图 */
+  @Post(':id/images/:imageId/perspective/reset')
+  perspectiveReset(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Param('imageId', ParseIntPipe) imageId: number) {
+    return this.tasks.resetPerspective(req.user.id, id, imageId);
+  }
+
   @Post(':id/images/:imageId/ai-recognize')
   aiRecognize(
     @Req() req: any,

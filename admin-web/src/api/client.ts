@@ -90,6 +90,12 @@ export const api = {
   getTaskImages: (id: string | number) => request<any[]>('/tasks/' + id + '/images'),
   getTaskImage: (taskId: string | number, imageId: string | number) =>
     request<any>(`/tasks/${taskId}/images/${imageId}`),
+  detectPerspective: (taskId: string | number, imageId: string | number) =>
+    request<{ found: boolean; quad?: number[][]; method?: string }>(`/tasks/${taskId}/images/${imageId}/perspective/detect`, { method: 'POST' }),
+  applyPerspective: (taskId: string | number, imageId: string | number, quad: number[][]) =>
+    request<any>(`/tasks/${taskId}/images/${imageId}/perspective`, { method: 'POST', body: JSON.stringify({ quad }) }),
+  resetPerspective: (taskId: string | number, imageId: string | number) =>
+    request<any>(`/tasks/${taskId}/images/${imageId}/perspective/reset`, { method: 'POST' }),
   reprocessImage: (
     taskId: string | number,
     imageId: string | number,

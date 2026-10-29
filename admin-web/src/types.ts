@@ -35,6 +35,10 @@ export interface ScanItem {
   originalUrl: string;
   processedUrl?: string;
   thumbnailUrl?: string;
+  /** 没做过透视修正的原图（透视修正选点用） */
+  trueOriginalUrl?: string;
+  perspectiveApplied?: boolean;
+  perspectiveQuad?: number[][] | null;
   reviewStatus: 'pending' | 'passed' | 'failed';
   params: ProcessParams;
   originalWidth: number;

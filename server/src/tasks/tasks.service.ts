@@ -795,9 +795,25 @@ export class TasksService implements OnModuleInit {
     const bust = 't=' + new Date(img.updatedAt || Date.now()).getTime();
     const withBust = (u: string | null) => (u ? u + (u.includes('?') ? '&' : '?') + bust : null);
     const { algoResultPath, aiResultPath, ...rest } = img as any;
+    // 做过透视修正：sourcePath 是拉正后的图，旁边的 json 里记着真正的原图（选四个点要在原图上选）
+    const perspApplied = /[\\/]persp[\\/]/.test(img.sourcePath || '');
+    let trueOriginal = img.sourcePath;
+    let perspQuad: number[][] | null = null;
+    if (perspApplied) {
+      try {
+        const j = JSON.parse(fs.readFileSync(img.sourcePath.replace(/\.png$/, '.json'), 'utf8'));
+        if (j?.original) trueOriginal = j.original;
+        perspQuad = j?.quad || null;
+      } catch {
+        /* 没有记录就用拉正后的图 */
+      }
+    }
     return {
       ...rest,
-      sourceUrl: this.fileUrl(img.sourcePath),
+      sourceUrl: perspApplied ? withBust(this.fileUrl(img.sourcePath)) : this.fileUrl(img.sourcePath),
+      perspectiveApplied: perspApplied,
+      perspectiveQuad: perspQuad,
+      trueOriginalUrl: perspApplied ? withBust(this.fileUrl(trueOriginal)) : this.fileUrl(trueOriginal),
       resultUrl: withBust(this.fileUrl(img.resultPath)),
       thumbUrl: withBust(this.fileUrl(img.thumbPath)),
       hasAlgoResult: !!(algoResultPath && fs.existsSync(algoResultPath)),
@@ -808,6 +824,68 @@ export class TasksService implements OnModuleInit {
 
   private platformName(code?: string | null) {
     return getPlatformDef(code)?.name || '模型平台';
+  }
+
+  /** 透视修正后的图（存在就代表这一页做过透视修正）；旁边的 .json 记录原图路径和四个点 */
+  private perspPath(task: Task, img: TaskImage) {
+    return path.join(task.outputFolder, 'persp', this.safeName(img.fileName) + '.png');
+  }
+
+  async detectPerspective(userId: number, taskId: number, imageId: number) {
+    const task = await this.get(userId, taskId);
+    const img = await this.getImage(userId, taskId, imageId);
+    const importPath = path.join(task.sourceFolder, img.fileName);
+    const src = fs.existsSync(importPath) ? importPath : img.sourcePath;
+    try {
+      return await this.processor.detectPerspective(src);
+    } catch (e: any) {
+      throw new BadRequestException(e?.message || '自动识别失败');
+    }
+  }
+
+  /** 按四个点（0~1，左上 右上 右下 左下）把原图拉正；裁剪框作废；用当前参数重新处理一次（本地算法，不花钱） */
+  async applyPerspective(userId: number, taskId: number, imageId: number, quad: number[][]) {
+    if (!Array.isArray(quad) || quad.length !== 4 || quad.some((p) => !Array.isArray(p) || !Number.isFinite(+p[0]) || !Number.isFinite(+p[1]))) {
+      throw new BadRequestException('需要四个点');
+    }
+    const q = quad.map((p) => [Math.min(1, Math.max(0, +p[0])), Math.min(1, Math.max(0, +p[1]))]);
+    const task = await this.get(userId, taskId);
+    const img = await this.getImage(userId, taskId, imageId);
+    const importPath = path.join(task.sourceFolder, img.fileName);
+    if (!fs.existsSync(importPath)) throw new BadRequestException('原图文件不存在，无法修正');
+    const out = this.perspPath(task, img);
+    const tmpOut = out + '.tmp.png';
+    try {
+      await this.processor.warpPerspective(importPath, tmpOut, q);
+    } catch (e: any) {
+      fs.promises.unlink(tmpOut).catch(() => {});
+      throw new BadRequestException(e?.message || '透视修正失败');
+    }
+    fs.renameSync(tmpOut, out);
+    fs.writeFileSync(out.replace(/\.png$/, '.json'), JSON.stringify({ original: importPath, quad: q }));
+    return this.afterPerspectiveChange(userId, taskId, imageId);
+  }
+
+  /** 恢复成没有透视修正的原图 */
+  async resetPerspective(userId: number, taskId: number, imageId: number) {
+    const task = await this.get(userId, taskId);
+    const img = await this.getImage(userId, taskId, imageId);
+    const out = this.perspPath(task, img);
+    for (const f of [out, out.replace(/\.png$/, '.json')]) {
+      try {
+        fs.unlinkSync(f);
+      } catch {
+        /* 本来就没有 */
+      }
+    }
+    return this.afterPerspectiveChange(userId, taskId, imageId);
+  }
+
+  private async afterPerspectiveChange(userId: number, taskId: number, imageId: number) {
+    // 原图变了，旧的裁剪框作废，重新处理一遍
+    await this.previewImage(userId, taskId, imageId, { cropBox: null });
+    const img = await this.getImage(userId, taskId, imageId);
+    return this.imageView(img);
   }
 
   private algoPath(task: Task, img: TaskImage) {
@@ -951,12 +1029,16 @@ export class TasksService implements OnModuleInit {
     const sourcesDir = path.join(task.outputFolder, 'sources');
     const baked = path.join(sourcesDir, this.safeName(img.fileName) + '.png');
 
-    if (fs.existsSync(importPath)) {
-      if (img.sourcePath !== importPath) {
-        img.sourcePath = importPath;
+    // 做过透视修正：把拉正后的图当作这一页的「原图」（裁剪、处理、大模型都基于它）
+    const persp = this.perspPath(task, img);
+    const usePersp = fs.existsSync(persp);
+    const base = usePersp ? persp : importPath;
+    if (fs.existsSync(base)) {
+      if (img.sourcePath !== base) {
+        img.sourcePath = base;
       }
       try {
-        const meta = await sharp(importPath, { failOn: 'none' }).rotate().metadata();
+        const meta = await sharp(base, { failOn: 'none' }).rotate().metadata();
         if (meta.width) img.width = meta.width;
         if (meta.height) img.height = meta.height;
       } catch {
