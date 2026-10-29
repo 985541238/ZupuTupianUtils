@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import os
 import cv2
 import numpy as np
 
@@ -423,6 +424,42 @@ def soft_faint_layer(mask: np.ndarray, d: np.ndarray, t_low: float, stroke_w: fl
     return np.where(keep, tone, 0.0).astype(np.float32)
 
 
+def local_norm_layer(mask: np.ndarray, d: np.ndarray, stroke_w: float, dirty: bool) -> np.ndarray | None:
+    """局部墨色归一化（扫描软件常用思路）：每个字附近按「这里最深的墨有多深」把浓度拉伸到 0~1，
+    淡字和浓字一样完整。只在已确认字列附近（7 个笔宽）生效、避开深笔画自身边缘，纸面颗粒不放大。"""
+    if dirty or int(mask.sum()) < 500:
+        return None
+    sw = max(stroke_w, 1.5)
+    r_far = int(round(4.0 * sw)) | 1
+    far = ~cv2.dilate(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (r_far, r_far))).astype(bool)
+    if int(far.sum()) < 2000:
+        return None
+    d_ink = float(np.percentile(d[mask], 55))
+    d_noise = float(np.percentile(d[far], 95.0))
+    floor = max(0.25 * d_ink, 2.5 * d_noise, 0.06)
+    dg = cv2.GaussianBlur(d, (0, 0), max(0.6, 0.12 * sw))
+    k = int(round(8.0 * sw)) | 1
+    mx = cv2.dilate(dg, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    mx = cv2.GaussianBlur(mx, (0, 0), k / 3.0)
+    ratio = dg / np.maximum(mx, floor)
+    a = np.clip((ratio - 0.42) / 0.12 + 0.5, 0.0, 1.0)
+    hr = max(2, int(round(0.5 * sw)))
+    halo = cv2.dilate(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * hr + 1, 2 * hr + 1))).astype(bool)
+    r_zone = int(round(7.0 * sw)) | 1
+    zone = cv2.dilate(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (r_zone, r_zone))).astype(bool)
+    cand = (a > 0.5) & ~halo & zone & (dg > max(0.035, 1.3 * d_noise))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(cand.astype(np.uint8), connectivity=8)
+    if n <= 1:
+        return None
+    area = st[:, cv2.CC_STAT_AREA]
+    ok = (area >= max(8, 0.6 * sw * sw)) & (area <= 80 * sw * sw)
+    ok[0] = False
+    keep = ok[lab]
+    # 保留块略外扩（把块边缘的过渡像素也带上），仍不进入深笔画的 halo
+    keep_d = cv2.dilate(keep.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool) & ~halo
+    return np.where(keep_d, a, 0.0).astype(np.float32)
+
+
 def render(d: np.ndarray, mask: np.ndarray, t_low: float, stroke_w: float, p: InkParams, rescued: np.ndarray | None = None, soft: np.ndarray | None = None) -> np.ndarray:
     """掩膜外白纸；掩膜内连续墨色，边缘留抗锯齿。"""
     inside = d[mask]
@@ -452,6 +489,9 @@ def render(d: np.ndarray, mask: np.ndarray, t_low: float, stroke_w: float, p: In
     out[~region] = 255.0
     # 掩膜内墨心不允许发灰
     core = mask & (d >= d_ink)
+    # 笔画内部（离掩膜边缘 ≥2px）一律实心：粗笔画中心因背景估计偏高会变浅，出现空心/描边圈
+    dist = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 3)
+    core = core | (dist >= 2.0)
     out[core] = np.minimum(out[core], 20.0)
     return np.clip(out, 0, 255).astype(np.uint8)
 
@@ -477,7 +517,10 @@ def extract(bgr: np.ndarray, p: InkParams) -> InkResult:
     mask, layer_info = split_stain_layer(mask, lum_med.astype(np.float32), sw, p)
     mask = filter_components(mask, d, sw, t_high, p)
     mask, rescued, faint_info = rescue_faint(mask, d, t_low, sw, p)
-    soft = soft_faint_layer(mask, d, t_low, sw, bool(faint_info.get("faint_skipped_dirty")))
+    soft = None if os.environ.get('ZW_NORIDGE') else soft_faint_layer(mask, d, t_low, sw, bool(faint_info.get("faint_skipped_dirty")))
+    ln = local_norm_layer(mask, d, sw, bool(faint_info.get("faint_skipped_dirty")))
+    if ln is not None:
+        soft = ln if soft is None else np.maximum(soft, ln)
     out = render(d, mask, t_low, sw, p, rescued, soft)
     return InkResult(
         image=out, mask=mask, darkness=d, scale=scale, stroke_width=sw, t_high=t_high, t_low=t_low,
