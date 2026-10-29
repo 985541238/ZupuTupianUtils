@@ -133,6 +133,8 @@ export interface OcrTask {
   charCount: number;
   /** 识别失败、可重试的页数 */
   failedCount: number;
+  /** 识别之后图片处理里又调整过的页数 */
+  staleCount?: number;
   /** 正在识别的页（页序号 + 开始时间戳） */
   processingPages: { pageNo: number; startedAt: number }[];
   createdAt: string;
@@ -153,6 +155,10 @@ export interface OcrPage {
   charCount: number;
   uncertainCount: number;
   errorMessage?: string | null;
+  /** 图片处理里重新调整过这一页，识别文字基于旧图 */
+  imageChanged?: boolean;
+  /** 图片处理里这一页后来被标为未通过 */
+  imageRejected?: boolean;
   /** 只有单页详情接口才带 */
   columns?: OcrColumn[];
 }

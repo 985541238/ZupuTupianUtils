@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS `ocr_pages` (
   `image_id` BIGINT UNSIGNED NOT NULL COMMENT '对应 task_images.id',
   `file_name` VARCHAR(255) NOT NULL,
   `image_path` VARCHAR(1024) NOT NULL COMMENT '识别所用的处理后图片',
+  `image_sig` VARCHAR(128) NULL COMMENT '识别时所用图片的签名，图片处理里重新调整后会变',
   `sort_order` INT NOT NULL DEFAULT 0,
   `width` INT NULL,
   `height` INT NULL,
@@ -46,3 +47,6 @@ CREATE TABLE IF NOT EXISTS `ocr_pages` (
   KEY `idx_ocr_pages_task` (`ocr_task_id`),
   CONSTRAINT `fk_ocr_pages_task` FOREIGN KEY (`ocr_task_id`) REFERENCES `ocr_tasks` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 老库升级（已有 ocr_pages 表时执行一次；启动时服务也会自动补，列已存在会忽略）
+-- ALTER TABLE `ocr_pages` ADD COLUMN `image_sig` VARCHAR(128) NULL AFTER `image_path`;

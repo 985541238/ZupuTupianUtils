@@ -10,7 +10,7 @@ import { TaskImage } from '../tasks/task-image.entity';
 import { SettingsService } from '../settings/settings.service';
 import { AliyunService, AiConfigError, OcrParseError } from '../ai/aliyun.service';
 import { getPlatformDef } from '../settings/platforms';
-import { OCR_SCHEMA_SQL } from './ocr-schema';
+import { OCR_ALTER_SQL, OCR_SCHEMA_SQL } from './ocr-schema';
 import { LayoutChar, LayoutColumn, PageLayout, layoutPage } from './ocr-layout';
 
 // 这些属于配置问题，整本暂停；限流(quota)等其它错误只让这一页失败，可重试
@@ -37,6 +37,13 @@ export class OcrService implements OnModuleInit {
   async onModuleInit() {
     try {
       for (const sql of OCR_SCHEMA_SQL) await this.tasks.query(sql);
+      for (const sql of OCR_ALTER_SQL) {
+        try {
+          await this.tasks.query(sql);
+        } catch {
+          /* 列已存在 */
+        }
+      }
     } catch (e) {
       this.logger.error(`创建 OCR 数据表失败，请手工执行 sql/migrate_ocr.sql: ${e}`);
       return;
@@ -120,6 +127,15 @@ export class OcrService implements OnModuleInit {
 
   private async taskView(t: OcrTask, sum?: { unc: number; chars: number }, live: OcrPage[] = []) {
     const model = t.ocrModelId ? await this.settings.getModel(t.ocrModelId) : null;
+    // 识别之后，图片处理里又重新调整过的页数
+    let staleCount = 0;
+    try {
+      const rec = await this.pages.find({ where: { ocrTaskId: t.id, status: In(['ready', 'confirmed']) } });
+      const lv = await this.liveImages(rec);
+      staleCount = rec.filter((p) => this.isStale(p, lv.get(Number(p.id)))).length;
+    } catch {
+      /* 不影响列表 */
+    }
     return {
       ...t,
       failedCount: live.filter((p) => p.status === 'failed').length,
@@ -128,6 +144,7 @@ export class OcrService implements OnModuleInit {
         .filter((p) => p.status === 'processing')
         .map((p) => ({ pageNo: Number(p.sortOrder) + 1, startedAt: new Date(p.updatedAt).getTime() })),
       ocrModelName: model?.displayName || null,
+      staleCount,
       uncertainCount: sum?.unc || 0,
       charCount: sum?.chars || 0,
     };
@@ -345,7 +362,19 @@ export class OcrService implements OnModuleInit {
     if (!task || !page) return;
     const model = await this.settings.getModel(task.ocrModelId);
     if (!model) throw new Error('识别模型不存在');
-    if (!page.imagePath || !fs.existsSync(page.imagePath)) throw new Error('这一页的处理后图片找不到了，请回到图片处理确认该页');
+    // 永远用图片处理里「当前」的结果图（用户可能在那边重新调整过）
+    const live = (await this.liveImages([page])).get(Number(page.id))!;
+    if (live.rejected) throw new Error('这一页在图片处理里已被标为「未通过」，请先回到图片处理重新确认该页');
+    if (!live.path || !fs.existsSync(live.path)) throw new Error('这一页的处理后图片找不到了，请回到图片处理确认该页');
+    page.imagePath = live.path;
+    page.imageSig = live.sig;
+    try {
+      const mm = await sharp(live.path, { failOn: 'none' }).metadata();
+      page.width = mm.width || page.width;
+      page.height = mm.height || page.height;
+    } catch {
+      /* 忽略 */
+    }
     page.status = 'processing';
     page.errorMessage = null;
     await this.pages.save(page);
@@ -455,23 +484,102 @@ export class OcrService implements OnModuleInit {
     await this.tasks.update({ id: taskId }, { totalCount: total, doneCount: done, confirmedCount: confirmed, updatedAt: new Date() });
   }
 
+  // ---------------- 与图片处理同步 ----------------
+  // 图片处理里重新调整参数并保存后，处理后的图片会被覆盖。OCR 页面不存图片副本，
+  // 永远指向图片处理里「当前」的结果图；并记下识别时的签名，发现变了就提示用户。
+
+  private fileSig(p: string | null | undefined): string | null {
+    try {
+      if (!p) return null;
+      const st = fs.statSync(p);
+      return `${st.size}-${Math.round(st.mtimeMs)}`;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 取这些页对应的图片处理结果（当前路径、签名、是否已被标为未通过） */
+  private async liveImages(pages: OcrPage[]) {
+    const ids = [...new Set(pages.map((p) => Number(p.imageId)))];
+    const imgs = ids.length ? await this.srcImages.find({ where: { id: In(ids) } }) : [];
+    const byId = new Map<number, TaskImage>(imgs.map((i): [number, TaskImage] => [Number(i.id), i]));
+    const out = new Map<number, { path: string; sig: string | null; rejected: boolean }>();
+    for (const p of pages) {
+      const img = byId.get(Number(p.imageId));
+      const live = img?.resultPath && fs.existsSync(img.resultPath) ? img.resultPath : p.imagePath;
+      out.set(Number(p.id), { path: live, sig: this.fileSig(live), rejected: img?.status === 'rejected' });
+    }
+    return out;
+  }
+
+  private isStale(p: OcrPage, live?: { sig: string | null; path: string }) {
+    if (!live || !p.dataJson || !p.imageSig || !live.sig) return false;
+    return live.sig !== p.imageSig || live.path !== p.imagePath;
+  }
+
+  /** 用新图重新对位：文字、备注、改动都不变，只按当前图片重新算每个字的位置（不调模型，不花钱） */
+  async realignPage(userId: number, id: number, pageId: number) {
+    const t = await this.getTask(userId, id);
+    const p = await this.getPage(t.id, pageId);
+    if (p.status === 'processing' || this.pageJobs.has(Number(p.id))) throw new BadRequestException('这一页正在识别，请稍后再试');
+    if (!p.dataJson) throw new BadRequestException('这一页还没有识别结果');
+    const live = (await this.liveImages([p])).get(Number(p.id))!;
+    if (!live.path || !fs.existsSync(live.path)) throw new BadRequestException('处理后图片找不到了，请回到图片处理确认该页');
+    const old = JSON.parse(p.dataJson) as { columns: LayoutColumn[] };
+    const m = await sharp(live.path, { failOn: 'none' }).metadata();
+    const W = m.width || p.width || 1;
+    const H = m.height || p.height || 1;
+    // 尺寸没变（只调了浓淡/去污等）→ 用原来的列框当提示；尺寸变了（重新裁剪）→ 让算法自己找列
+    const sameSize = !!p.width && !!p.height && Math.abs(W - p.width) <= 2 && Math.abs(H - p.height) <= 2;
+    const input = old.columns.map((c) => ({
+      text: c.chars.map((x) => x.t).join(''),
+      box: sameSize && c.box && c.box[2] > c.box[0] ? ([(c.box[0] / W) * 1000, (c.box[1] / H) * 1000, (c.box[2] / W) * 1000, (c.box[3] / H) * 1000] as [number, number, number, number]) : null,
+    }));
+    const lay = await layoutPage(live.path, input, []);
+    lay.columns.forEach((c, ci) => {
+      c.chars.forEach((ch, k) => {
+        const o = old.columns[ci]?.chars[k];
+        if (!o) return;
+        ch.t = o.t;
+        delete ch.u;
+        delete ch.r;
+        delete ch.alt;
+        if (o.u === 1) ch.u = 1;
+        if (o.e === 1) ch.e = 1;
+        if (o.alt) ch.alt = o.alt;
+        if (o.r) ch.r = o.r;
+      });
+    });
+    p.imagePath = live.path;
+    p.imageSig = live.sig;
+    this.fillPage(p, lay);
+    p.width = W;
+    p.height = H;
+    await this.pages.save(p);
+    await this.refreshCounts(t.id);
+    return this.pageView(p, true, live);
+  }
+
   // ---------------- 页面 ----------------
 
   async listPages(userId: number, id: number) {
     const t = await this.getTask(userId, id);
     const rows = await this.pages.find({ where: { ocrTaskId: t.id }, order: { sortOrder: 'ASC', id: 'ASC' } });
-    return rows.map((p) => this.pageView(p, false));
+    const live = await this.liveImages(rows);
+    return rows.map((p) => this.pageView(p, false, live.get(Number(p.id))));
   }
 
   async getPageView(userId: number, id: number, pageId: number) {
     const t = await this.getTask(userId, id);
     const p = await this.getPage(t.id, pageId);
-    return this.pageView(p, true);
+    const live = (await this.liveImages([p])).get(Number(p.id));
+    return this.pageView(p, true, live);
   }
 
-  private pageView(p: OcrPage, withData: boolean) {
-    const bust = 't=' + new Date(p.updatedAt || Date.now()).getTime();
-    const { dataJson, imagePath, ...rest } = p as any;
+  private pageView(p: OcrPage, withData: boolean, live?: { path: string; sig: string | null; rejected: boolean }) {
+    const bust = 't=' + encodeURIComponent(live?.sig || String(new Date(p.updatedAt || Date.now()).getTime()));
+    const { dataJson, imagePath: savedPath, imageSig, ...rest } = p as any;
+    const imagePath = live?.path || savedPath;
     let data: any = null;
     if (withData && dataJson) {
       try {
@@ -482,6 +590,10 @@ export class OcrService implements OnModuleInit {
     }
     return {
       ...rest,
+      /** 图片处理里重新调整过这一页，识别文字是基于旧图的 */
+      imageChanged: this.isStale(p, live),
+      /** 图片处理里这一页后来被标成了「未通过」 */
+      imageRejected: !!live?.rejected,
       imageUrl: '/files/local?path=' + encodeURIComponent(imagePath) + '&' + bust,
       ...(withData ? { data } : {}),
     };

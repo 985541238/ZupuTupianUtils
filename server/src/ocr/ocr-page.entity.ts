@@ -20,6 +20,10 @@ export class OcrPage {
   @Column({ name: 'image_path', length: 1024 })
   imagePath: string;
 
+  /** 识别时所用图片的签名（文件大小+修改时间）。图片处理里重新调整后签名会变，据此提示“图已更新” */
+  @Column({ name: 'image_sig', type: 'varchar', length: 128, nullable: true })
+  imageSig: string | null;
+
   @Column({ name: 'sort_order', type: 'int', default: 0 })
   sortOrder: number;
 

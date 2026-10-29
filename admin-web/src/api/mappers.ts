@@ -157,6 +157,7 @@ export function mapOcrTask(raw: any): OcrTask {
     uncertainCount: Number(raw.uncertainCount) || 0,
     charCount: Number(raw.charCount) || 0,
     failedCount: Number(raw.failedCount) || 0,
+    staleCount: Number(raw.staleCount) || 0,
     processingPages: Array.isArray(raw.processingPages)
       ? raw.processingPages.map((p: any) => ({ pageNo: Number(p.pageNo) || 0, startedAt: Number(p.startedAt) || 0 }))
       : [],
@@ -178,6 +179,8 @@ export function mapOcrPage(raw: any, taskId: string | number, pageNumber: number
     charCount: Number(raw.charCount) || 0,
     uncertainCount: Number(raw.uncertainCount) || 0,
     errorMessage: raw.errorMessage || null,
+    imageChanged: !!raw.imageChanged,
+    imageRejected: !!raw.imageRejected,
     columns: raw.data?.columns,
   };
 }

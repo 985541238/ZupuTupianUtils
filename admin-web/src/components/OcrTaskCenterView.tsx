@@ -331,6 +331,14 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                           <span className="truncate max-w-[260px]" title={task.sourceTaskName}>来源：{task.sourceTaskName || '—'}</span>
                           <span className="text-black/15">·</span>
                           <span className="tabular-nums">共 {task.totalCount} 页</span>
+                          {task.staleCount ? (
+                            <>
+                              <span className="text-black/15">·</span>
+                              <span className="text-[#C93400] font-semibold" title="识别之后，图片处理里又重新调整保存过这些页的图片，进入审阅可按新图重新对位或重新识别">
+                                {task.staleCount} 页图片已在图片处理中更新
+                              </span>
+                            </>
+                          ) : null}
                           {task.ocrModelName ? (
                             <>
                               <span className="text-black/15">·</span>

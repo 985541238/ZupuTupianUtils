@@ -132,6 +132,8 @@ export const api = {
     request<any>(`/ocr-tasks/${id}/pages/${pageId}/confirm`, { method: 'POST', body: JSON.stringify(columns ? { columns } : {}) }),
   reopenOcrPage: (id: string | number, pageId: string | number) =>
     request<any>(`/ocr-tasks/${id}/pages/${pageId}/reopen`, { method: 'POST', body: '{}' }),
+  realignOcrPage: (id: string | number, pageId: string | number) =>
+    request<any>(`/ocr-tasks/${id}/pages/${pageId}/realign`, { method: 'POST', body: '{}' }),
   recognizeOcrPage: (id: string | number, pageId: string | number, modelId?: number | null) =>
     request<any>(`/ocr-tasks/${id}/pages/${pageId}/recognize`, { method: 'POST', body: JSON.stringify(modelId ? { modelId } : {}) }),
   confirmOcrTask: (id: string | number) => request<any>('/ocr-tasks/' + id + '/confirm', { method: 'POST', body: '{}' }),

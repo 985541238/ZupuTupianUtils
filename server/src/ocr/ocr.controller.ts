@@ -71,6 +71,11 @@ export class OcrController {
     return this.ocr.confirmPage(req.user.id, id, pageId, body || {});
   }
 
+  @Post(':id/pages/:pageId/realign')
+  realign(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Param('pageId', ParseIntPipe) pageId: number) {
+    return this.ocr.realignPage(req.user.id, id, pageId);
+  }
+
   @Post(':id/pages/:pageId/reopen')
   reopen(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Param('pageId', ParseIntPipe) pageId: number) {
     return this.ocr.reopenPage(req.user.id, id, pageId);

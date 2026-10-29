@@ -123,11 +123,12 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
     };
   }, [loadList]);
 
-  // 整本还在识别时，每 3 秒刷新页面列表：识别好的页马上能点开审阅
+  // 定时刷新页面列表：识别中每 3 秒（识别好的页马上能点开）；平时每 8 秒，切回本窗口时立刻刷新一次。
+  // 这样用户在「图片处理」里重新调整并保存后，回到这里能马上看到最新的处理图和「图已更新」提示。
   const taskLive = task.status === 'processing' || pages.some((p) => p.status === 'processing');
   useEffect(() => {
-    if (!taskLive) return;
-    const t = window.setInterval(() => {
+    const refresh = () => {
+      if (document.hidden) return;
       api
         .getOcrPages(task.id)
         .then((raw) => {
@@ -141,8 +142,15 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
           );
         })
         .catch(() => {});
-    }, 3000);
-    return () => window.clearInterval(t);
+    };
+    const t = window.setInterval(refresh, taskLive ? 3000 : 8000);
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.clearInterval(t);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
   }, [taskLive, task.id]);
 
   // ---------- 单页数据与自动保存 ----------
@@ -400,6 +408,36 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
     }
   };
 
+  /** 图片处理里重新调整过：文字不变，按新图重新算每个字的位置（不调模型、不花钱） */
+  const realign = async () => {
+    if (!cur) return;
+    setBusy(true);
+    try {
+      if (saveTimer.current) window.clearTimeout(saveTimer.current);
+      await flushSave();
+      const raw = await api.realignOcrPage(task.id, cur.id);
+      const cols: OcrColumn[] | undefined = raw?.data?.columns;
+      if (cols) {
+        cache.current.set(cur.id, cols);
+        setColumns(cols);
+      }
+      patchPage(cur.id, {
+        imageChanged: false,
+        imageUrl: mapOcrPage(raw, task.id, cur.pageNumber).imageUrl,
+        width: Number(raw.width) || cur.width,
+        height: Number(raw.height) || cur.height,
+        charCount: Number(raw.charCount) || 0,
+        uncertainCount: Number(raw.uncertainCount) || 0,
+      });
+      setSel(null);
+      showToast('已按新图重新对位，文字没有变，请看一眼位置是否对得上');
+    } catch (e: any) {
+      showToast(e?.message || '重新对位失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const recognizeAgain = async (modelId?: number | null) => {
     if (!cur) return;
     setRerunDlg(false);
@@ -485,7 +523,14 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-[13px] font-semibold tabular-nums">第 {p.pageNumber} 页</span>
+                      <span className="text-[13px] font-semibold tabular-nums">
+                        第 {p.pageNumber} 页
+                        {p.imageChanged ? (
+                          <span className="ml-1.5 text-[10px] font-semibold text-[#C93400] bg-[#FF9500]/15 px-1.5 py-0.5 rounded-full" title="图片处理里重新调整过这一页">
+                            图已更新
+                          </span>
+                        ) : null}
+                      </span>
                       {p.status === 'confirmed' ? (
                         <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-[#248A3D] bg-[#34C759]/12 px-1.5 py-0.5 rounded-full">
                           <Check className="w-2.5 h-2.5" />
@@ -655,6 +700,35 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                 </div>
 
                 <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
+                  {cur.imageRejected ? (
+                    <div className="rounded-2xl bg-[#FF3B30]/[0.07] border border-[#FF3B30]/20 p-3 text-[13px] text-[#C62828] leading-relaxed">
+                      这一页在「图片处理」里后来被标成了「未通过」，当前显示的是那边最新的图。建议回去重新确认后再核对文字。
+                    </div>
+                  ) : null}
+                  {cur.imageChanged && columns ? (
+                    <div className="rounded-2xl bg-[#FF9500]/10 border border-[#FF9500]/30 p-3 text-[13px] text-[#C93400] leading-relaxed">
+                      <p className="font-semibold">这一页的图片在「图片处理」里重新调整过</p>
+                      <p className="mt-1 text-[12px]">现在显示的是最新的图；下面的文字是按旧图识别的，字的位置可能对不上，字形也可能变了。</p>
+                      <div className="mt-2 flex flex-col gap-1.5">
+                        <button
+                          disabled={busy}
+                          onClick={realign}
+                          className="h-8 rounded-lg bg-[#FF9500] text-white text-xs font-semibold cursor-pointer disabled:opacity-60"
+                          title="文字、修改都保留，只按新图重新摆位置，免费"
+                        >
+                          按新图重新对位（文字不变，免费）
+                        </button>
+                        <button
+                          disabled={busy}
+                          onClick={() => setRerunDlg(true)}
+                          className="h-8 rounded-lg bg-white border border-[#FF9500]/40 text-[#C93400] text-xs font-semibold cursor-pointer disabled:opacity-60"
+                          title="用新图重新识别，会覆盖手工修改并产生费用"
+                        >
+                          用新图重新识别（会收费）
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
                   {cur.status === 'processing' ? (
                     <div className="rounded-2xl bg-[#0071E3]/[0.06] border border-[#0071E3]/15 p-3 text-[13px] text-[#0A4FA8] leading-relaxed flex items-start gap-2">
                       <Sparkles className="w-4 h-4 animate-spin shrink-0 mt-0.5" />
@@ -1285,6 +1359,11 @@ const TextReader: React.FC<{
 }> = ({ columns, hover, sel, onlyPending, onHover, onLeave, onPick, status }) => {
   // 图上悬停某个字时，文字区滚到对应位置
   const wrapRef = useRef<HTMLDivElement>(null);
+  // 从右往左读：换页时先滚到最右边，让第 1 列在视野里
+  useEffect(() => {
+    const w = wrapRef.current;
+    if (w) w.scrollLeft = w.scrollWidth;
+  }, [columns?.length, status]);
   useEffect(() => {
     if (!hover) return;
     const el = document.getElementById(`tc-${hover.col}-${hover.idx}`);
