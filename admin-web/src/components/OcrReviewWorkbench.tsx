@@ -933,9 +933,6 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                       {busy ? '处理中…' : '完成本页并看下一页'}
                     </button>
                   )}
-                  {cur.modelName ? (
-                    <p className="text-[11px] text-[#86868B] text-center">本页由「{cur.modelName}」识别</p>
-                  ) : null}
                   {cur.hasPrev && cur.status !== 'processing' ? (
                     <button
                       disabled={busy}

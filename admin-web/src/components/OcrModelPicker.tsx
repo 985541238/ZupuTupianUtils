@@ -94,17 +94,6 @@ export const OcrModelPicker: React.FC<{
           </div>
         </div>
 
-        <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">识别方式</label>
-        {loading ? (
-          <p className="text-xs text-[#86868B]">加载中…</p>
-        ) : (
-          <div className="rounded-xl bg-[#F5F5F7] border border-black/[0.06] px-3.5 py-2.5 text-[13px] font-medium text-[#1D1D1F]">
-            百度文字识别（高精度含位置版）
-            {perPage[modelId ?? 0] != null ? (
-              <span className="text-[#86868B] font-normal"> · 约¥{perPage[modelId ?? 0]!.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}/页</span>
-            ) : null}
-          </div>
-        )}
         {!loading && configured === false ? (
           <div className="mt-2 text-xs text-[#C93400] bg-[#FF9500]/10 rounded-lg px-2.5 py-2 leading-relaxed">
             还没有配置百度文字识别的 Key，识别不了。
@@ -130,12 +119,11 @@ export const OcrModelPicker: React.FC<{
             取消
           </button>
           <button
-            disabled={!modelId || submitting || configured === false}
+            disabled={submitting || configured === false}
             onClick={async () => {
-              if (!modelId) return;
               setSubmitting(true);
               try {
-                await onConfirm(modelId, setDefault);
+                await onConfirm(modelId ?? 0, setDefault);
               } finally {
                 setSubmitting(false);
               }

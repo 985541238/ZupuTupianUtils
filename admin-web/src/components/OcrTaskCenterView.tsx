@@ -629,7 +629,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                 <div>
                   <div className="flex items-center gap-2 mb-2.5">
                     <span className="w-5 h-5 rounded-full bg-[#0071E3] text-white text-[10px] font-bold flex items-center justify-center">2</span>
-                    <span className="text-sm font-semibold text-[#1D1D1F]">任务与识别方式</span>
+                    <span className="text-sm font-semibold text-[#1D1D1F]">任务名称</span>
                   </div>
                   <div className="space-y-3">
                     <div>
@@ -646,10 +646,6 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                       />
                     </div>
                     <div>
-                      <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">识别方式</label>
-                      <div className="rounded-xl bg-[#F5F5F7] border border-black/[0.06] px-3.5 py-2.5 text-[13px] font-medium text-[#1D1D1F]">
-                        百度文字识别（高精度含位置版）
-                      </div>
                       {cfgReady === false ? (
                         <p className="text-xs text-[#C93400] mt-1.5 leading-relaxed bg-[#FF9500]/10 rounded-lg px-2.5 py-2">
                           还没有配置百度文字识别的 Key，可以先建任务，但识别前需要配置。
@@ -692,7 +688,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                 </button>
                 <button
                   type="button"
-                  disabled={creating || !sourceId || !modelId || (dupTasks.length > 0 && !dupOk)}
+                  disabled={creating || !sourceId || (dupTasks.length > 0 && !dupOk)}
                   onClick={() => void submit(false)}
                   className="h-10 px-4 text-sm font-semibold bg-white border border-black/[0.1] hover:bg-[#F5F5F7] text-[#1D1D1F] rounded-xl cursor-pointer disabled:opacity-50"
                 >
@@ -700,7 +696,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                 </button>
                 <button
                   type="button"
-                  disabled={creating || !sourceId || !modelId || (dupTasks.length > 0 && !dupOk)}
+                  disabled={creating || !sourceId || (dupTasks.length > 0 && !dupOk)}
                   onClick={() => void submit(true)}
                   className="h-10 px-5 text-sm font-semibold bg-[#0071E3] hover:bg-[#0077ED] text-white rounded-xl shadow-[0_2px_8px_rgba(0,113,227,0.25)] cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
                 >
