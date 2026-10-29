@@ -367,43 +367,59 @@ def rescue_faint(mask: np.ndarray, d: np.ndarray, t_low: float, stroke_w: float,
     return mask | resc, resc, info
 
 
-def soft_faint_layer(mask: np.ndarray, d: np.ndarray, t_low: float, stroke_w: float, dirty: bool) -> np.ndarray | None:
-    """字旁边的细淡笔画：不按硬阈值二值化（那样一笔会碎成几段、半个字），
-    而是保留它们的灰度形状，再整体加深。返回 0~1 的墨色浓度（只在字附近有值）。
+def ridge_response(d: np.ndarray, sigmas: list[float]) -> np.ndarray:
+    """细线（脊）响应：不管笔画多淡，只要它是一条比周围深的细线就有响应。
+    和「深浅阈值」不同，淡细的字（复印不清）响应也很清楚，所以能用来找回被阈值切碎的笔画。"""
+    best = np.zeros(d.shape, np.float32)
+    for sg in sigmas:
+        g = cv2.GaussianBlur(d, (0, 0), sg)
+        ixx = cv2.Sobel(g, cv2.CV_32F, 2, 0, ksize=3) / 4.0
+        iyy = cv2.Sobel(g, cv2.CV_32F, 0, 2, ksize=3) / 4.0
+        ixy = cv2.Sobel(g, cv2.CV_32F, 1, 1, ksize=3) / 4.0
+        t = np.sqrt(((ixx - iyy) / 2.0) ** 2 + ixy ** 2)
+        lmin = (ixx + iyy) / 2.0 - t
+        best = np.maximum(best, np.maximum(-lmin, 0.0) * sg * sg)
+    return best
 
-    - 噪声底：远离字的纸面上 d 的高位，淡笔画必须高于它，纸面颗粒不会被带出来；
-    - 只取和已有笔画相连（或紧挨着，1.5 笔宽内）的部分，孤立的淡斑不要；
-    - 脏页（远离字的淡块多）不启用。
+
+def soft_faint_layer(mask: np.ndarray, d: np.ndarray, t_low: float, stroke_w: float, dirty: bool) -> np.ndarray | None:
+    """淡细笔画找回：用脊（细线）响应找出整个字，再按灰度形状加深。返回 0~1 的墨色浓度。
+
+    - 阈值取自「已认定笔画的典型响应」的一小部分，并且高于远离字的纸面响应，纸面颗粒不会带出来；
+    - 只取落在字列附近（7 个笔宽内）、面积不太小的连通块，孤立小点、远处的东西不要；
+    - 已认定笔画四周 2 像素不算（那是它自己的模糊边缘，算了会把深字描粗）；
+    - 脏页（远离字的淡块多）整体不启用。
     """
     if dirty or mask.sum() < 500:
         return None
     sw = max(stroke_w, 1.5)
+    r = ridge_response(d, [0.25 * sw, 0.4 * sw, 0.55 * sw])
     r_far = int(round(4.0 * sw)) | 1
     far = ~cv2.dilate(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (r_far, r_far))).astype(bool)
-    vals = d[far]
-    if vals.size < 2000:
+    if int(far.sum()) < 2000 or int(mask.sum()) < 500:
         return None
-    # 纸面颗粒的高位（用 95 分位：远处的书口线、黑框等少数极端值不应把底线抬高）
-    noise = float(np.percentile(vals, 95.0))
-    f0 = float(np.clip(noise * 1.6, 0.04, max(0.05, t_low * 0.55)))
-    top = max(t_low * 0.95, f0 + 0.03)
-    # 已认定的笔画四周 2 像素是它自己的模糊边缘，不算「淡笔画」：否则深色笔画会被描粗
-    halo = cv2.dilate(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))).astype(bool)
-    cand = (d > f0) & ~halo
-    r_near = int(round(1.5 * sw)) | 1
-    near = cv2.dilate(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (r_near, r_near))).astype(bool)
+    r_typ = float(np.percentile(r[mask], 25))
+    noise = float(np.percentile(r[far], 97.0))
+    thr = float(max(0.07 * r_typ, 1.6 * noise, 1e-4))
+    if thr >= 0.5 * r_typ:
+        return None  # 纸面本身太「毛」，分不开，不冒险
+    # 深色笔画两侧脊响应会出现一圈「回波」：排除它四周约半个笔宽，并且要求这一点本身确实比纸面深
+    hr = max(2, int(round(0.5 * sw)))
+    halo = cv2.dilate(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * hr + 1, 2 * hr + 1))).astype(bool)
+    d_noise = float(np.percentile(d[far], 95.0))
+    d_min = max(0.035, 1.3 * d_noise)
+    cand = (r > thr) & ~halo & (d > d_min)
+    r_zone = int(round(7.0 * sw)) | 1
+    zone = cv2.dilate(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (r_zone, r_zone))).astype(bool)
+    cand &= zone
     n, lab, st, _ = cv2.connectedComponentsWithStats(cand.astype(np.uint8), connectivity=8)
     if n <= 1:
         return None
-    touch = np.bincount(lab.ravel(), near.ravel().astype(np.float64), n) > 0
     area = st[:, cv2.CC_STAT_AREA]
-    ok = touch & (area >= max(4, 0.3 * sw * sw)) & (area <= 60 * sw * sw)
+    ok = (area >= max(6, 0.5 * sw * sw)) & (area <= 80 * sw * sw)
     ok[0] = False
-    # 限制在字附近，避免沿着字边一路长出去
-    r_zone = int(round(7.0 * sw)) | 1
-    zone = cv2.dilate(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (r_zone, r_zone))).astype(bool)
-    keep = ok[lab] & zone
-    tone = np.clip((d - f0) / max(top - f0, 1e-3), 0.0, 1.0) ** 0.7
+    keep = ok[lab]
+    tone = np.clip((r - thr) / max(2.0 * thr, 1e-4), 0.0, 1.0) ** 0.6
     return np.where(keep, tone, 0.0).astype(np.float32)
 
 
