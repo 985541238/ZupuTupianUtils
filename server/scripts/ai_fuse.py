@@ -191,6 +191,23 @@ def finish_on_base(out_path, base, o_ink, a_ink, warp, s, flags, bad, gy, gx, me
     whole = hit >= 0.92
     mixed = (hit >= 0.2) & ~whole
     whole[0] = mixed[0] = False
+    # 淡墨字保护：复印不清的字，模型常常画得更淡甚至没画，按上面的规则整个字会被删掉或裁掉笔画。
+    # 字大小的块、而且落在「已确认是字」的竖列带上（上下方、同一列里有确认的字）→ 当成字整块保留。
+    # 远离文字列的零散块、比字大得多的大片污渍不在此列，仍按模型的判断删除。
+    short = min(h, w)
+    bw_, bh_ = st[:, cv2.CC_STAT_WIDTH], st[:, cv2.CC_STAT_HEIGHT]
+    glyphish = (area >= 6) & (np.maximum(bw_, bh_) <= short * 0.08) & (area <= (short * 0.08) ** 2 * 0.7)
+    glyphish[0] = False
+    confirmed = whole & glyphish
+    if confirmed.any():
+        gsz = int(np.clip(np.median(np.maximum(bw_[confirmed], bh_[confirmed])), 8, short * 0.08))
+        cmask = confirmed[lab].astype(np.uint8)
+        band = cv2.dilate(cmask, cv2.getStructuringElement(cv2.MORPH_RECT, (max(3, int(gsz * 0.9)) | 1, int(gsz * 4) | 1))).astype(bool)
+        inband = np.bincount(lab.ravel(), band.ravel(), n) / area
+        rescued = glyphish & ~whole & (inband >= 0.6)
+        rescued[0] = False
+        whole = whole | rescued
+        mixed = mixed & ~rescued
     keep = whole[lab] | (mixed[lab] & tight)
 
     # 对不上的分块：完全保持算法成品
@@ -211,7 +228,7 @@ def finish_on_base(out_path, base, o_ink, a_ink, warp, s, flags, bad, gy, gx, me
     if not ok:
         raise ValueError("写出失败")
     buf.tofile(out_path)
-    print(json.dumps({"ok": True, "mode": "base", "removed_px": removed, "dropped_parts": int((~whole & ~mixed)[1:].sum()), **meta}))
+    print(json.dumps({"ok": True, "mode": "base", "removed_px": removed, "dropped_parts": int((~whole & ~mixed)[1:].sum()), "faint_protected": int(rescued[1:].sum()) if confirmed.any() else 0, **meta}))
     return 0
 
 
