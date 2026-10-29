@@ -8,11 +8,14 @@ import { AliyunConfig, ResolvedCredentials, SettingsService } from '../settings/
 import { PlatformCode, getPlatformDef, guessPlatform } from '../settings/platforms';
 import { signPath } from '../common/secret';
 import { DEFAULT_CLEAN_PROMPT, DEFAULT_OCR_PROMPT } from '../settings/prompts';
+import { BaiduOcrError, baiduAccurateOcr, getBaiduToken, isBaiduOcrModel } from './baidu-ocr';
 
 export interface OcrColumn {
   text: string;
   /** 0~1000 相对坐标 [x1,y1,x2,y2]，模型没给就是 null */
   box: [number, number, number, number] | null;
+  /** 每个字的 0~1000 相对坐标（百度等带字位置的引擎才有），和 text 逐字对应 */
+  charBoxes?: [number, number, number, number][];
 }
 
 export interface OcrUncertain {
@@ -135,8 +138,21 @@ export class AliyunService {
     return process.env.AI_MOCK === '1';
   }
 
+  /** 百度文字识别的 Key（平台账号里「文字识别 API Key / Secret Key」） */
+  private async baiduOcrKeys() {
+    const p = await this.settings.getPlatformSecrets('baidu');
+    return { apiKey: (p?.values.ocrApiKey || '').trim(), secretKey: (p?.values.ocrSecretKey || '').trim() };
+  }
+
   async assertReady(model?: AiModel): Promise<ResolvedCredentials> {
+    if (isBaiduOcrModel(model) && !this.mock) {
+      const k = await this.baiduOcrKeys();
+      if (!k.apiKey || !k.secretKey) {
+        throw new AiConfigError('还没有填写百度文字识别的 API Key / Secret Key。请到「模型配置 → 平台账号 → 百度智能云」填写「文字识别 API Key」和「文字识别 Secret Key」。', 'auth', 'baidu');
+      }
+    }
     const creds = await this.settings.resolveCredentials(model);
+    if (isBaiduOcrModel(model)) return { ...creds, apiKey: creds.apiKey || 'baidu-ocr' };
     if (!this.mock && !creds.apiKey) {
       const name = getPlatformDef(creds.platform)?.name;
       throw new AiConfigError(
@@ -173,6 +189,7 @@ export class AliyunService {
 
   async ocr(imagePath: string, model: AiModel, opts: { prompt?: string; maxSide?: number } = {}): Promise<{ result: OcrResult; usage: Usage; raw: string }> {
     if (this.mock) return this.mockOcr(imagePath);
+    if (isBaiduOcrModel(model)) return this.baiduOcr(imagePath, model);
     const cfg = await this.assertReady(model);
     const dataUri = await this.toDataUri(imagePath, opts.maxSide || 2048);
     const build = () => {
@@ -206,6 +223,50 @@ export class AliyunService {
       throw new OcrParseError('模型没有返回可用的识别结果（它可能不支持看图，请换成带视觉的模型，如 GLM-4.5V、Qwen-VL）。', u, content);
     }
     return { result, usage: u, raw: content };
+  }
+
+  /** 百度文字识别（高精度含位置版）：按行返回，带每个字的位置，不需要提示词 */
+  private async baiduOcr(imagePath: string, model: AiModel): Promise<{ result: OcrResult; usage: Usage; raw: string }> {
+    await this.assertReady(model);
+    const k = await this.baiduOcrKeys();
+    let out: Awaited<ReturnType<typeof baiduAccurateOcr>>;
+    try {
+      out = await baiduAccurateOcr(imagePath, k.apiKey, k.secretKey);
+    } catch (e: any) {
+      if (e instanceof BaiduOcrError) {
+        const kind = e.kind === 'server' ? undefined : e.kind;
+        if (kind) throw new AiConfigError(e.message, kind as AiErrorKind, 'baidu', e.detail);
+        throw new Error(e.message + (e.detail ? `（${e.detail}）` : ''));
+      }
+      throw e;
+    }
+    const usage: Usage = { tokensIn: 0, tokensOut: 0, images: 1 };
+    const columns: OcrColumn[] = out.columns.map((c) => ({ text: c.text, box: c.box, charBoxes: c.charBoxes }));
+    // 百度给的是整行置信度：偏低的整行标成待核对
+    const uncertain: OcrUncertain[] = [];
+    out.columns.forEach((c, ci) => {
+      if (c.prob != null && c.prob < 0.85) {
+        Array.from(c.text).forEach((ch, idx) => uncertain.push({ col: ci, index: idx, char: ch, candidates: [], reason: `这一列整体把握不大（置信度 ${Math.round(c.prob! * 100)}%）` }));
+      }
+    });
+    if (!columns.length) throw new OcrParseError('百度文字识别没有识别出任何文字（图片可能太淡或是空白）。', usage, out.raw);
+    return { result: { columns, uncertain }, usage, raw: out.raw };
+  }
+
+  /** 测试百度文字识别的 Key：只换 access_token，不识别图片、不扣费 */
+  async pingBaiduOcr(override?: { apiKey?: string; secretKey?: string }) {
+    const saved = await this.baiduOcrKeys();
+    const apiKey = (override?.apiKey || saved.apiKey || '').trim();
+    const secretKey = (override?.secretKey || saved.secretKey || '').trim();
+    if (!apiKey || !secretKey) throw new AiConfigError('请先填写百度文字识别的 API Key 和 Secret Key', 'auth', 'baidu');
+    const t = Date.now();
+    try {
+      await getBaiduToken(apiKey, secretKey, true);
+    } catch (e: any) {
+      if (e instanceof BaiduOcrError) throw new AiConfigError(e.message, 'auth', 'baidu', e.detail);
+      throw e;
+    }
+    return { ok: true, ms: Date.now() - t, reply: 'Key 有效，已拿到访问令牌（识别时才会计费；还需确认应用已开通「通用文字识别（高精度含位置版）」）' };
   }
 
   /** 只发一句文字，验证 Key 和地址可用。不在此处走 AI_MOCK 假成功；由调用方先校验 Key / Mock。 */
@@ -782,6 +843,15 @@ export class AliyunService {
     if (this.mock) return fallback('当前为 AI_MOCK，列出的是推荐模型');
     const saved = await this.settings.getPlatformSecrets(def.code);
     const apiKey = (override?.apiKey || saved?.values.apiKey || '').trim();
+    if (isOcr && def.code === 'baidu') {
+      // 百度文字识别是独立的接口（不是大模型），固定提供一个内置选项，用「文字识别 Key」，不需要千帆的 Key
+      const builtin = [{ id: 'baidu-ocr-accurate', image: true, suggested: true }];
+      return {
+        source: 'suggested',
+        note: '「baidu-ocr-accurate」是百度文字识别（高精度含位置版），按字给位置，比大模型更稳。Key 在「平台账号 → 百度智能云 → 文字识别 API Key / Secret Key」里填。',
+        models: builtin,
+      };
+    }
     const base = String(override?.baseUrl || saved?.baseUrl || def.defaultBaseUrl).trim().replace(/\/+$/, '');
     if (!apiKey) throw new AiConfigError('请先填写 API Key', 'auth', def.code);
     const res = await this.fetchWithTimeout(

@@ -108,6 +108,17 @@ export class SettingsController {
     let saved = draft.id ? await this.settings.getModel(draft.id) : null;
     if (draft.id && !saved) throw new BadRequestException('模型不存在');
 
+    // 百度文字识别：只换访问令牌验证 Key（不识别图片、不扣费）
+    if (/^baidu-ocr/i.test(String(draft.model || saved?.model || '')) && (draft.platform ?? (saved as any)?.platform ?? 'baidu') === 'baidu') {
+      if (process.env.AI_MOCK === '1') return { ok: false, mock: true, error: '当前为 AI_MOCK，未真实连通' };
+      try {
+        const r = await this.aliyun.pingBaiduOcr();
+        return { ok: true, ms: r.ms, reply: r.reply };
+      } catch (e: any) {
+        return { ok: false, error: e?.message || String(e), kind: e?.kind || null, detail: e?.detail || '' };
+      }
+    }
+
     const inputKey = String(draft.apiKey || '').trim();
     // 弹窗里改了所属平台：按新平台取 Key / 地址
     const credsFor = draft.platform !== undefined ? ({ ...(saved || {}), platform: draft.platform || null, apiKey: saved?.apiKey ?? null } as any) : saved;

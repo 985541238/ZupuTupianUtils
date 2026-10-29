@@ -238,6 +238,9 @@ export class SettingsService implements OnModuleInit {
     for (const [code, v] of Object.entries(all)) {
       if (decryptSecret(v?.values?.apiKey || '')) out.add(code);
     }
+    // 百度文字识别用独立的 Key / Secret（不是千帆的 Key）
+    const b = all['baidu'];
+    if (decryptSecret(b?.values?.ocrApiKey || '') && decryptSecret(b?.values?.ocrSecretKey || '')) out.add('baidu:ocr');
     return out;
   }
 
@@ -257,7 +260,7 @@ export class SettingsService implements OnModuleInit {
       /** 单价币种（跟随平台） */
       currency: getPlatformDef(platform)?.currency || 'CNY',
       /** 模型自己没填 Key，但所属平台已填 */
-      platformKeySet: !!platform && !!keyedPlatforms?.has(platform),
+      platformKeySet: /^baidu-ocr/i.test(m.model || '') && platform === 'baidu' ? !!keyedPlatforms?.has('baidu:ocr') : !!platform && !!keyedPlatforms?.has(platform),
     };
   }
 
@@ -365,7 +368,7 @@ export class SettingsService implements OnModuleInit {
         baseUrl: stored.baseUrl || '',
         imageTransport: stored.imageTransport === 'url' ? 'url' : 'base64',
         fields,
-        configured: fields.some((f) => f.scope === 'general' && f.set),
+        configured: fields.some((f) => (f.scope === 'general' || (def.code === 'baidu' && f.scope === 'ocr')) && f.set),
         modelCount,
       };
     });

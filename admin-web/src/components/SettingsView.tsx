@@ -760,6 +760,7 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
   const editingPlatform = platformDef(editing?.platform);
   const pDef = pEditing ? platformDef(pEditing.code) : null;
   const editingIsOcr = editing?.purpose === 'ocr';
+  const editingIsBaiduOcr = editingIsOcr && editing?.platform === 'baidu' && /^baidu-ocr/i.test(String(editing?.model || ''));
   const editingBilling = editing?.billing || (editingIsOcr ? 'token' : 'image');
 
   return (
@@ -1104,9 +1105,13 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
                                 onClick={() => {
                                   // 有参考单价的推荐模型，顺带填上单价（可改）
                                   const ref = editingPlatform?.imageEdit.referencePrices?.[m.id];
+                                  const isBd = /^baidu-ocr/i.test(m.id);
                                   setEditing({
                                     ...editing,
                                     model: m.id,
+                                    ...(isBd
+                                      ? { billing: 'image' as const, ...(String(editing.displayName || '').trim() ? {} : { displayName: '识别-百度OCR高精度含位置版' }) }
+                                      : {}),
                                     ...(ref != null && !editingIsOcr ? { priceImage: String(ref) } : {}),
                                   });
                                 }}
@@ -1194,6 +1199,13 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
             {/* 右栏：怎么处理、多少钱 */}
             <div className="space-y-3">
               <GroupTitle title="处理要求与费用" />
+              {editingIsBaiduOcr ? (
+                <p className="text-[11px] text-[#0A5FB8] leading-relaxed bg-[#0071E3]/8 rounded-lg px-2.5 py-2">
+                  这是百度「通用文字识别（高精度含位置版）」，不是大模型：不需要提示词，直接返回每个字的位置，列数和字数更稳。
+                  Key 用的是「平台账号 → 百度智能云」里的「文字识别 API Key / Secret Key」（不是千帆的 Key），并要在百度控制台给该应用开通这个接口。
+                  计费按「每张图」，单价请按你购买的次数包/后付费价格填。
+                </p>
+              ) : (
               <div>
                 <label className="block text-xs font-semibold mb-1">
                   提示词 <span className="font-normal text-[#86868B]">（族谱业务默认已填，一般不用改）</span>
@@ -1206,6 +1218,7 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
                   placeholder={editingIsOcr ? DEFAULT_OCR_PROMPT : DEFAULT_CLEAN_PROMPT}
                 />
               </div>
+              )}
               <div className="grid grid-cols-2 gap-3 items-end">
                 <div>
                   <label className="block text-xs font-semibold mb-1">计费方式</label>

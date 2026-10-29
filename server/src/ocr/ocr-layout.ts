@@ -4,6 +4,8 @@ import sharp from 'sharp';
 export interface LayoutInputColumn {
   text: string;
   box: [number, number, number, number] | null;
+  /** 引擎给出的每个字的位置（0~1000），与 text 逐字对应；有就直接用，不再自己切格子 */
+  charBoxes?: [number, number, number, number][];
 }
 
 export interface LayoutChar {
@@ -93,15 +95,21 @@ export async function layoutPage(
   const out: LayoutColumn[] = [];
   columns.forEach((c, i) => {
     const chars = Array.from(c.text);
+    const hasCB = !!c.charBoxes && c.charBoxes.length === chars.length && chars.length > 0;
     const hint = hints[i] || evenHint(i);
-    const colBox = fitColumn(ink, w, h, hint, !!hints[i]);
+    const cb: [number, number, number, number][] | null = hasCB
+      ? c.charBoxes!.map((b) => [b[0] * w / 1000, b[1] * h / 1000, b[2] * w / 1000, b[3] * h / 1000] as [number, number, number, number])
+      : null;
+    const colBox: [number, number, number, number] = cb
+      ? [Math.min(...cb.map((b) => b[0])), Math.min(...cb.map((b) => b[1])), Math.max(...cb.map((b) => b[2])), Math.max(...cb.map((b) => b[3]))]
+      : fitColumn(ink, w, h, hint, !!hints[i]);
     // 没有模型给的框时列宽是猜的，估算不可信，不做判断
-    const expect = hints[i] ? estimateCount(colBox) : 0;
+    const expect = !cb && hints[i] ? estimateCount(colBox) : 0;
     // 模型这一列的字数远少于图上的字数（漏字/几个字并成一个）：
     // 若还按字数平分整列，一个格子会盖住好几个字。改按估算的字距从上往下排，
     // 前面的字至少落在各自的位置上，缺的部分留空，并在界面上提示这一列字数对不上。
     const severeShort = expect >= 3 && chars.length <= expect * 0.6 && expect - chars.length >= 2;
-    const cells = severeShort ? pitchCells(colBox, chars.length, expect) : splitCells(ink, w, colBox, chars.length);
+    const cells = cb ? cb : severeShort ? pitchCells(colBox, chars.length, expect) : splitCells(ink, w, colBox, chars.length);
     const un = uncertain.filter((u) => u.col === i);
     out.push({
       id: i,
