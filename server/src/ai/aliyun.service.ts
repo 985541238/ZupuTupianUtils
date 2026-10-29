@@ -459,15 +459,36 @@ export class AliyunService {
    * 准备发给模型的输入图（JPEG）。长边默认 ≤ 3072；硅基流动的 Qwen-Image-Edit 只按约 100 万像素出图，
    * 传 2048 已足够，请求体小、上传快、不易超时。width/height 始终是原图（裁剪后）的真实尺寸。
    */
-  private async prepareInput(imagePath: string, maxSide = 3072) {
-    const buf = await sharp(imagePath, { failOn: 'none' })
+  private async prepareInput(imagePath: string, maxSide = 3072, maxRatio = 0) {
+    let buf = await sharp(imagePath, { failOn: 'none' })
       .rotate()
       .flatten({ background: '#ffffff' })
       .resize({ width: maxSide, height: maxSide, fit: 'inside', withoutEnlargement: true })
       .jpeg({ quality: 90 })
       .toBuffer();
     const meta = await sharp(imagePath, { failOn: 'none' }).rotate().metadata();
-    return { buf, width: meta.width || 0, height: meta.height || 0 };
+    // 有的平台（火山方舟）要求输入图宽高比在 1/3～3 之内。太细长的图（单列裁剪等）四周补白边再发，
+    // 出图后再把白边裁掉，位置不变。
+    let pad: { left: number; top: number; w: number; h: number; fullW: number; fullH: number } | null = null;
+    if (maxRatio > 0) {
+      const m = await sharp(buf).metadata();
+      const bw = m.width || 1;
+      const bh = m.height || 1;
+      const r = bw / bh;
+      if (r > maxRatio * 0.98 || r < 1 / (maxRatio * 0.98)) {
+        const target = maxRatio * 0.9;
+        const fullW = r < 1 ? Math.ceil(bh / target) : bw;
+        const fullH = r < 1 ? bh : Math.ceil(bw / target);
+        const left = Math.floor((fullW - bw) / 2);
+        const top = Math.floor((fullH - bh) / 2);
+        buf = await sharp(buf)
+          .extend({ left, right: fullW - bw - left, top, bottom: fullH - bh - top, background: '#ffffff' })
+          .jpeg({ quality: 90 })
+          .toBuffer();
+        pad = { left, top, w: bw, h: bh, fullW, fullH };
+      }
+    }
+    return { buf, width: meta.width || 0, height: meta.height || 0, pad };
   }
 
   /** 平台要求公网链接时：把输入图放到 OUTPUT_ROOT/_ai_input，并生成带签名、30 分钟有效的链接 */
@@ -494,7 +515,8 @@ export class AliyunService {
     model: AiModel,
   ): Promise<{ usage: Usage; width: number; height: number }> {
     const preCfg = this.mock ? null : await this.assertReady(model);
-    const input = await this.prepareInput(imagePath, preCfg && this.imagePlatform(preCfg) === 'siliconflow' ? 2048 : 3072);
+    const prePlatform = preCfg ? this.imagePlatform(preCfg) : null;
+    const input = await this.prepareInput(imagePath, prePlatform === 'siliconflow' ? 2048 : 3072, prePlatform === 'ark' ? 3 : 0);
     if (this.mock) {
       // 模拟：灰度 + 拉伸对比，模拟「白底黑字」
       fs.mkdirSync(path.dirname(outPath), { recursive: true });
@@ -510,7 +532,9 @@ export class AliyunService {
     const prompt = (model.prompt || DEFAULT_CLEAN_PROMPT).trim();
     const url = this.imageEditEndpoint(platform, cfg);
     const size =
-      platform === 'siliconflow' ? siliconflowSize(model.model, input.width, input.height) : this.outputSize(platform, input.width, input.height);
+      platform === 'siliconflow'
+        ? siliconflowSize(model.model, input.width, input.height)
+        : this.outputSize(platform, input.pad ? input.pad.fullW : input.width, input.pad ? input.pad.fullH : input.height);
 
     let published: { url: string; file: string } | null = null;
     let image: string;
@@ -578,12 +602,20 @@ export class AliyunService {
           cfg.timeoutSec * 1000,
         );
       let res = await post();
-      // 平台不接受自动算出的尺寸时，去掉尺寸再试一次（按模型默认出图，结果仍会缩放回原图尺寸）
+      // 平台不接受参数时，逐步简化再试（每一步只在 400 时才继续；被拒绝的请求不出图、不扣费）：
+      // 1) 去掉尺寸，按模型默认出图（结果仍会缩放回原图尺寸）
+      // 2) 方舟：再去掉 sequential_image_generation / response_format / stream 等可选字段，只留 model、prompt、image
       if (res.status === 400 && (body.image_size || body.size || body.parameters?.size)) {
         this.logger.warn(`${platform} 不接受尺寸 ${size}，去掉尺寸重试`);
         delete body.image_size;
         delete body.size;
         if (body.parameters) delete body.parameters.size;
+        res = await post();
+      }
+      if (res.status === 400 && platform === 'ark') {
+        const detail = await res.clone().text().catch(() => '');
+        this.logger.warn(`ark 400，改用最简参数重试：${detail.slice(0, 300)}`);
+        body = { model: model.model, prompt, image, watermark: false };
         res = await post();
       }
       if (!res.ok) throw await this.httpError(res, platform);
@@ -628,11 +660,31 @@ export class AliyunService {
         }
         // 结果缩放到与输入相同的像素尺寸（拉伸对齐，不加白边），后续保真合成再精确对齐到原图
         fs.mkdirSync(path.dirname(outPath), { recursive: true });
-        await sharp(buf, { failOn: 'none' })
-          .flatten({ background: '#ffffff' })
-          .resize(input.width, input.height, { fit: 'fill' })
-          .png()
-          .toFile(outPath);
+        if (input.pad) {
+          // 先按补白后的整图比例对齐，再把白边裁掉
+          const pd = input.pad;
+          const sx = input.width / pd.w;
+          const full = await sharp(buf, { failOn: 'none' })
+            .flatten({ background: '#ffffff' })
+            .resize(Math.round(pd.fullW * sx), Math.round(pd.fullH * sx), { fit: 'fill' })
+            .png()
+            .toBuffer();
+          await sharp(full)
+            .extract({
+              left: Math.min(Math.round(pd.left * sx), Math.round(pd.fullW * sx) - input.width),
+              top: Math.min(Math.round(pd.top * sx), Math.round(pd.fullH * sx) - input.height),
+              width: input.width,
+              height: input.height,
+            })
+            .png()
+            .toFile(outPath);
+        } else {
+          await sharp(buf, { failOn: 'none' })
+            .flatten({ background: '#ffffff' })
+            .resize(input.width, input.height, { fit: 'fill' })
+            .png()
+            .toFile(outPath);
+        }
       } catch (e: any) {
         const err = new AiChargedError((e?.message || String(e)) + '（模型已出图并计费）');
         (err as any).images = images;
