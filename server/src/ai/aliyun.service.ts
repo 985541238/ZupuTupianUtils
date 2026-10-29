@@ -542,11 +542,11 @@ export class AliyunService {
         if (!img.ok) throw new Error('下载模型结果图失败：HTTP ' + img.status);
         buf = Buffer.from(await img.arrayBuffer());
       }
-      // 结果缩放到与输入相同的像素尺寸（不变形：比例不同时用白边补齐），便于与原图逐像素对照
+      // 结果缩放到与输入相同的像素尺寸（拉伸对齐，不加白边），后续保真合成再精确对齐到原图
       fs.mkdirSync(path.dirname(outPath), { recursive: true });
       await sharp(buf, { failOn: 'none' })
         .flatten({ background: '#ffffff' })
-        .resize(input.width, input.height, { fit: 'contain', background: '#ffffff' })
+        .resize(input.width, input.height, { fit: 'fill' })
         .png()
         .toFile(outPath);
       const images =

@@ -271,6 +271,60 @@ export class ImageProcessService {
     });
   }
 
+  /**
+   * 大模型结果「保真合成」（scripts/ai_fuse.py）：笔画全部取自原图，模型结果只用来区分字和污渍。
+   * 返回 ok=false 表示模型结果与原图版面对不上（改了字/版式、丢了内容），不应采用。
+   */
+  async fuseAiResult(
+    originalPath: string,
+    aiRawPath: string,
+    outPath: string,
+  ): Promise<{ ok: boolean; recall?: number; coverage?: number; dropped?: number; error?: string }> {
+    const bin = await this.detectPython();
+    if (!bin) throw new Error('服务器缺少 Python OpenCV，无法对大模型结果做保真合成（不会改字的处理方式），请先安装 opencv-python');
+    // 按 EXIF 摆正后再比对（OpenCV 读图不处理 EXIF 方向）
+    const tmpOrig = outPath.replace(/\.png$/i, '') + '_orig_tmp.png';
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    await sharp(originalPath, { failOn: 'none' }).rotate().flatten({ background: '#ffffff' }).png().toFile(tmpOrig);
+    const script = path.join(__dirname, '..', '..', 'scripts', 'ai_fuse.py');
+    try {
+      return await new Promise((resolve, reject) => {
+        const child = spawn(bin, [script, '--orig', tmpOrig, '--ai', aiRawPath, '--out', outPath], {
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let stdout = '';
+        let stderr = '';
+        const timer = setTimeout(() => {
+          try {
+            child.kill('SIGKILL');
+          } catch {}
+          reject(new Error('保真合成超时'));
+        }, 180000);
+        child.stdout.on('data', (d) => (stdout += d.toString()));
+        child.stderr.on('data', (d) => (stderr += d.toString()));
+        child.on('error', (e) => {
+          clearTimeout(timer);
+          reject(e);
+        });
+        child.on('close', () => {
+          clearTimeout(timer);
+          try {
+            const meta = JSON.parse(stdout.trim().split(/\r?\n/).filter(Boolean).pop() || '{}');
+            if (meta.ok || meta.error === 'mismatch') resolve(meta);
+            else reject(new Error('保真合成失败：' + (meta.error || stderr || stdout)));
+          } catch {
+            reject(new Error('保真合成失败：' + (stderr || stdout)));
+          }
+        });
+      });
+    } finally {
+      try {
+        fs.unlinkSync(tmpOrig);
+      } catch {}
+    }
+  }
+
   async processToFile(
     sourcePath: string,
     outPath: string,

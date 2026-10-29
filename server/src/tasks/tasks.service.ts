@@ -26,6 +26,9 @@ import { getPlatformDef } from '../settings/platforms';
 
 const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp']);
 
+/** 大模型结果与原图版面对不上（改字、挪位置、丢内容），不采用 */
+export class AiMismatchError extends Error {}
+
 @Injectable()
 export class TasksService implements OnModuleInit {
   private readonly logger = new Logger(TasksService.name);
@@ -371,7 +374,14 @@ export class TasksService implements OnModuleInit {
             await this.images.save(img);
 
             if (cleanModel) {
-              await this.aiProcessOne(task, img, cleanModel, true);
+              try {
+                await this.aiProcessOne(task, img, cleanModel, true);
+              } catch (e) {
+                if (!(e instanceof AiMismatchError)) throw e;
+                // 模型改了字/版式：不采用，本页改用算法处理，保证不改字
+                this.logger.warn(`Task ${taskId} image ${img.id}: ${e.message}，改用算法处理`);
+                await this.algoProcessOne(task, img, defaults);
+              }
             } else {
               await this.algoProcessOne(task, img, defaults);
             }
@@ -530,22 +540,39 @@ export class TasksService implements OnModuleInit {
       }
     }
     const resultPath = this.aiPath(task, img);
+    const rawPath = resultPath.replace(/\.png$/i, '') + '_raw.png';
     const thumbPath = this.thumbPath(task, img);
     const started = Date.now();
     try {
       let usage;
       try {
-        ({ usage } = await this.aliyun.cleanImage(input, resultPath, model));
+        ({ usage } = await this.aliyun.cleanImage(input, rawPath, model));
       } catch (e) {
         if (!retry || e instanceof AiConfigError) throw e;
         this.logger.warn(`AI 图片处理失败，重试一次 image=${img.id}: ${(e as any)?.message || e}`);
         await new Promise((r) => setTimeout(r, 3000));
-        ({ usage } = await this.aliyun.cleanImage(input, resultPath, model));
+        ({ usage } = await this.aliyun.cleanImage(input, rawPath, model));
       }
-      await this.processor.makeThumb(resultPath, thumbPath);
+      // 模型已出图即已扣费，先记账
       const cost = this.settings.toCny(model, this.aliyun.cost(model, usage)) ?? 0;
       img.cleanCost = String((Number(img.cleanCost || 0) || 0) + cost);
       task.actualCost = String((Number(task.actualCost || 0) || 0) + cost);
+
+      // 保真合成：笔画全部取自原图，模型结果只用来区分字和污渍（AI_FUSE=0 时直接用模型原图）
+      if (process.env.AI_FUSE === '0') {
+        fs.copyFileSync(rawPath, resultPath);
+      } else {
+        const fuse = await this.processor.fuseAiResult(input, rawPath, resultPath);
+        this.logger.log(`AI 保真合成 image=${img.id} ${JSON.stringify(fuse)}`);
+        if (!fuse.ok) {
+          throw new AiMismatchError(
+            `大模型这次改动了版面或文字（与原图对不上），为保证不改字，没有采用它的结果` +
+              (cost ? `（本次已产生费用 ¥${cost.toFixed(2)}）` : '') +
+              '。可以再试一次，或换一个图片处理模型。',
+          );
+        }
+      }
+      await this.processor.makeThumb(resultPath, thumbPath);
       img.aiResultPath = resultPath;
       img.aiModelId = Number(model.id);
       img.resultPath = resultPath;
@@ -641,7 +668,19 @@ export class TasksService implements OnModuleInit {
       img.algoResultPath = img.resultPath;
     }
     const costBefore = Number(img.cleanCost || 0) || 0;
-    await this.aiProcessOne(task, img, model, false);
+    try {
+      await this.aiProcessOne(task, img, model, false);
+    } catch (e) {
+      if (e instanceof AiMismatchError) {
+        // 结果没采用，但模型已出图扣费：费用照记，页面保持原样
+        const spent = (Number(img.cleanCost || 0) || 0) - costBefore;
+        if (spent > 0) {
+          await this.images.update({ id: img.id }, { cleanCost: img.cleanCost });
+          await this.tasks.increment({ id: task.id }, 'actualCost', spent);
+        }
+      }
+      throw e;
+    }
     await this.images.save(img);
     // 只累加费用，不整行保存 task，避免覆盖整本处理中的进度
     const delta = (Number(img.cleanCost || 0) || 0) - costBefore;
