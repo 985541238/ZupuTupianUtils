@@ -275,6 +275,15 @@ export class ImageProcessService {
    * 大模型结果「保真合成」（scripts/ai_fuse.py）：笔画全部取自原图，模型结果只用来区分字和污渍。
    * 返回 ok=false 表示模型结果与原图版面对不上（改了字/版式、丢了内容），不应采用。
    */
+  /** 大模型处理前检查（不花钱）：保真合成需要 Python OpenCV，缺了就别去调模型，免得出了图也用不上 */
+  async assertFusionReady(): Promise<void> {
+    if (process.env.AI_FUSE === '0') return;
+    const bin = await this.detectPython();
+    if (!bin) throw new Error('服务器缺少 Python OpenCV（opencv-python），大模型结果无法做保真合成。请先安装后再用大模型处理（本次未调用模型、未计费）');
+    const script = path.join(__dirname, '..', '..', 'scripts', 'ai_fuse.py');
+    if (!fs.existsSync(script)) throw new Error('缺少保真合成脚本 scripts/ai_fuse.py，请重新部署（本次未调用模型、未计费）');
+  }
+
   async fuseAiResult(
     originalPath: string,
     aiRawPath: string,

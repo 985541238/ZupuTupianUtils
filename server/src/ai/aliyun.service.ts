@@ -54,6 +54,9 @@ export class AiConfigError extends Error {
   }
 }
 
+/** 模型已经出图（已扣费）之后才发生的错误：不能自动重试，否则会重复扣费 */
+export class AiChargedError extends Error {}
+
 /** 把平台的报错翻译成普通用户能看懂、知道下一步怎么做的话 */
 export function classifyAiError(status: number, code: string, rawMsg: string, platform: string | null): Error {
   const name = getPlatformDef(platform)?.name || '模型平台';
@@ -398,12 +401,15 @@ export class AliyunService {
     return `${round(w * scale)}${sep}${round(h * scale)}`;
   }
 
-  /** 准备发给模型的输入图：长边 ≤ 3072 的 JPEG */
-  private async prepareInput(imagePath: string) {
+  /**
+   * 准备发给模型的输入图（JPEG）。长边默认 ≤ 3072；硅基流动的 Qwen-Image-Edit 只按约 100 万像素出图，
+   * 传 2048 已足够，请求体小、上传快、不易超时。width/height 始终是原图（裁剪后）的真实尺寸。
+   */
+  private async prepareInput(imagePath: string, maxSide = 3072) {
     const buf = await sharp(imagePath, { failOn: 'none' })
       .rotate()
       .flatten({ background: '#ffffff' })
-      .resize({ width: 3072, height: 3072, fit: 'inside', withoutEnlargement: true })
+      .resize({ width: maxSide, height: maxSide, fit: 'inside', withoutEnlargement: true })
       .jpeg({ quality: 90 })
       .toBuffer();
     const meta = await sharp(imagePath, { failOn: 'none' }).rotate().metadata();
@@ -433,14 +439,15 @@ export class AliyunService {
     outPath: string,
     model: AiModel,
   ): Promise<{ usage: Usage; width: number; height: number }> {
-    const input = await this.prepareInput(imagePath);
+    const preCfg = this.mock ? null : await this.assertReady(model);
+    const input = await this.prepareInput(imagePath, preCfg && this.imagePlatform(preCfg) === 'siliconflow' ? 2048 : 3072);
     if (this.mock) {
       // 模拟：灰度 + 拉伸对比，模拟「白底黑字」
       fs.mkdirSync(path.dirname(outPath), { recursive: true });
       await sharp(imagePath, { failOn: 'none' }).rotate().grayscale().normalise().threshold(150).png().toFile(outPath);
       return { usage: { tokensIn: 0, tokensOut: 0, images: 1 }, width: input.width, height: input.height };
     }
-    const cfg = await this.assertReady(model);
+    const cfg = preCfg!;
     const platform = this.imagePlatform(cfg);
     const def = getPlatformDef(platform);
     if (def && !def.imageEdit.supported) {
@@ -494,8 +501,8 @@ export class AliyunService {
         body = { model: model.model, prompt, images: [image], revise: 0, logo_add: 0, ...(size ? { size } : {}) };
         break;
       case 'siliconflow':
-        // image 必须是单个字符串；Qwen-Image-Edit 不传 image_size，按原图比例出图
-        body = { model: model.model, prompt, negative_prompt: NEGATIVE_PROMPT, image, batch_size: 1, ...(size ? { image_size: size } : {}) };
+        // 字段均按官方文档：image 必须是单个字符串（Data URL）；image_size 按原图比例自动选，平台不接受会去掉重试
+        body = { model: model.model, prompt, negative_prompt: NEGATIVE_PROMPT, image, ...(size ? { image_size: size } : {}) };
         break;
     }
 
@@ -543,24 +550,40 @@ export class AliyunService {
           JSON.stringify(Object.keys(data || {})),
         );
       }
-      let buf: Buffer;
-      // 硅基流动等平台的结果链接只在短时间内有效，这里拿到就立即下载保存
-      if (/^data:image\//i.test(imageUrl)) {
-        buf = Buffer.from(imageUrl.replace(/^data:image\/[^;]+;base64,/i, ''), 'base64');
-      } else {
-        const img = await this.fetchWithTimeout(imageUrl, {}, cfg.timeoutSec * 1000);
-        if (!img.ok) throw new Error('下载模型结果图失败：HTTP ' + img.status);
-        buf = Buffer.from(await img.arrayBuffer());
-      }
-      // 结果缩放到与输入相同的像素尺寸（拉伸对齐，不加白边），后续保真合成再精确对齐到原图
-      fs.mkdirSync(path.dirname(outPath), { recursive: true });
-      await sharp(buf, { failOn: 'none' })
-        .flatten({ background: '#ffffff' })
-        .resize(input.width, input.height, { fit: 'fill' })
-        .png()
-        .toFile(outPath);
+      // ---- 到这里平台已出图、已扣费。之后的任何失败都标成 AiChargedError，调用方不得再自动重调模型
       const images =
         Number(data?.usage?.generated_images || data?.usage?.image_count || data?.usage?.output_image_count) || 1;
+      try {
+        let buf: Buffer | null = null;
+        // 硅基流动等平台的结果链接只在短时间内有效，这里拿到就立即下载保存；下载失败只重试下载，不重调模型
+        if (/^data:image\//i.test(imageUrl)) {
+          buf = Buffer.from(imageUrl.replace(/^data:image\/[^;]+;base64,/i, ''), 'base64');
+        } else {
+          let lastErr = '';
+          for (let i = 0; i < 3 && !buf; i++) {
+            try {
+              const img = await this.fetchWithTimeout(imageUrl, {}, 120 * 1000);
+              if (img.ok) buf = Buffer.from(await img.arrayBuffer());
+              else lastErr = 'HTTP ' + img.status;
+            } catch (e: any) {
+              lastErr = e?.message || String(e);
+            }
+            if (!buf && i < 2) await new Promise((r) => setTimeout(r, 2000 * (i + 1)));
+          }
+          if (!buf) throw new Error('下载模型结果图失败（' + lastErr + '）');
+        }
+        // 结果缩放到与输入相同的像素尺寸（拉伸对齐，不加白边），后续保真合成再精确对齐到原图
+        fs.mkdirSync(path.dirname(outPath), { recursive: true });
+        await sharp(buf, { failOn: 'none' })
+          .flatten({ background: '#ffffff' })
+          .resize(input.width, input.height, { fit: 'fill' })
+          .png()
+          .toFile(outPath);
+      } catch (e: any) {
+        const err = new AiChargedError((e?.message || String(e)) + '（模型已出图并计费）');
+        (err as any).images = images;
+        throw err;
+      }
       return { usage: { tokensIn: 0, tokensOut: 0, images }, width: input.width, height: input.height };
     } finally {
       if (published) {

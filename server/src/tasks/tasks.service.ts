@@ -9,6 +9,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as fs from 'fs';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import * as path from 'path';
 import sharp from 'sharp';
 import archiver from 'archiver';
@@ -21,7 +22,7 @@ import {
   CropBox,
 } from './image-process.service';
 import { SettingsService } from '../settings/settings.service';
-import { AliyunService, AiConfigError } from '../ai/aliyun.service';
+import { AliyunService, AiConfigError, AiChargedError } from '../ai/aliyun.service';
 import { AiModel } from '../settings/ai-model.entity';
 import { getPlatformDef } from '../settings/platforms';
 
@@ -286,6 +287,11 @@ export class TasksService implements OnModuleInit {
           errorCode: 'model:',
         });
       }
+      try {
+        await this.processor.assertFusionReady();
+      } catch (e: any) {
+        throw new BadRequestException({ message: e?.message || String(e), errorCode: 'config:' });
+      }
       const creds = await this.settings.resolveCredentials(m);
       if (!creds.apiKey) {
         throw new BadRequestException({
@@ -545,22 +551,50 @@ export class TasksService implements OnModuleInit {
     }
     const resultPath = this.aiPath(task, img);
     const rawPath = resultPath.replace(/\.png$/i, '') + '_raw.png';
+    const markPath = rawPath + '.json';
     const thumbPath = this.thumbPath(task, img);
     const started = Date.now();
     try {
-      let usage;
+      // 先做不花钱的检查：合成环境不全就不去调模型
+      await this.processor.assertFusionReady();
+
+      // 上次模型已出图（已付费）但后续步骤没做完：直接复用那张图，不再重复付费
+      const key = this.aiInputKey(input, model);
+      let reused = false;
       try {
-        ({ usage } = await this.aliyun.cleanImage(input, rawPath, model));
-      } catch (e) {
-        if (!retry || e instanceof AiConfigError) throw e;
-        this.logger.warn(`AI 图片处理失败，重试一次 image=${img.id}: ${(e as any)?.message || e}`);
-        await new Promise((r) => setTimeout(r, 3000));
-        ({ usage } = await this.aliyun.cleanImage(input, rawPath, model));
+        const mark = JSON.parse(fs.readFileSync(markPath, 'utf8'));
+        reused = mark?.key === key && mark?.state === 'raw' && fs.existsSync(rawPath);
+      } catch {}
+
+      let cost = 0;
+      if (reused) {
+        this.logger.log(`复用上次已付费的大模型出图 image=${img.id}`);
+      } else {
+        let usage;
+        try {
+          ({ usage } = await this.aliyun.cleanImage(input, rawPath, model));
+        } catch (e) {
+          if (e instanceof AiChargedError) {
+            // 模型已出图计费，但下载/保存失败：费用照记，不重试（重试会再扣一次）
+            const c = this.settings.toCny(model, this.aliyun.cost(model, { tokensIn: 0, tokensOut: 0, images: (e as any).images || 1 })) ?? 0;
+            img.cleanCost = String((Number(img.cleanCost || 0) || 0) + c);
+            task.actualCost = String((Number(task.actualCost || 0) || 0) + c);
+            throw e;
+          }
+          // 只有模型还没出图的失败（网络、超时、平台 5xx）才自动重试一次；配置问题不重试
+          if (!retry || e instanceof AiConfigError) throw e;
+          this.logger.warn(`AI 图片处理失败（未出图），重试一次 image=${img.id}: ${(e as any)?.message || e}`);
+          await new Promise((r) => setTimeout(r, 3000));
+          ({ usage } = await this.aliyun.cleanImage(input, rawPath, model));
+        }
+        // 模型已出图即已扣费，先记账，并记下这张图可复用
+        cost = this.settings.toCny(model, this.aliyun.cost(model, usage)) ?? 0;
+        img.cleanCost = String((Number(img.cleanCost || 0) || 0) + cost);
+        task.actualCost = String((Number(task.actualCost || 0) || 0) + cost);
+        try {
+          fs.writeFileSync(markPath, JSON.stringify({ key, state: 'raw', at: Date.now() }));
+        } catch {}
       }
-      // 模型已出图即已扣费，先记账
-      const cost = this.settings.toCny(model, this.aliyun.cost(model, usage)) ?? 0;
-      img.cleanCost = String((Number(img.cleanCost || 0) || 0) + cost);
-      task.actualCost = String((Number(task.actualCost || 0) || 0) + cost);
 
       // 保真合成：笔画全部取自原图，模型结果只用来区分字和污渍（AI_FUSE=0 时直接用模型原图）
       if (process.env.AI_FUSE === '0') {
@@ -569,6 +603,8 @@ export class TasksService implements OnModuleInit {
         const fuse = await this.processor.fuseAiResult(input, rawPath, resultPath);
         this.logger.log(`AI 保真合成 image=${img.id} ${JSON.stringify(fuse)}`);
         if (!fuse.ok) {
+          // 这张图对不上，下次要重新出图，不能复用
+          this.writeAiMark(markPath, key, 'mismatch');
           throw new AiMismatchError(
             `大模型这次画出的页面和原图大部分对不上（重画了版面或丢了内容），为保证不改字，没有采用它的结果` +
               (cost ? `（本次已产生费用 ¥${cost.toFixed(2)}）` : '') +
@@ -576,6 +612,7 @@ export class TasksService implements OnModuleInit {
           );
         }
       }
+      this.writeAiMark(markPath, key, 'done');
       await this.processor.makeThumb(resultPath, thumbPath);
       img.aiResultPath = resultPath;
       img.aiModelId = Number(model.id);
@@ -621,6 +658,11 @@ export class TasksService implements OnModuleInit {
         message: `还没有填写${this.platformName(creds.platform)}的 API Key。请到「模型配置」点「引导配置」按步骤填写。`,
         errorCode: 'auth:' + (creds.platform || ''),
       });
+    }
+    try {
+      await this.processor.assertFusionReady();
+    } catch (e: any) {
+      throw new BadRequestException({ message: e?.message || String(e), errorCode: 'config:' });
     }
     const job: { state: 'running' | 'done' | 'failed'; startedAt: number; finishedAt?: number; error?: string; errorCode?: string; result?: any } = {
       state: 'running',
@@ -675,8 +717,8 @@ export class TasksService implements OnModuleInit {
     try {
       await this.aiProcessOne(task, img, model, false);
     } catch (e) {
-      if (e instanceof AiMismatchError) {
-        // 结果没采用，但模型已出图扣费：费用照记，页面保持原样
+      {
+        // 不管哪种失败，只要模型已出图扣费，费用都照记；页面保持原样
         const spent = (Number(img.cleanCost || 0) || 0) - costBefore;
         if (spent > 0) {
           await this.images.update({ id: img.id }, { cleanCost: img.cleanCost });
@@ -738,6 +780,24 @@ export class TasksService implements OnModuleInit {
 
   private algoPath(task: Task, img: TaskImage) {
     return path.join(task.outputFolder, 'results', this.safeName(img.fileName) + '.png');
+  }
+
+  /** 大模型输入指纹：同一张（裁剪后）图 + 同一模型 + 同一提示词才复用已付费的出图 */
+  private aiInputKey(input: string, model: AiModel): string {
+    const h = crypto.createHash('sha1');
+    try {
+      h.update(fs.readFileSync(input));
+    } catch {
+      h.update(input);
+    }
+    h.update('|' + (model.platform || '') + '|' + model.model + '|' + (model.prompt || ''));
+    return h.digest('hex');
+  }
+
+  private writeAiMark(markPath: string, key: string, state: 'raw' | 'mismatch' | 'done') {
+    try {
+      fs.writeFileSync(markPath, JSON.stringify({ key, state, at: Date.now() }));
+    } catch {}
   }
 
   private aiPath(task: Task, img: TaskImage) {
