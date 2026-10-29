@@ -367,7 +367,47 @@ def rescue_faint(mask: np.ndarray, d: np.ndarray, t_low: float, stroke_w: float,
     return mask | resc, resc, info
 
 
-def render(d: np.ndarray, mask: np.ndarray, t_low: float, stroke_w: float, p: InkParams, rescued: np.ndarray | None = None) -> np.ndarray:
+def soft_faint_layer(mask: np.ndarray, d: np.ndarray, t_low: float, stroke_w: float, dirty: bool) -> np.ndarray | None:
+    """字旁边的细淡笔画：不按硬阈值二值化（那样一笔会碎成几段、半个字），
+    而是保留它们的灰度形状，再整体加深。返回 0~1 的墨色浓度（只在字附近有值）。
+
+    - 噪声底：远离字的纸面上 d 的高位，淡笔画必须高于它，纸面颗粒不会被带出来；
+    - 只取和已有笔画相连（或紧挨着，1.5 笔宽内）的部分，孤立的淡斑不要；
+    - 脏页（远离字的淡块多）不启用。
+    """
+    if dirty or mask.sum() < 500:
+        return None
+    sw = max(stroke_w, 1.5)
+    r_far = int(round(4.0 * sw)) | 1
+    far = ~cv2.dilate(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (r_far, r_far))).astype(bool)
+    vals = d[far]
+    if vals.size < 2000:
+        return None
+    # 纸面颗粒的高位（用 95 分位：远处的书口线、黑框等少数极端值不应把底线抬高）
+    noise = float(np.percentile(vals, 95.0))
+    f0 = float(np.clip(noise * 1.6, 0.04, max(0.05, t_low * 0.55)))
+    top = max(t_low * 0.95, f0 + 0.03)
+    # 已认定的笔画四周 2 像素是它自己的模糊边缘，不算「淡笔画」：否则深色笔画会被描粗
+    halo = cv2.dilate(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))).astype(bool)
+    cand = (d > f0) & ~halo
+    r_near = int(round(1.5 * sw)) | 1
+    near = cv2.dilate(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (r_near, r_near))).astype(bool)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(cand.astype(np.uint8), connectivity=8)
+    if n <= 1:
+        return None
+    touch = np.bincount(lab.ravel(), near.ravel().astype(np.float64), n) > 0
+    area = st[:, cv2.CC_STAT_AREA]
+    ok = touch & (area >= max(4, 0.3 * sw * sw)) & (area <= 60 * sw * sw)
+    ok[0] = False
+    # 限制在字附近，避免沿着字边一路长出去
+    r_zone = int(round(7.0 * sw)) | 1
+    zone = cv2.dilate(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (r_zone, r_zone))).astype(bool)
+    keep = ok[lab] & zone
+    tone = np.clip((d - f0) / max(top - f0, 1e-3), 0.0, 1.0) ** 0.7
+    return np.where(keep, tone, 0.0).astype(np.float32)
+
+
+def render(d: np.ndarray, mask: np.ndarray, t_low: float, stroke_w: float, p: InkParams, rescued: np.ndarray | None = None, soft: np.ndarray | None = None) -> np.ndarray:
     """掩膜外白纸；掩膜内连续墨色，边缘留抗锯齿。"""
     inside = d[mask]
     if inside.size < 16:
@@ -389,6 +429,9 @@ def render(d: np.ndarray, mask: np.ndarray, t_low: float, stroke_w: float, p: In
         rd = np.clip((d - 0.0) / max(t_low, 1e-3), 0.0, 1.0)
         tone = np.where(rescued, np.maximum(tone, 0.7 + 0.3 * rd), tone)
         region = region | cv2.dilate(rescued.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))).astype(bool)
+    if soft is not None:
+        tone = np.maximum(tone, soft)
+        region = region | (soft > 0)
     out = 255.0 * (1.0 - tone)
     out[~region] = 255.0
     # 掩膜内墨心不允许发灰
@@ -418,7 +461,8 @@ def extract(bgr: np.ndarray, p: InkParams) -> InkResult:
     mask, layer_info = split_stain_layer(mask, lum_med.astype(np.float32), sw, p)
     mask = filter_components(mask, d, sw, t_high, p)
     mask, rescued, faint_info = rescue_faint(mask, d, t_low, sw, p)
-    out = render(d, mask, t_low, sw, p, rescued)
+    soft = soft_faint_layer(mask, d, t_low, sw, bool(faint_info.get("faint_skipped_dirty")))
+    out = render(d, mask, t_low, sw, p, rescued, soft)
     return InkResult(
         image=out, mask=mask, darkness=d, scale=scale, stroke_width=sw, t_high=t_high, t_low=t_low,
         info={"stain_blobs": _blobs, **layer_info, **faint_info},
