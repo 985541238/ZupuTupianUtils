@@ -106,7 +106,7 @@ def _otsu01(values: np.ndarray) -> float:
     return float(t) / 255.0
 
 
-def hysteresis_mask(d: np.ndarray, p: InkParams) -> tuple[np.ndarray, float, float]:
+def hysteresis_mask(d: np.ndarray, p: InkParams, local_sw: float = 0.0) -> tuple[np.ndarray, float, float]:
     cand = d[d > 0.06]
     t = _otsu01(cand)
     sens = float(np.clip(p.sensitivity, 0.0, 1.0))
@@ -115,6 +115,21 @@ def hysteresis_mask(d: np.ndarray, p: InkParams) -> tuple[np.ndarray, float, flo
     t_low = float(np.clip(t_high * (0.62 - 0.22 * sens), 0.05, t_high - 0.02))
     strong = (d >= t_high).astype(np.uint8)
     weak = (d >= t_low).astype(np.uint8)
+    # 局部种子：整页统一的强阈值会让「整片都偏淡」的区域（复印不清的几列字）一个种子都没有，
+    # 这些字整块被丢掉。按局部（约 10 个笔宽的格子）墨色高位再补一层种子；
+    # 格子里本来就没什么墨（空白、纸张噪点）的不补。
+    if local_sw:
+        tile = int(max(24, 10 * local_sw))
+        h, w = d.shape
+        gh, gw = max(1, h // tile), max(1, w // tile)
+        small = cv2.resize(d, (gw * 2, gh * 2), interpolation=cv2.INTER_AREA) if gw * gh > 1 else d
+        # 局部高位：每个小格取块内 92 分位，用大一圈的最大值滤波平滑
+        blk = cv2.resize(d, (max(1, w // max(2, tile // 2)), max(1, h // max(2, tile // 2))), interpolation=cv2.INTER_AREA)
+        loc = cv2.dilate(blk, np.ones((3, 3), np.uint8))
+        loc = cv2.resize(loc, (w, h), interpolation=cv2.INTER_LINEAR)
+        ok_tile = loc >= 0.10
+        local_seed = (d >= np.maximum(0.62 * loc, 0.5 * t_high)) & ok_tile & (d >= t_low * 1.15)
+        strong = (strong.astype(bool) | local_seed).astype(np.uint8)
     n, labels = cv2.connectedComponents(weak, connectivity=8)
     has_seed = np.zeros(n, dtype=bool)
     has_seed[np.unique(labels[strong > 0])] = True
@@ -316,7 +331,43 @@ def split_stain_layer(mask: np.ndarray, lum: np.ndarray, stroke_w: float, p: Ink
     return out, info
 
 
-def render(d: np.ndarray, mask: np.ndarray, t_low: float, stroke_w: float, p: InkParams) -> np.ndarray:
+def rescue_faint(mask: np.ndarray, d: np.ndarray, t_low: float, stroke_w: float, p: InkParams) -> tuple[np.ndarray, np.ndarray, dict]:
+    """淡墨/复印不清的笔画补回并加深。
+
+    只在字旁边补：比正常阈值更淡、但紧贴着已认定的字（在 2.5 倍笔宽之内）的淡笔画才补回；
+    离字很远的淡块（污渍、透字）一概不补。整页如果有不少远离字的淡块（说明是脏页），整体不启用，
+    脏页的淡斑本来就不该留。补回来的笔画渲染时直接按深色处理，不会再是一团灰。
+    """
+    info = {"faint_rescued": 0}
+    sens = float(np.clip(p.sensitivity, 0.0, 1.0))
+    if mask.sum() < 500:
+        return mask, np.zeros_like(mask), info
+    t_vw = max(0.045, t_low * (0.62 - 0.15 * sens))
+    vw = (d >= t_vw)
+    near_r = int(round(2.5 * stroke_w)) | 1
+    near = cv2.dilate(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (near_r, near_r))).astype(bool)
+    n, lab, st, _ = cv2.connectedComponentsWithStats((vw & ~mask).astype(np.uint8), connectivity=8)
+    if n <= 1:
+        return mask, np.zeros_like(mask), info
+    area = st[:, cv2.CC_STAT_AREA].astype(np.float64)
+    flat = lab.ravel()
+    in_near = np.bincount(flat, weights=near.ravel().astype(np.float64), minlength=n) / np.maximum(area, 1)
+    cand = np.ones(n, bool)
+    cand[0] = False
+    cand &= area >= max(4.0, 0.3 * stroke_w * stroke_w)
+    cand &= area <= 40 * stroke_w * stroke_w
+    far = cand & (in_near < 0.2)
+    ok = cand & (in_near >= 0.5)
+    # 脏页判断：远离字的淡块面积占字面积的比例
+    if area[far].sum() > 0.35 * float(mask.sum()):
+        info["faint_skipped_dirty"] = True
+        return mask, np.zeros_like(mask), info
+    resc = ok[lab] & near
+    info["faint_rescued"] = int(ok.sum())
+    return mask | resc, resc, info
+
+
+def render(d: np.ndarray, mask: np.ndarray, t_low: float, stroke_w: float, p: InkParams, rescued: np.ndarray | None = None) -> np.ndarray:
     """掩膜外白纸；掩膜内连续墨色，边缘留抗锯齿。"""
     inside = d[mask]
     if inside.size < 16:
@@ -333,6 +384,11 @@ def render(d: np.ndarray, mask: np.ndarray, t_low: float, stroke_w: float, p: In
     tone = tone ** gamma
     s = tone * tone * (3.0 - 2.0 * tone)
     tone = (1.0 - sh) * tone + sh * s
+    if rescued is not None and rescued.any():
+        # 补回的淡笔画加深：按它自己的浓淡拉到 0.7~1 的墨色
+        rd = np.clip((d - 0.0) / max(t_low, 1e-3), 0.0, 1.0)
+        tone = np.where(rescued, np.maximum(tone, 0.7 + 0.3 * rd), tone)
+        region = region | cv2.dilate(rescued.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))).astype(bool)
     out = 255.0 * (1.0 - tone)
     out[~region] = 255.0
     # 掩膜内墨心不允许发灰
@@ -353,7 +409,7 @@ def extract(bgr: np.ndarray, p: InkParams) -> InkResult:
     lum = cv2.bilateralFilter(lum, 5, 18, 3)
     sw = estimate_stroke_width(lum)
     d = flat_field(lum, sw)
-    mask, t_high, t_low = hysteresis_mask(d, p)
+    mask, t_high, t_low = hysteresis_mask(d, p, sw)
     # 补一像素断笔
     mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))).astype(bool)
     lum_raw = luminance(work, p.stain)
@@ -361,8 +417,9 @@ def extract(bgr: np.ndarray, p: InkParams) -> InkResult:
     mask, _blobs = remove_stain_blobs(mask, lum_med, sw, p)
     mask, layer_info = split_stain_layer(mask, lum_med.astype(np.float32), sw, p)
     mask = filter_components(mask, d, sw, t_high, p)
-    out = render(d, mask, t_low, sw, p)
+    mask, rescued, faint_info = rescue_faint(mask, d, t_low, sw, p)
+    out = render(d, mask, t_low, sw, p, rescued)
     return InkResult(
         image=out, mask=mask, darkness=d, scale=scale, stroke_width=sw, t_high=t_high, t_low=t_low,
-        info={"stain_blobs": _blobs, **layer_info},
+        info={"stain_blobs": _blobs, **layer_info, **faint_info},
     )
