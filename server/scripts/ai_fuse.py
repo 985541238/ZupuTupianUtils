@@ -77,6 +77,52 @@ def glyph_mask(ink: np.ndarray) -> np.ndarray:
     return keep[lab]
 
 
+def stroke_width(ink: np.ndarray) -> float:
+    """笔画宽度（像素）：距离变换在笔画中轴上的值 ×2 的中位数"""
+    m = ink.astype(np.uint8)
+    if not m.any():
+        return 4.0
+    dt = cv2.distanceTransform(m, cv2.DIST_L2, 3)
+    ridge = (dt >= cv2.dilate(dt, np.ones((3, 3), np.uint8))) & (dt > 0.5)
+    v = dt[ridge]
+    return float(np.clip(np.median(v) * 2 if v.size else 4.0, 2.0, 40.0))
+
+
+def local_refine(o_ink: np.ndarray, a_ink: np.ndarray, grid: int = 8) -> np.ndarray:
+    """分块相位相关求局部位移（只用字多的块），中值平滑后插值成位移场，把模型笔画贴到原图笔画上"""
+    h, w = o_ink.shape
+    s = min(1.0, 1600.0 / max(h, w))
+    sw, sh = max(1, int(w * s)), max(1, int(h * s))
+    o = cv2.GaussianBlur(cv2.resize(o_ink.astype(np.float32), (sw, sh), interpolation=cv2.INTER_AREA), (0, 0), 1.5)
+    a = cv2.GaussianBlur(cv2.resize(a_ink.astype(np.float32), (sw, sh), interpolation=cv2.INTER_AREA), (0, 0), 1.5)
+    dx = np.zeros((grid, grid), np.float32)
+    dy = np.zeros((grid, grid), np.float32)
+    ok = np.zeros((grid, grid), bool)
+    win = np.float32(cv2.createHanningWindow((sw // grid, sh // grid), cv2.CV_32F))
+    for i in range(grid):
+        for j in range(grid):
+            ys, xs = sh * i // grid, sw * j // grid
+            to = o[ys : ys + sh // grid, xs : xs + sw // grid]
+            ta = a[ys : ys + sh // grid, xs : xs + sw // grid]
+            if to.shape != win.shape or ta.mean() < 0.02:
+                continue
+            (sx, sy), resp = cv2.phaseCorrelate(ta, to, win)
+            if resp > 0.08 and abs(sx) < sw / grid * 0.15 and abs(sy) < sh / grid * 0.15:
+                dx[i, j], dy[i, j], ok[i, j] = sx, sy, True
+    if not ok.any():
+        return a_ink
+    # 没有可靠估计的块用整体中位数补，再做中值平滑去掉个别离群
+    dx[~ok] = np.median(dx[ok])
+    dy[~ok] = np.median(dy[ok])
+    dx = cv2.medianBlur(dx, 3)
+    dy = cv2.medianBlur(dy, 3)
+    fx = cv2.resize(dx / s, (w, h), interpolation=cv2.INTER_CUBIC)
+    fy = cv2.resize(dy / s, (w, h), interpolation=cv2.INTER_CUBIC)
+    gx, gy = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    out = cv2.remap(a_ink.astype(np.uint8), gx - fx, gy - fy, cv2.INTER_NEAREST, borderValue=0)
+    return out
+
+
 def align(o_ink_s: np.ndarray, a_ink_s: np.ndarray) -> np.ndarray:
     """ECC 仿射对齐（小图上），失败或变换离谱时返回单位阵"""
     eye = np.eye(2, 3, dtype=np.float32)
@@ -153,7 +199,12 @@ def main() -> int:
     full = warp.copy()
     full[:, 2] /= s
     a_full = cv2.warpAffine(a_ink.astype(np.uint8), full, (w, h), flags=flags, borderValue=0)
-    gate = cv2.dilate(a_full, disk(max(3, round(min(h, w) * 0.005)))).astype(bool)
+    # 局部再对齐：大模型重画时各处会有几个像素的漂移，分块求位移再平滑成整幅位移场
+    a_full = local_refine(o_ink, a_full)
+    # 收紧容差：只在模型笔画外扩约 0.4 个笔宽的范围内保留原图深色。
+    # 容差过宽会把紧挨笔画的污渍一起留下，字就糊成黑块。
+    sw_px = stroke_width(a_full)
+    gate = cv2.dilate(a_full, disk(max(1, round(sw_px * 0.25)))).astype(bool)
     keep = o_ink & gate
 
     # 去掉孤立小点
