@@ -173,7 +173,6 @@ export const OcrTaskCenterView: React.FC<Props> = ({
 
   const submit = async (startAfter: boolean) => {
     if (!sourceId) return alert('请先选择一个图片处理任务');
-    if (!modelId) return alert('请先到「模型配置」添加并启用文字识别模型');
     if (dupTasks.length && !dupOk) return alert('这个图片处理任务已经建过 OCR 任务，请先勾选「我知道，仍要再建一个」');
     setCreating(true);
     try {
@@ -341,14 +340,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                               </span>
                             </>
                           ) : null}
-                          {task.ocrModelName ? (
-                            <>
-                              <span className="text-black/15">·</span>
-                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#AF52DE]/12 text-[#8944AB]" title="识别模型">
-                                {task.ocrModelName}
-                              </span>
-                            </>
-                          ) : null}
+
                           {formatProcessingTime(task.processingTimeMs) ? (
                             <>
                               <span className="text-black/15">·</span>
@@ -404,7 +396,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                               />
                             </div>
                             <p className="text-[11px] text-[#86868B] mt-1.5 leading-relaxed">
-                              大模型识别一页通常要 20～90 秒，多页同时进行。可以离开此页，完成后会提示；识别好的页面现在就能点「先去审阅」。
+                              识别一页通常要几秒到几十秒，多页同时进行。可以离开此页，完成后会提示；识别好的页面现在就能点「先去审阅」。
                             </p>
                           </div>
                         )}
@@ -466,7 +458,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                         <button
                           onClick={() => setRetryTask(task)}
                           className="h-10 px-4 text-sm font-semibold rounded-full bg-[#FF9500] hover:bg-[#F08C00] text-white shadow-[0_2px_8px_rgba(255,149,0,0.28)] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
-                          title="只重新识别失败的页（可换模型），已识别的不会重复收费"
+                          title="只重新识别失败的页，已识别的不会重复收费"
                         >
                           <RotateCcw className="w-3.5 h-3.5" />
                           <span>重试失败页（{task.failedCount}）</span>
@@ -637,7 +629,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                 <div>
                   <div className="flex items-center gap-2 mb-2.5">
                     <span className="w-5 h-5 rounded-full bg-[#0071E3] text-white text-[10px] font-bold flex items-center justify-center">2</span>
-                    <span className="text-sm font-semibold text-[#1D1D1F]">任务与模型</span>
+                    <span className="text-sm font-semibold text-[#1D1D1F]">任务与识别方式</span>
                   </div>
                   <div className="space-y-3">
                     <div>

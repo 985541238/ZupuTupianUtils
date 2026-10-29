@@ -29,6 +29,14 @@ export function inferErrorCode(msg?: string | null): string | null {
   return null;
 }
 
+const OCR_TITLES: Record<string, string> = {
+  arrears: '百度文字识别额度用完或欠费',
+  auth: '百度文字识别的 Key 不可用',
+  quota: '调用太频繁，被百度限流',
+  param: '百度文字识别不接受这张图片',
+  config: '还没有配置百度文字识别',
+};
+
 const TITLES: Record<string, string> = {
   arrears: '模型平台账户余额不足',
   auth: 'API Key 不可用',
@@ -70,7 +78,29 @@ export const AiProblemDialog: React.FC<{
   const taskId = problem.taskId;
 
   const actions: React.ReactNode[] = [];
-  if (kind === 'arrears') {
+  if (problem.kind === 'ocr') {
+    // OCR 只用百度文字识别：不引导到图片处理模型配置，只去「OCR 文字识别」页配 Key / 去百度控制台
+    const goOcr = (label: string, primaryBtn = true) => (
+      <button key="ocrcfg" type="button" className={primaryBtn ? primary : plain} onClick={() => onOpenSetup(null, 1)}>
+        {label}
+      </button>
+    );
+    const bce = (
+      <a key="bce" href="https://console.bce.baidu.com/ai/#/ai/ocr/overview/index" target="_blank" rel="noreferrer" className={plain}>
+        打开百度文字识别控制台 <ExternalLink className="w-3 h-3" />
+      </a>
+    );
+    const retry = (label: string) =>
+      taskId && onRetry ? (
+        <button key="retry" type="button" className={primary} onClick={() => onRetry(taskId)}>
+          {label}
+        </button>
+      ) : null;
+    if (kind === 'arrears') actions.push(bce, goOcr('检查 Key 配置', false), retry('我已充值，继续识别'));
+    else if (kind === 'auth' || kind === 'config') actions.push(bce, goOcr('去配置百度文字识别'));
+    else if (kind === 'quota') actions.push(retry('继续识别'));
+    else actions.push(retry('再试一次'), goOcr('查看百度文字识别配置', false));
+  } else if (kind === 'arrears') {
     if (p) {
       actions.push(
         <a key="pay" href={p.guide.billingUrl} target="_blank" rel="noreferrer" className={plain}>
@@ -127,7 +157,7 @@ export const AiProblemDialog: React.FC<{
 
   return (
     <AiModalShell
-      title={TITLES[kind] || TITLES.config}
+      title={(problem.kind === 'ocr' ? OCR_TITLES[kind] : TITLES[kind]) || (problem.kind === 'ocr' ? '百度文字识别出错' : TITLES.config)}
       subtitle={problem.taskName ? `任务「${problem.taskName}」已暂停，处理好原因后可继续，已处理好的页不会重复处理。` : undefined}
       onClose={onClose}
       z="z-[96]"

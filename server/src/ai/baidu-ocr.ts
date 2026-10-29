@@ -64,7 +64,7 @@ export async function getBaiduToken(apiKey: string, secretKey: string, force = f
   if (!j?.access_token) {
     const d = `${j?.error || ''} ${j?.error_description || ''}`.trim();
     throw new BaiduOcrError(
-      '百度文字识别的 API Key / Secret Key 不正确，换不到访问令牌。请到「模型配置 → 平台账号 → 百度智能云」检查「文字识别 API Key / Secret Key」（要用文字识别应用里的，不是千帆的 Key）。',
+      '百度文字识别的 API Key / Secret Key 不正确，换不到访问令牌。请到「模型配置 → OCR 文字识别」检查 API Key / Secret Key（要用文字识别应用里的，不是千帆的 Key）。',
       'auth',
       d,
     );

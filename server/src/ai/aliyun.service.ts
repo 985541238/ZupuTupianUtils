@@ -148,7 +148,7 @@ export class AliyunService {
     if (isBaiduOcrModel(model) && !this.mock) {
       const k = await this.baiduOcrKeys();
       if (!k.apiKey || !k.secretKey) {
-        throw new AiConfigError('还没有填写百度文字识别的 API Key / Secret Key。请到「模型配置 → 平台账号 → 百度智能云」填写「文字识别 API Key」和「文字识别 Secret Key」。', 'auth', 'baidu');
+        throw new AiConfigError('还没有填写百度文字识别的 API Key / Secret Key。请到「模型配置 → OCR 文字识别」按引导填写 API Key 和 Secret Key。', 'auth', 'baidu');
       }
     }
     const creds = await this.settings.resolveCredentials(model);
