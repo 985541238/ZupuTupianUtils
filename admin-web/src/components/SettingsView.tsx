@@ -45,7 +45,7 @@ type PlatformField = {
 type Platform = {
   code: string;
   name: string;
-  /** 聚合平台：默认展示；其余直连平台默认收起 */
+  /** 推荐平台（硅基流动）：默认展示；其余直连平台默认收起 */
   featured?: boolean;
   currency?: 'CNY' | 'USD';
   intro?: string;
@@ -355,7 +355,7 @@ function PlatformListCard({ platforms, onEdit }: { platforms: Platform[]; onEdit
         </div>
         <div className="min-w-0">
           <h3 className="text-sm font-semibold text-[#1D1D1F]">平台账号</h3>
-          <p className="text-[11px] text-[#86868B] truncate">推荐只配置聚合平台：一个 Key 就能用图片处理和文字识别的所有模型</p>
+          <p className="text-[11px] text-[#86868B] truncate">推荐只配置硅基流动：一个 Key 就能用图片处理和文字识别的模型</p>
         </div>
       </div>
       <div className="space-y-2">
@@ -456,7 +456,7 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
         null;
       setEditing({
         purpose,
-        platform: p?.code || 'dataeyes',
+        platform: p?.code || 'siliconflow',
         displayName: `图片处理-${p?.imageEdit.suggestedModels?.[0] || p?.name || ''}`,
         model: p?.imageEdit.suggestedModels?.[0] || '',
         priceImage: (() => {
@@ -914,19 +914,6 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
                     </button>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-semibold mb-1">美元汇率（1 美元 = ? 元）</label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        min={0.1}
-                        value={general.usdRate}
-                        onChange={(e) => setGeneral({ ...general, usdRate: Number(e.target.value) || 7.2 })}
-                        className={`${inputCls} font-mono`}
-                      />
-                      <p className="text-[11px] text-[#86868B] mt-1">DataEyes 等按美元计价的平台，费用按此折算成人民币显示</p>
-                    </div>
-                    <div />
                     <div>
                       <label className="block text-xs font-semibold mb-1">大模型同时处理页数</label>
                       <input

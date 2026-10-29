@@ -40,6 +40,10 @@ type StoredPlatform = {
   values?: Record<string, string>;
 };
 
+/** 硅基流动推荐模型（价格取自 siliconflow.cn/pricing，元；以平台实际为准） */
+const SF_CLEAN = { displayName: '图片处理-通义千问图片编辑', model: 'Qwen/Qwen-Image-Edit-2509', priceImage: '0.3' };
+const SF_OCR = { displayName: '识别-GLM-4.5V', model: 'zai-org/GLM-4.5V', priceIn: '0.001', priceOut: '0.006' };
+
 @Injectable()
 export class SettingsService implements OnModuleInit {
   private readonly logger = new Logger(SettingsService.name);
@@ -55,46 +59,22 @@ export class SettingsService implements OnModuleInit {
       await this.getGeneral(); // 载入汇率
     } catch {}
     try {
-      // 已有数据库：补上 DataEyes 的推荐模型（不改动已有默认，用户在引导配置或模型列表里切换）
-      if ((await this.models.count()) > 0 && (await this.models.count({ where: { platform: 'dataeyes' } })) === 0) {
-        await this.models.save([
-          this.models.create({
-            purpose: 'clean',
-            displayName: '图片处理-Seedream 5.0',
-            model: 'ByteDance-Seedream-5.0',
-            platform: 'dataeyes',
-            prompt: DEFAULT_CLEAN_PROMPT,
-            billing: 'image',
-            priceImage: '0.035',
-            isDefault: 0,
-            enabled: 1,
-          }),
-          this.models.create({
-            purpose: 'ocr',
-            displayName: '识别-通义千问 3.8 Max',
-            model: 'qwen3.8-max',
-            platform: 'dataeyes',
-            prompt: DEFAULT_OCR_PROMPT,
-            billing: 'token',
-            isDefault: 0,
-            enabled: 1,
-          }),
-        ]);
-        this.logger.log('已补充 DataEyes 推荐模型');
-      }
+      await this.migrateFromDataEyes();
     } catch (e) {
-      this.logger.error(`补充 DataEyes 模型失败: ${e}`);
+      this.logger.error(`迁移 DataEyes 配置失败: ${e}`);
     }
     try {
       if ((await this.models.count()) === 0) {
         await this.models.save([
           this.models.create({
             purpose: 'ocr',
-            displayName: '识别-通义千问 3.8 Max',
-            model: 'qwen3.8-max',
-            platform: 'dataeyes',
+            displayName: SF_OCR.displayName,
+            model: SF_OCR.model,
+            platform: 'siliconflow',
             prompt: DEFAULT_OCR_PROMPT,
             billing: 'token',
+            priceIn: SF_OCR.priceIn,
+            priceOut: SF_OCR.priceOut,
             avgTokensIn: 3000,
             avgTokensOut: 1000,
             enableThinking: 0,
@@ -103,12 +83,12 @@ export class SettingsService implements OnModuleInit {
           }),
           this.models.create({
             purpose: 'clean',
-            displayName: '图片处理-Seedream 5.0',
-            model: 'ByteDance-Seedream-5.0',
-            platform: 'dataeyes',
+            displayName: SF_CLEAN.displayName,
+            model: SF_CLEAN.model,
+            platform: 'siliconflow',
             prompt: DEFAULT_CLEAN_PROMPT,
             billing: 'image',
-            priceImage: '0.035',
+            priceImage: SF_CLEAN.priceImage,
             isDefault: 1,
             enabled: 1,
           }),
@@ -117,6 +97,57 @@ export class SettingsService implements OnModuleInit {
       }
     } catch (e) {
       this.logger.error(`初始化默认模型失败: ${e}`);
+    }
+  }
+
+  /**
+   * DataEyes 平台已下线：把已有数据库里的 DataEyes 模型改成硅基流动的对应模型（保留 id，已建任务照常可用），
+   * 并删掉保存的 DataEyes 平台账号。只在发现 DataEyes 数据时执行，可重复运行。
+   */
+  private async migrateFromDataEyes() {
+    const old = await this.models.find({ where: { platform: 'dataeyes' as any } });
+    for (const m of old) {
+      const t = m.purpose === 'clean' ? SF_CLEAN : SF_OCR;
+      m.platform = 'siliconflow' as any;
+      m.model = t.model;
+      m.displayName = t.displayName;
+      m.baseUrl = null as any;
+      m.outputSize = null as any;
+      if (m.purpose === 'clean') {
+        m.billing = 'image';
+        m.priceImage = SF_CLEAN.priceImage;
+      } else {
+        m.billing = 'token';
+        m.priceIn = SF_OCR.priceIn;
+        m.priceOut = SF_OCR.priceOut;
+      }
+    }
+    if (old.length) {
+      await this.models.save(old);
+      this.logger.log(`已把 ${old.length} 个 DataEyes 模型改为硅基流动模型`);
+    }
+    const all = await this.readPlatforms();
+    if ('dataeyes' in all) {
+      delete (all as any).dataeyes;
+      await this.settings.save({ key: 'platforms', value: JSON.stringify(all) });
+      this.logger.log('已删除 DataEyes 平台账号配置');
+    }
+    // 已有数据库但没有任何硅基流动图片处理模型：补一个推荐模型（不改动已有默认）
+    if ((await this.models.count()) > 0 && (await this.models.count({ where: { platform: 'siliconflow' as any, purpose: 'clean' } })) === 0) {
+      await this.models.save(
+        this.models.create({
+          purpose: 'clean',
+          displayName: SF_CLEAN.displayName,
+          model: SF_CLEAN.model,
+          platform: 'siliconflow',
+          prompt: DEFAULT_CLEAN_PROMPT,
+          billing: 'image',
+          priceImage: SF_CLEAN.priceImage,
+          isDefault: 0,
+          enabled: 1,
+        }),
+      );
+      this.logger.log('已补充硅基流动推荐的图片处理模型');
     }
   }
 

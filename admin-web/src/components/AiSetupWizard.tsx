@@ -447,7 +447,7 @@ export const AiSetupWizard: React.FC<{
             <>
               <div>
                 <div className="text-sm font-semibold text-[#1D1D1F]">选择一个平台</div>
-                <p className="text-[11px] text-[#86868B] mt-0.5">推荐用聚合平台：注册一个账号、填一个 Key，图片处理和文字识别都能用。双击卡片可直接进入下一步。</p>
+                <p className="text-[11px] text-[#86868B] mt-0.5">推荐用硅基流动：注册并实名后填一个 Key，图片处理和文字识别都能用。双击卡片可直接进入下一步。</p>
               </div>
               {(() => {
                 const card = (x: WizardPlatform, big: boolean) => (

@@ -3,13 +3,14 @@
  * 字段、地址参考各家官方文档；secret=true 的字段加密入库，接口只回显掩码。
  *
  * imageEdit：该平台能否做「图生图」（图片处理）。
+ *   - siliconflow 硅基流动：POST {base}/images/generations，image 为单个 Base64 Data URL 字符串
  *   - ark      火山方舟 Seedream：POST {base}/images/generations，image 支持 base64 data URI
  *   - aliyun   阿里云百炼：POST {origin}/api/v1/services/aigc/multimodal-generation/generation，image 支持 base64
  *   - baidu    百度千帆：POST {base}/images/edits（OpenAI 风格）
  *   - tencent  腾讯混元生图 3.0（TokenHub 同步接口）：POST {base}/images/generations，images 为数组
  *   - zhipu / deepseek：官方无图生图接口，仅供后续文字识别使用
  */
-export type PlatformCode = 'dataeyes' | 'ark' | 'aliyun' | 'baidu' | 'tencent' | 'zhipu' | 'deepseek';
+export type PlatformCode = 'siliconflow' | 'ark' | 'aliyun' | 'baidu' | 'tencent' | 'zhipu' | 'deepseek';
 
 export interface PlatformField {
   key: string;
@@ -64,21 +65,23 @@ export interface PlatformDef {
 
 export const PLATFORMS: PlatformDef[] = [
   {
-    // 聚合平台：一个 Key 调用多家模型（OpenAI 兼容）。文档 https://doczh.dataeyes.ai/
-    // 出图：Seedream / wan / FLUX → POST /v1/images/generations（image 传原图 URL 或 Base64）
-    //       GPT Image → POST /v1/images/edits（multipart 上传）
-    //       Gemini 图像 → POST /v1beta/models/{model}:generateContent（inlineData 传原图）
-    // 看图识别：POST /v1/chat/completions（image_url 支持 Base64 Data URL）
-    code: 'dataeyes',
-    name: 'DataEyes 聚合平台',
+    // 硅基流动 SiliconFlow：一个 Key 调用通义千问、GLM、DeepSeek 等模型，人民币计价。
+    // 文档 https://docs.siliconflow.cn/docs/api/images-generations-post
+    // 出图：POST {base}/images/generations，JSON；image 为单个字符串（Base64 Data URL 或公网链接，不能是数组）
+    //       Qwen/Qwen-Image-Edit(-2509) 不需要 image_size（按原图比例出图），其他模型必填 image_size
+    //       返回 images[0].url，链接 1 小时内有效，需立即下载；请求头 X-Enable-Watermark: 0 关闭显式「AI 生成」水印
+    // 模型列表：GET {base}/models?sub_type=image-to-image
+    // 看图识别：POST {base}/chat/completions（OpenAI 兼容，image_url 支持 Base64）
+    code: 'siliconflow',
+    name: '硅基流动 SiliconFlow',
     featured: true,
-    currency: 'USD',
-    intro: '一个 Key 即可调用 Seedream、Gemini、通义千问、GPT 等上百个模型，图片处理和文字识别都能用',
-    defaultBaseUrl: 'https://studio.dataeyes.ai/v1',
-    docsUrl: 'https://doczh.dataeyes.ai/',
-    consoleUrl: 'https://www.dataeyes.ai/admin/',
-    baseUrlHelp: '保持默认即可（https://studio.dataeyes.ai/v1）。',
-    modelsUrl: 'https://www.dataeyes.ai/admin/models',
+    currency: 'CNY',
+    intro: '一个 Key 即可调用通义千问图片编辑、GLM、DeepSeek 等模型，按人民币计费，图片处理和文字识别都能用',
+    defaultBaseUrl: 'https://api.siliconflow.cn/v1',
+    docsUrl: 'https://docs.siliconflow.cn/docs/api/images-generations-post',
+    consoleUrl: 'https://cloud.siliconflow.cn/',
+    baseUrlHelp: '保持默认即可（https://api.siliconflow.cn/v1）。',
+    modelsUrl: 'https://www.siliconflow.cn/pricing',
     fields: [
       {
         key: 'apiKey',
@@ -86,32 +89,29 @@ export const PLATFORMS: PlatformDef[] = [
         secret: true,
         placeholder: 'sk-...',
         scope: 'general',
-        link: 'https://www.dataeyes.ai/admin/tokens',
-        howTo: 'DataEyes 控制台 → 左侧「模型 API Key」→「创建」→ 复制（注意是「模型 API Key」，不是 MCP 产品的 Key）',
+        link: 'https://cloud.siliconflow.cn/account/ak',
+        howTo: '硅基流动控制台 →「账户管理 → API 密钥」→「新建 API 密钥」→ 复制（sk- 开头）',
       },
     ],
     guide: {
-      keyUrl: 'https://www.dataeyes.ai/admin/tokens',
-      billingUrl: 'https://www.dataeyes.ai/admin/recharge',
+      keyUrl: 'https://cloud.siliconflow.cn/account/ak',
+      billingUrl: 'https://cloud.siliconflow.cn/',
       steps: [
-        '注册 / 登录 DataEyes（绑定手机号可领免费额度）',
-        '打开控制台左侧「模型 API Key」页面（点下面的按钮直达）',
-        '点「创建」，分组选「稳定优先」或「价格优先」，创建后复制 Key',
-        '在「模型额度充值」页确认有余额，否则会提示余额不足',
+        '注册 / 登录硅基流动（手机号即可）',
+        '完成实名认证（平台要求实名后才能调用模型；认证后可领代金券）',
+        '打开「账户管理 → API 密钥」页面（点下面的按钮直达），点「新建 API 密钥」并复制',
+        '在「账户管理 → 余额充值」确认有余额或代金券，否则会提示余额不足',
       ],
-      modelTip: '模型价格在 DataEyes「模型广场」查看（按美元计价）；Seedream 5.0 约 $0.035/张',
+      modelTip: '推荐 Qwen/Qwen-Image-Edit-2509（通义千问图片编辑），约 ¥0.3/张；价格以硅基流动价格页为准',
     },
     imageEdit: {
       supported: true,
-      suggestedModels: ['ByteDance-Seedream-5.0', 'gemini-3.1-flash-image', 'ByteDance-Seedream-5.0-pro', 'wan2.7-image-pro'],
-      // 参考单价（美元/张，取自平台模型广场 2026-10；以平台实际为准，用户可改）
+      suggestedModels: ['Qwen/Qwen-Image-Edit-2509', 'Qwen/Qwen-Image-Edit'],
+      // 参考单价（元/张，取自 siliconflow.cn/pricing 2026-10；以平台实际为准，用户可改）
       referencePrices: {
-        'ByteDance-Seedream-5.0': 0.035,
-        'ByteDance-Seedream-5.0-pro': 0.09,
-        'ByteDance-Seedream-4.5': 0.04,
-        'wan2.7-image-pro': 0.0714,
-        'gemini-2.5-flash-image': 0.039,
-        'gemini-3.1-flash-image': 0.08,
+        'Qwen/Qwen-Image-Edit-2509': 0.3,
+        'Qwen/Qwen-Image-Edit': 0.3,
+        'Kwai-Kolors/Kolors': 0,
       },
       base64Documented: true,
     },
@@ -282,7 +282,7 @@ export function getPlatformDef(code?: string | null): PlatformDef | null {
 export function guessPlatform(baseUrl?: string | null): PlatformCode | null {
   const b = (baseUrl || '').toLowerCase();
   if (!b) return null;
-  if (b.includes('dataeyes.ai')) return 'dataeyes';
+  if (b.includes('siliconflow')) return 'siliconflow';
   if (b.includes('volces.com')) return 'ark';
   if (b.includes('aliyuncs.com')) return 'aliyun';
   if (b.includes('baidubce.com')) return 'baidu';
