@@ -121,6 +121,7 @@ export class SettingsService implements OnModuleInit {
       m.displayName = t.displayName;
       m.baseUrl = null as any;
       m.outputSize = null as any;
+      m.apiKey = null as any; // 旧平台的 Key 不能带到硅基流动，改用平台账号里的 Key
       if (m.purpose === 'clean') {
         m.billing = 'image';
         m.priceImage = SF_CLEAN.priceImage;

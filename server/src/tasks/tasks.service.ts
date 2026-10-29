@@ -378,6 +378,11 @@ export class TasksService implements OnModuleInit {
       const worker = async () => {
         while (queue.length && !stopReason && !this.cancelled.has(taskId)) {
           const img = queue.shift()!;
+          // 这一页正在审阅页单独用大模型处理：跳过，避免同一页被处理两次、扣两次费
+          if (this.aiJobs.get(Number(img.id))?.state === 'running') {
+            this.logger.warn(`Task ${taskId} image ${img.id} 正在单页大模型处理，整本处理跳过此页`);
+            continue;
+          }
           try {
             img.status = 'processing';
             img.updatedAt = new Date();
