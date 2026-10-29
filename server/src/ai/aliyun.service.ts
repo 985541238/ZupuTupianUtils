@@ -603,7 +603,8 @@ export class AliyunService {
       const u = new URL(base);
       if (code === 'aliyun') return u.origin + '/compatible-mode/v1/models';
       if (code === 'ark') return u.origin + '/api/v3/models';
-      if (code === 'siliconflow') return base.replace(/\/images\/generations$/i, '') + '/models?sub_type=image-to-image';
+      // 硅基流动：按图片类筛选（sub_type=image-to-image 实测返回空，不用）
+      if (code === 'siliconflow') return base.replace(/\/images\/generations$/i, '') + '/models?type=image';
       return base.replace(/\/(images\/(generations|edits)|chat\/completions)$/i, '') + '/models';
     } catch {
       throw new AiConfigError('服务地址无效：' + base, 'config', code);
@@ -639,7 +640,19 @@ export class AliyunService {
     if (res.status === 401 || res.status === 403) throw await this.httpError(res, def.code);
     if (!res.ok) return fallback(`${def.name}没有提供模型列表接口，下面是推荐的图片处理模型`);
     const data: any = await res.json().catch(() => ({}));
-    const raw: any[] = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
+    let raw: any[] = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
+    if (!raw.length && def.code === 'siliconflow') {
+      // 按类型筛选为空时拉全部模型，让用户自己挑
+      const all = await this.fetchWithTimeout(
+        base.replace(/\/images\/generations$/i, '') + '/models',
+        { method: 'GET', headers: { Authorization: 'Bearer ' + apiKey } },
+        30 * 1000,
+      );
+      if (all.ok) {
+        const d2: any = await all.json().catch(() => ({}));
+        raw = Array.isArray(d2?.data) ? d2.data : [];
+      }
+    }
     const seen = new Set<string>();
     const models: { id: string; image: boolean; suggested: boolean }[] = [];
     for (const m of raw) {
@@ -648,8 +661,9 @@ export class AliyunService {
       seen.add(id);
       const meta = `${id} ${m?.task_type || ''} ${m?.domain || ''} ${m?.type || ''} ${(m?.modalities || []).join?.(' ') || ''} ${(m?.supported_endpoint_types || []).join?.(' ') || ''}`;
       const image =
-        def.code === 'siliconflow' || // 已按 sub_type=image-to-image 过滤
-        !/video|t2v|i2v|r2v|tts|speech|transcribe|embedding/i.test(id) &&
+        def.code === 'siliconflow'
+          ? /image-edit|kolors/i.test(id) // 硅基流动上能传原图做处理的：Qwen-Image-Edit 系列、Kolors
+          : !/video|t2v|i2v|r2v|tts|speech|transcribe|embedding/i.test(id) &&
         /seedream|seededit|image[-_ ]?(gen|edit)|imagegeneration|qwen-image|wanx|wan\d(\.\d)?-image|wan2\.\d.*(i2i|image)|hy-image|hunyuan.*image|flux|kontext|cogview|text_to_image|image_to_image|gpt-image|gemini.*image|banana|grok-imagine-image/i.test(meta);
       models.push({ id, image, suggested: suggested.includes(id) });
     }
