@@ -45,6 +45,9 @@ type PlatformField = {
 type Platform = {
   code: string;
   name: string;
+  /** 聚合平台：默认展示；其余直连平台默认收起 */
+  featured?: boolean;
+  intro?: string;
   defaultBaseUrl: string;
   docsUrl: string;
   consoleUrl: string;
@@ -293,7 +296,55 @@ function ModelListCard({
   );
 }
 
+function PlatformRow({ p, onEdit, big }: { p: Platform; onEdit: (p: Platform) => void; big?: boolean }) {
+  return (
+    <div
+      className={`flex items-center justify-between gap-3 rounded-2xl border ${
+        big ? 'p-4 bg-[#0071E3]/[0.04] border-[#0071E3]/20' : 'p-3 bg-[#F5F5F7]/80 border-black/[0.04]'
+      }`}
+    >
+      <div className="min-w-0">
+        <div className={`${big ? 'text-sm' : 'text-xs'} font-semibold text-[#1D1D1F] truncate`}>
+          {p.name}
+          {big ? <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-[#0071E3] text-white align-middle">推荐</span> : null}
+          {p.configured ? (
+            <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-[#34C759]/10 text-[#248A3D] align-middle">已配置</span>
+          ) : (
+            <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-[#FF9500]/12 text-[#C93400] align-middle">未配置</span>
+          )}
+          {!big ? (
+            p.imageEdit.supported ? (
+              <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-[#AF52DE]/12 text-[#8944AB]">支持图生图</span>
+            ) : (
+              <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-black/[0.06] text-[#86868B]">仅文字识别</span>
+            )
+          ) : null}
+        </div>
+        {big && p.intro ? <div className="text-[11px] text-[#6E6E73] mt-1 leading-relaxed">{p.intro}</div> : null}
+        <div className="text-[11px] text-[#86868B] font-mono mt-0.5 truncate">
+          {p.baseUrl || p.defaultBaseUrl}
+          {p.modelCount ? ` · ${p.modelCount} 个模型` : ''}
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={() => onEdit(p)}
+        className={`text-[11px] font-semibold rounded-lg cursor-pointer shrink-0 ${
+          big ? 'px-3.5 py-2 bg-[#0071E3] text-white' : 'px-2.5 py-1.5 bg-white border border-black/[0.08] hover:bg-[#F5F5F7]'
+        }`}
+      >
+        {big && !p.configured ? '填写 Key' : '编辑'}
+      </button>
+    </div>
+  );
+}
+
 function PlatformListCard({ platforms, onEdit }: { platforms: Platform[]; onEdit: (p: Platform) => void }) {
+  const featured = platforms.filter((p) => p.featured);
+  const others = platforms.filter((p) => !p.featured);
+  // 直连平台默认收起；已经在用的（配了 Key）也收起，但标题上显示数量
+  const [showOthers, setShowOthers] = useState(false);
+  const othersConfigured = others.filter((p) => p.configured).length;
   return (
     <section className="bg-white rounded-[20px] border border-black/[0.06] shadow-2xs p-5 space-y-4">
       <div className="flex items-center gap-2 min-w-0">
@@ -302,44 +353,38 @@ function PlatformListCard({ platforms, onEdit }: { platforms: Platform[]; onEdit
         </div>
         <div className="min-w-0">
           <h3 className="text-sm font-semibold text-[#1D1D1F]">平台账号</h3>
-          <p className="text-[11px] text-[#86868B] truncate">各平台填一次 Key，模型里不填 Key 时自动使用；字段参考各家官方文档</p>
+          <p className="text-[11px] text-[#86868B] truncate">推荐只配置聚合平台：一个 Key 就能用图片处理和文字识别的所有模型</p>
         </div>
       </div>
       <div className="space-y-2">
-        {platforms.map((p) => (
-          <div
-            key={p.code}
-            className="flex items-center justify-between gap-3 p-3 rounded-2xl bg-[#F5F5F7]/80 border border-black/[0.04]"
-          >
-            <div className="min-w-0">
-              <div className="text-xs font-semibold text-[#1D1D1F] truncate">
-                {p.name}
-                {p.configured ? (
-                  <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-[#34C759]/10 text-[#248A3D]">已配置</span>
-                ) : (
-                  <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-[#FF9500]/12 text-[#C93400]">未配置</span>
-                )}
-                {p.imageEdit.supported ? (
-                  <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-[#AF52DE]/12 text-[#8944AB]">支持图生图</span>
-                ) : (
-                  <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-black/[0.06] text-[#86868B]">仅文字识别</span>
-                )}
-              </div>
-              <div className="text-[11px] text-[#86868B] font-mono mt-0.5 truncate">
-                {p.baseUrl || p.defaultBaseUrl}
-                {p.modelCount ? ` · ${p.modelCount} 个模型` : ''}
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => onEdit(p)}
-              className="px-2.5 py-1.5 text-[11px] font-semibold rounded-lg bg-white border border-black/[0.08] cursor-pointer hover:bg-[#F5F5F7] shrink-0"
-            >
-              编辑
-            </button>
-          </div>
+        {featured.map((p) => (
+          <PlatformRow key={p.code} p={p} onEdit={onEdit} big />
         ))}
       </div>
+      {others.length ? (
+        <div className="border-t border-black/[0.06] pt-3">
+          <button
+            type="button"
+            onClick={() => setShowOthers((v) => !v)}
+            className="w-full flex items-center justify-between text-xs font-semibold text-[#6E6E73] hover:text-[#1D1D1F] cursor-pointer"
+          >
+            <span>
+              其他平台（直连各家，一般不需要）
+              <span className="ml-1.5 font-normal text-[#86868B]">
+                {others.length} 个{othersConfigured ? `，已配置 ${othersConfigured} 个` : ''}
+              </span>
+            </span>
+            <span className="text-[11px] text-[#0071E3]">{showOthers ? '收起' : '展开'}</span>
+          </button>
+          {showOthers ? (
+            <div className="space-y-2 mt-3">
+              {others.map((p) => (
+                <PlatformRow key={p.code} p={p} onEdit={onEdit} />
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -404,14 +449,14 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
     if (purpose === 'clean') {
       // 默认选已配置 Key 的图生图平台，否则火山方舟
       const p =
+        platforms.find((x) => x.featured) ||
         platforms.find((x) => x.imageEdit.supported && x.configured) ||
-        platforms.find((x) => x.code === 'ark') ||
         null;
       setEditing({
         purpose,
-        platform: p?.code || 'ark',
-        displayName: `图片处理-${p?.name || '火山方舟'}`,
-        model: p?.imageEdit.suggestedModels?.[0] || 'doubao-seedream-5-0-pro-260628',
+        platform: p?.code || 'dataeyes',
+        displayName: `图片处理-${p?.imageEdit.suggestedModels?.[0] || p?.name || ''}`,
+        model: p?.imageEdit.suggestedModels?.[0] || '',
         baseUrl: '',
         outputSize: '',
         apiKey: '',
@@ -429,12 +474,13 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
       });
       return;
     }
+    const fp = platforms.find((x) => x.featured);
     setEditing({
       purpose,
-      platform: 'aliyun',
-      displayName: '',
-      model: 'qwen3-vl-plus',
-      baseUrl: DEFAULT_OCR_BASE,
+      platform: fp?.code || 'aliyun',
+      displayName: fp ? '识别-qwen3.8-max' : '',
+      model: fp ? 'qwen3.8-max' : 'qwen3-vl-plus',
+      baseUrl: fp ? '' : DEFAULT_OCR_BASE,
       apiKey: '',
       prompt: DEFAULT_OCR_PROMPT,
       curlPaste: '',
@@ -458,7 +504,7 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
     setEditing({
       ...m,
       platform: m.platform || guessPlatform(m.baseUrl) || (m.purpose === 'clean' ? 'ark' : 'aliyun'),
-      baseUrl: m.baseUrl || (m.purpose === 'clean' ? '' : DEFAULT_OCR_BASE),
+      baseUrl: m.baseUrl || '',
       outputSize: m.outputSize || '',
       // 回显已保存的 Key（默认密文显示）
       apiKey: m.apiKeyPlain || '',
@@ -494,7 +540,7 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
         next.model = p?.imageEdit.suggestedModels?.[0] || '';
       }
       if (!editing.id && (!String(editing.displayName || '').trim() || /^图片处理-/.test(String(editing.displayName)))) {
-        next.displayName = `图片处理-${p?.name || ''}`;
+        next.displayName = `图片处理-${p?.featured ? next.model || p?.name : p?.name || ''}`;
       }
       // 地址改回用平台地址，避免带着上一个平台的地址
       const prevGuess = guessPlatform(editing.baseUrl);
@@ -530,7 +576,7 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
         platform: editing.platform || null,
         outputSize: purpose === 'clean' ? String(editing.outputSize || '').trim() : undefined,
         // 图片处理模型地址可留空 = 用平台账号的地址
-        baseUrl: String(editing.baseUrl || '').trim() || (purpose === 'clean' ? '' : DEFAULT_OCR_BASE),
+        baseUrl: String(editing.baseUrl || '').trim(),
         billing: editing.billing || (purpose === 'clean' ? 'image' : 'token'),
         priceIn: editing.priceIn === '' || editing.priceIn == null ? null : editing.priceIn,
         priceOut: editing.priceOut === '' || editing.priceOut == null ? null : editing.priceOut,
@@ -965,12 +1011,20 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
                 <div>
                   <label className="block text-xs font-semibold mb-1">所属平台</label>
                   <select value={editing.platform || ''} onChange={(e) => changePlatform(e.target.value)} className={inputCls}>
-                    {platforms.map((p) => (
+                    {platforms.filter((p) => p.featured).map((p) => (
                       <option key={p.code} value={p.code} disabled={!editingIsOcr && !p.imageEdit.supported}>
                         {p.name}
                         {!editingIsOcr && !p.imageEdit.supported ? '（不支持图生图）' : p.configured ? '（已配置 Key）' : '（未配置 Key）'}
                       </option>
                     ))}
+                    <optgroup label="其他平台（直连）">
+                      {platforms.filter((p) => !p.featured).map((p) => (
+                        <option key={p.code} value={p.code} disabled={!editingIsOcr && !p.imageEdit.supported}>
+                        {p.name}
+                        {!editingIsOcr && !p.imageEdit.supported ? '（不支持图生图）' : p.configured ? '（已配置 Key）' : '（未配置 Key）'}
+                      </option>
+                      ))}
+                    </optgroup>
                   </select>
                 </div>
                 <div>
@@ -1069,15 +1123,13 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
               <div className={`grid gap-3 ${editingIsOcr ? 'grid-cols-1' : 'grid-cols-2'}`}>
                 <div>
                   <label className="block text-xs font-semibold mb-1">
-                    Base URL {!editingIsOcr ? <span className="font-normal text-[#86868B]">（可不填）</span> : null}
+                    Base URL <span className="font-normal text-[#86868B]">（可不填）</span>
                   </label>
                   <input
                     value={editing.baseUrl || ''}
                     onChange={(e) => setEditing({ ...editing, baseUrl: e.target.value })}
                     className={`${inputCls} font-mono`}
-                    placeholder={
-                      editingIsOcr ? DEFAULT_OCR_BASE : editingPlatform?.baseUrl || editingPlatform?.defaultBaseUrl || ''
-                    }
+                    placeholder={editingPlatform?.baseUrl || editingPlatform?.defaultBaseUrl || DEFAULT_OCR_BASE}
                   />
                 </div>
                 {!editingIsOcr ? (

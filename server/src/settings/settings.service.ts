@@ -54,9 +54,9 @@ export class SettingsService implements OnModuleInit {
         await this.models.save([
           this.models.create({
             purpose: 'ocr',
-            displayName: '识别-通义千问VL Plus',
-            model: 'qwen3-vl-plus',
-            platform: 'aliyun',
+            displayName: '识别-通义千问 3.8 Max',
+            model: 'qwen3.8-max',
+            platform: 'dataeyes',
             prompt: DEFAULT_OCR_PROMPT,
             billing: 'token',
             avgTokensIn: 3000,
@@ -67,10 +67,9 @@ export class SettingsService implements OnModuleInit {
           }),
           this.models.create({
             purpose: 'clean',
-            displayName: '图片处理-火山方舟 Seedream',
-            platform: 'ark',
-            model: 'doubao-seedream-5-0-pro-260628',
-            baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+            displayName: '图片处理-Seedream 5.0',
+            model: 'ByteDance-Seedream-5.0',
+            platform: 'dataeyes',
             prompt: DEFAULT_CLEAN_PROMPT,
             billing: 'image',
             isDefault: 1,

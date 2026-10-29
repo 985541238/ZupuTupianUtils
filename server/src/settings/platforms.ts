@@ -9,7 +9,7 @@
  *   - tencent  腾讯混元生图 3.0（TokenHub 同步接口）：POST {base}/images/generations，images 为数组
  *   - zhipu / deepseek：官方无图生图接口，仅供后续文字识别使用
  */
-export type PlatformCode = 'ark' | 'aliyun' | 'baidu' | 'tencent' | 'zhipu' | 'deepseek';
+export type PlatformCode = 'dataeyes' | 'ark' | 'aliyun' | 'baidu' | 'tencent' | 'zhipu' | 'deepseek';
 
 export interface PlatformField {
   key: string;
@@ -27,6 +27,10 @@ export interface PlatformField {
 export interface PlatformDef {
   code: PlatformCode;
   name: string;
+  /** 聚合平台：默认展示、推荐使用；其余直连平台在界面上默认收起 */
+  featured?: boolean;
+  /** 一句话介绍（界面展示） */
+  intro?: string;
   /** 默认服务地址（大模型调用） */
   defaultBaseUrl: string;
   docsUrl: string;
@@ -55,6 +59,49 @@ export interface PlatformDef {
 }
 
 export const PLATFORMS: PlatformDef[] = [
+  {
+    // 聚合平台：一个 Key 调用多家模型（OpenAI 兼容）。文档 https://doczh.dataeyes.ai/
+    // 出图：Seedream / wan / FLUX → POST /v1/images/generations（image 传原图 URL 或 Base64）
+    //       GPT Image → POST /v1/images/edits（multipart 上传）
+    //       Gemini 图像 → POST /v1beta/models/{model}:generateContent（inlineData 传原图）
+    // 看图识别：POST /v1/chat/completions（image_url 支持 Base64 Data URL）
+    code: 'dataeyes',
+    name: 'DataEyes 聚合平台',
+    featured: true,
+    intro: '一个 Key 即可调用 Seedream、Gemini、通义千问、GPT 等上百个模型，图片处理和文字识别都能用',
+    defaultBaseUrl: 'https://studio.dataeyes.ai/v1',
+    docsUrl: 'https://doczh.dataeyes.ai/',
+    consoleUrl: 'https://www.dataeyes.ai/admin/',
+    baseUrlHelp: '保持默认即可（https://studio.dataeyes.ai/v1）。',
+    modelsUrl: 'https://www.dataeyes.ai/admin/models',
+    fields: [
+      {
+        key: 'apiKey',
+        label: 'API Key',
+        secret: true,
+        placeholder: 'sk-...',
+        scope: 'general',
+        link: 'https://www.dataeyes.ai/admin/tokens',
+        howTo: 'DataEyes 控制台 → 左侧「模型 API Key」→「创建」→ 复制（注意是「模型 API Key」，不是 MCP 产品的 Key）',
+      },
+    ],
+    guide: {
+      keyUrl: 'https://www.dataeyes.ai/admin/tokens',
+      billingUrl: 'https://www.dataeyes.ai/admin/recharge',
+      steps: [
+        '注册 / 登录 DataEyes（绑定手机号可领免费额度）',
+        '打开控制台左侧「模型 API Key」页面（点下面的按钮直达）',
+        '点「创建」，分组选「稳定优先」或「价格优先」，创建后复制 Key',
+        '在「模型额度充值」页确认有余额，否则会提示余额不足',
+      ],
+      modelTip: '模型价格在 DataEyes「模型广场」查看（按美元计价）；Seedream 5.0 约 $0.035/张',
+    },
+    imageEdit: {
+      supported: true,
+      suggestedModels: ['ByteDance-Seedream-5.0', 'gemini-3.1-flash-image', 'ByteDance-Seedream-5.0-pro', 'wan2.7-image-pro'],
+      base64Documented: true,
+    },
+  },
   {
     code: 'ark',
     name: '火山方舟',
@@ -221,6 +268,7 @@ export function getPlatformDef(code?: string | null): PlatformDef | null {
 export function guessPlatform(baseUrl?: string | null): PlatformCode | null {
   const b = (baseUrl || '').toLowerCase();
   if (!b) return null;
+  if (b.includes('dataeyes.ai')) return 'dataeyes';
   if (b.includes('volces.com')) return 'ark';
   if (b.includes('aliyuncs.com')) return 'aliyun';
   if (b.includes('baidubce.com')) return 'baidu';

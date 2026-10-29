@@ -59,19 +59,19 @@ export function classifyAiError(status: number, code: string, rawMsg: string, pl
   const name = getPlatformDef(platform)?.name || '模型平台';
   const detail = [status ? `HTTP ${status}` : '', code, rawMsg].filter(Boolean).join(' · ').slice(0, 400);
   const all = `${code} ${rawMsg}`.toLowerCase();
-  if (/overdue|arrear|欠费|余额不足|insufficient[ _-]?(balance|fund|quota)|account.{0,20}(suspend|frozen|disabled)|balance is not enough|账户.{0,6}(冻结|停用)/i.test(all)) {
+  if (/overdue|arrear|欠费|余额不足|insufficient[ _-]?(user[ _-]?)?(balance|fund|quota)|quota_exceeded|额度不足|account.{0,20}(suspend|frozen|disabled)|balance is not enough|账户.{0,6}(冻结|停用)/i.test(all)) {
     return new AiConfigError(
       `${name}账户余额不足或已欠费，平台拒绝处理。请到${name}控制台充值，充值后回到这里点「继续处理」，已处理好的页不会重复处理。`,
       'arrears', platform, detail,
     );
   }
-  if (status === 401 || /invalid.?api.?key|incorrect api key|unauthori[sz]ed|authentication|api key.{0,20}(invalid|not valid|expired)/i.test(all)) {
+  if (status === 401 || /invalid.?api.?key|incorrect api key|unauthori[sz]ed|authentication|api key.{0,20}(invalid|not valid|expired)|未提供令牌|无效的令牌|令牌.{0,6}(无效|过期)/i.test(all)) {
     return new AiConfigError(
       `${name}的 API Key 不对或已失效。请到「模型配置 → 平台账号」重新填写 Key（可点「引导配置」按步骤操作）。`,
       'auth', platform, detail,
     );
   }
-  if (status === 404 || /model.{0,30}(not.?found|not.?exist|does not exist|not.?open|not.?activat|未开通|不存在)|modelnotopen|modelnotfound|endpoint.{0,10}not.?found/i.test(all)) {
+  if (status === 404 || /model.{0,30}(not.?found|not.?exist|does not exist|not.?open|not.?activat|未开通|不存在)|modelnotopen|modelnotfound|endpoint.{0,10}not.?found|可用渠道失败|no available (groups|channel)/i.test(all)) {
     return new AiConfigError(
       `${name}上没有找到这个模型，或者模型还没开通。请到${name}控制台开通该模型，或在「引导配置」里换一个推荐模型。`,
       'model', platform, detail,
@@ -166,9 +166,12 @@ export class AliyunService {
       ],
       stream: true,
       stream_options: { include_usage: true },
-      enable_thinking: !!model.enableThinking,
     };
-    if (model.enableThinking) body.thinking_budget = 81920;
+    // enable_thinking / thinking_budget 是阿里云百炼的扩展参数，其他平台（含聚合平台）不传
+    if (!cfg.platform || cfg.platform === 'aliyun') {
+      body.enable_thinking = !!model.enableThinking;
+      if (model.enableThinking) body.thinking_budget = 81920;
+    }
     const { content, usage } = await this.streamChat(cfg, body);
     const result = parseOcr(content);
     if (!result.columns.length) throw new Error('模型没有返回可用的识别结果：' + content.slice(0, 200));
@@ -182,7 +185,7 @@ export class AliyunService {
     }
     // 测试连通时允许用弹窗草稿 Key，不必先落库
     const base = await this.settings.resolveCredentials(model);
-    const cfg: AliyunConfig = {
+    const cfg: ResolvedCredentials = {
       ...base,
       apiKey: (override?.apiKey || base.apiKey || '').trim(),
       baseUrl: String(override?.baseUrl || base.baseUrl || '')
@@ -196,7 +199,7 @@ export class AliyunService {
       messages: [{ role: 'user', content: '请只回复 ok' }],
       stream: true,
       stream_options: { include_usage: true },
-      enable_thinking: false,
+      ...(!cfg.platform || cfg.platform === 'aliyun' ? { enable_thinking: false } : {}),
     });
     return { ok: true, ms: Date.now() - t, reply: content.slice(0, 50), usage };
   }
@@ -349,6 +352,9 @@ export class AliyunService {
       case 'tencent':
         if (/\/images\/generations$/i.test(base)) return base;
         return /\/v1$/i.test(base) ? base + '/images/generations' : origin + '/v1/images/generations';
+      case 'dataeyes':
+        // 默认出图接口；GPT Image / Gemini 图像在 cleanViaDataEyes 里另走专用接口
+        return /\/v1$/i.test(base) ? base + '/images/generations' : origin + '/v1/images/generations';
       default:
         throw new AiConfigError(`${getPlatformDef(platform)?.name || platform}不支持图生图，请换一个图片处理模型`);
     }
@@ -359,14 +365,16 @@ export class AliyunService {
    * 模型里填了「输出尺寸」时以填写为准。
    */
   private outputSize(platform: PlatformCode, w: number, h: number, override?: string | null): string | null {
+    const sepPlatform = platform;
     const o = (override || '').trim();
-    const sep = platform === 'aliyun' ? '*' : platform === 'tencent' ? ':' : 'x';
+    const sep = sepPlatform === 'aliyun' ? '*' : sepPlatform === 'tencent' ? ':' : 'x';
     if (o) {
       if (/^(1|1\.5|2|3|4)K$/i.test(o)) return o.toUpperCase();
       const m = o.match(/^(\d{2,5})\s*[x*:×]\s*(\d{2,5})$/i);
       if (m) return `${m[1]}${sep}${m[2]}`;
     }
     if (platform === 'baidu') return null; // 官方文档未给出 size 参数，用模型默认（保持输入比例）
+    if (platform === 'dataeyes') platform = 'ark'; // 聚合平台上的 Seedream 与方舟同规格（仅 Seedream 用到此尺寸）
     const limits: Record<string, { min: number; max: number; side: number; mult: number }> = {
       // Seedream：官方范围按模型不同（5.0 pro 921600~4624220；5.0 lite 3686400~10404496；4.x ≤ 4096²），
       // 取 2048² 附近，所有 Seedream 模型都在范围内，又足够看清小字
@@ -433,8 +441,9 @@ export class AliyunService {
     if (def && !def.imageEdit.supported) {
       throw new AiConfigError(`${def.name}${def.imageEdit.reason ? '：' + def.imageEdit.reason : '不支持图生图'}`);
     }
-    const url = this.imageEditEndpoint(platform, cfg);
     const prompt = (model.prompt || DEFAULT_CLEAN_PROMPT).trim();
+    if (platform === 'dataeyes') return this.cleanViaDataEyes(input, outPath, model, cfg, prompt);
+    const url = this.imageEditEndpoint(platform, cfg);
     const size = this.outputSize(platform, input.width, input.height, model.outputSize);
 
     let published: { url: string; file: string } | null = null;
@@ -537,6 +546,153 @@ export class AliyunService {
     }
   }
 
+  /** 结果图缩放回输入尺寸（不变形，比例不同时白边补齐）并保存为 PNG */
+  private async saveResult(buf: Buffer, outPath: string, width: number, height: number) {
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    await sharp(buf, { failOn: 'none' })
+      .flatten({ background: '#ffffff' })
+      .resize(width, height, { fit: 'contain', background: '#ffffff' })
+      .png()
+      .toFile(outPath);
+  }
+
+  /** 下载结果图：URL 或 data URI / 纯 base64 */
+  private async fetchResultImage(src: string, timeoutMs: number): Promise<Buffer> {
+    if (/^data:image\//i.test(src)) return Buffer.from(src.replace(/^data:image\/[^;]+;base64,/i, ''), 'base64');
+    if (!/^https?:\/\//i.test(src)) return Buffer.from(src, 'base64');
+    const img = await this.fetchWithTimeout(src, {}, timeoutMs);
+    if (!img.ok) throw new Error('下载模型结果图失败：HTTP ' + img.status);
+    return Buffer.from(await img.arrayBuffer());
+  }
+
+  /** 把 DataEyes 的报错交给统一分类（余额不足 → 欠费，model_not_found → 模型不可用…） */
+  private async dataEyesError(res: Response): Promise<Error> {
+    return this.httpError(res, 'dataeyes');
+  }
+
+  /**
+   * DataEyes 聚合平台出图（文档 https://doczh.dataeyes.ai/）：
+   * - Gemini 图像（gemini-*-image / nano-banana）：POST {origin}/v1beta/models/{model}:generateContent，inlineData 传原图
+   * - GPT Image（gpt-image-*）：POST /v1/images/edits，multipart 上传原图，返回 b64_json
+   * - 其他（Seedream、wan、FLUX、Grok Imagine）：POST /v1/images/generations，image 传 Base64 Data URL
+   */
+  private async cleanViaDataEyes(
+    input: { buf: Buffer; width: number; height: number },
+    outPath: string,
+    model: AiModel,
+    cfg: ResolvedCredentials,
+    prompt: string,
+  ): Promise<{ usage: Usage; width: number; height: number }> {
+    const base = (cfg.baseUrl || 'https://studio.dataeyes.ai/v1').replace(/\/+$/, '');
+    let origin: string;
+    try {
+      origin = new URL(base).origin;
+    } catch {
+      throw new AiConfigError('服务地址无效：' + base, 'config', 'dataeyes');
+    }
+    const v1 = /\/v1$/i.test(base) ? base : origin + '/v1';
+    const id = model.model;
+    const ms = cfg.timeoutSec * 1000;
+    const auth = { Authorization: 'Bearer ' + cfg.apiKey };
+    const b64 = input.buf.toString('base64');
+    const done = async (buf: Buffer, images = 1) => {
+      await this.saveResult(buf, outPath, input.width, input.height);
+      return { usage: { tokensIn: 0, tokensOut: 0, images }, width: input.width, height: input.height };
+    };
+
+    // ---- Gemini 图像（Nano Banana）
+    if (/gemini.*image|banana/i.test(id)) {
+      const res = await this.fetchWithTimeout(
+        `${origin}/v1beta/models/${encodeURIComponent(id)}:generateContent`,
+        {
+          method: 'POST',
+          headers: { ...auth, 'x-goog-api-key': cfg.apiKey, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ inlineData: { mimeType: 'image/jpeg', data: b64 } }, { text: prompt }] }],
+            generationConfig: {
+              responseModalities: ['IMAGE'],
+              imageConfig: { aspectRatio: nearestAspect(input.width, input.height), imageSize: '2K' },
+            },
+          }),
+        },
+        ms,
+      );
+      if (!res.ok) throw await this.dataEyesError(res);
+      const data: any = await res.json();
+      const parts: any[] = data?.candidates?.[0]?.content?.parts || [];
+      const img = parts.find((p) => p?.inlineData?.data || p?.inline_data?.data);
+      const out = img?.inlineData?.data || img?.inline_data?.data;
+      if (!out) {
+        const text = parts.map((p) => p?.text).filter(Boolean).join(' ').slice(0, 200);
+        throw new AiConfigError(
+          `模型「${id}」这次没有返回图片${text ? '（模型回复：' + text + '）' : ''}。可以重试，或换成 Seedream 模型。`,
+          'noimage',
+          'dataeyes',
+          JSON.stringify(data?.promptFeedback || data?.candidates?.[0]?.finishReason || ''),
+        );
+      }
+      return done(Buffer.from(out, 'base64'));
+    }
+
+    // ---- GPT Image：图像编辑接口（multipart）
+    if (/^gpt-image/i.test(id)) {
+      const ratio = input.width / input.height;
+      const size = ratio < 0.83 ? '1024x1536' : ratio > 1.2 ? '1536x1024' : '1024x1024';
+      const form = new FormData();
+      form.append('model', id);
+      form.append('prompt', prompt);
+      form.append('size', model.outputSize || size);
+      form.append('quality', 'high');
+      form.append('image', new Blob([new Uint8Array(input.buf)], { type: 'image/jpeg' }), 'page.jpg');
+      const res = await this.fetchWithTimeout(`${v1}/images/edits`, { method: 'POST', headers: auth, body: form }, ms);
+      if (!res.ok) throw await this.dataEyesError(res);
+      const data: any = await res.json();
+      const src = data?.data?.[0]?.b64_json || data?.data?.[0]?.url;
+      if (!src) throw new AiConfigError(`模型「${id}」没有返回图片`, 'noimage', 'dataeyes', JSON.stringify(Object.keys(data || {})));
+      return done(await this.fetchResultImage(src, ms));
+    }
+
+    // ---- Seedream / wan / FLUX / Grok Imagine：图片生成接口传原图
+    const isSeedream = /seedream/i.test(id);
+    const send = async (size: string | null) => {
+      const body: any = {
+        model: id,
+        prompt,
+        image: 'data:image/jpeg;base64,' + b64,
+        response_format: 'url',
+        watermark: false,
+      };
+      if (size) body.size = size;
+      if (isSeedream) body.sequential_image_generation = 'disabled';
+      return this.fetchWithTimeout(
+        `${v1}/images/generations`,
+        { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+        ms,
+      );
+    };
+    // Seedream 优先按原图比例给像素尺寸；平台不接受时退回文档示例的 2K 档位
+    const exact = isSeedream ? this.outputSize('dataeyes', input.width, input.height, model.outputSize) : model.outputSize || null;
+    let res = await send(exact);
+    if (!res.ok && res.status === 400 && isSeedream && exact && exact !== '2K') {
+      this.logger.warn(`DataEyes 不接受 size=${exact}，改用 2K 重试`);
+      res = await send('2K');
+    }
+    if (!res.ok) throw await this.dataEyesError(res);
+    const data: any = await res.json();
+    if (data?.error) throw classifyAiError(0, String(data.error.code || ''), String(data.error.message || ''), 'dataeyes');
+    const src = this.extractEditedImage(data);
+    if (!src) {
+      throw new AiConfigError(
+        `模型「${id}」没有返回图片：它可能不是出图模型。请在「引导配置」里换成 Seedream 或 Gemini 图像模型。`,
+        'noimage',
+        'dataeyes',
+        JSON.stringify(Object.keys(data || {})),
+      );
+    }
+    const images = Number(data?.usage?.generated_images) || 1;
+    return done(await this.fetchResultImage(src, ms), images);
+  }
+
   /**
    * 测试平台连通：GET 模型列表（不出图、不扣费）。
    * 200 = Key 有效；401/403 = Key 无效；其他 = 服务可达但无法用此方式验证 Key。
@@ -621,8 +777,10 @@ export class AliyunService {
       const id = String(m?.id || m?.name || m?.model || '').trim();
       if (!id || seen.has(id)) continue;
       seen.add(id);
-      const meta = `${id} ${m?.task_type || ''} ${m?.domain || ''} ${m?.type || ''} ${(m?.modalities || []).join?.(' ') || ''}`;
-      const image = /seedream|seededit|image[-_ ]?(gen|edit)|imagegeneration|qwen-image|wanx|wan2\.\d.*(i2i|image)|hy-image|hunyuan.*image|flux|cogview|text_to_image|image_to_image/i.test(meta);
+      const meta = `${id} ${m?.task_type || ''} ${m?.domain || ''} ${m?.type || ''} ${(m?.modalities || []).join?.(' ') || ''} ${(m?.supported_endpoint_types || []).join?.(' ') || ''}`;
+      const image =
+        !/video|t2v|i2v|r2v|tts|speech|transcribe|embedding/i.test(id) &&
+        /seedream|seededit|image[-_ ]?(gen|edit)|imagegeneration|qwen-image|wanx|wan\d(\.\d)?-image|wan2\.\d.*(i2i|image)|hy-image|hunyuan.*image|flux|kontext|cogview|text_to_image|image_to_image|gpt-image|gemini.*image|banana|grok-imagine-image/i.test(meta);
       models.push({ id, image, suggested: suggested.includes(id) });
     }
     // 推荐的放最前；列表里没有的推荐模型也补上（可能是列表接口没返回出图模型）
@@ -705,6 +863,23 @@ export class AliyunService {
     this.logger.debug(`mock ocr ${meta.width}x${meta.height}`);
     return { result: { columns, uncertain }, usage: { tokensIn: 2600, tokensOut: 400, images: 1 }, raw: '' };
   }
+}
+
+/** Gemini 图像支持的宽高比里，挑最接近原图的 */
+function nearestAspect(w: number, h: number): string {
+  const opts = ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'];
+  const r = w / Math.max(1, h);
+  let best = '3:4';
+  let diff = Infinity;
+  for (const o of opts) {
+    const [a, b] = o.split(':').map(Number);
+    const d = Math.abs(Math.log(r / (a / b)));
+    if (d < diff) {
+      diff = d;
+      best = o;
+    }
+  }
+  return best;
 }
 
 const NEGATIVE_PROMPT = '改字，错字，补字，漏字，增加文字，删除文字，变形，模糊，水印，彩色，纸张纹理，阴影，边框装饰';

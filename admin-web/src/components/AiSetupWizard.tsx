@@ -7,6 +7,8 @@ import { SecretInput } from './SecretInput';
 export type WizardPlatform = {
   code: string;
   name: string;
+  featured?: boolean;
+  intro?: string;
   configured: boolean;
   consoleUrl: string;
   docsUrl?: string;
@@ -140,6 +142,7 @@ export const AiSetupWizard: React.FC<{
     models: { id: string; image: boolean; suggested: boolean }[];
   }>({ loading: false, note: '', error: '', models: [] });
   const [showAll, setShowAll] = useState(false);
+  const [showOtherPlatforms, setShowOtherPlatforms] = useState(false);
   const primaryRef = useRef<() => void>(() => {});
 
   const go = (n: number) => {
@@ -160,7 +163,9 @@ export const AiSetupWizard: React.FC<{
         const list: WizardPlatform[] = (data.platforms || []).filter((p: WizardPlatform) => p.imageEdit?.supported);
         setPlatforms(list);
         setModels((data.models || []).filter((m: any) => m.purpose === 'clean'));
-        const pick = list.find((p) => p.code === initialPlatform) || list.find((p) => p.configured) || list[0];
+        const pick =
+          list.find((p) => p.code === initialPlatform) || list.find((p) => p.featured) || list.find((p) => p.configured) || list[0];
+        setShowOtherPlatforms(!!pick && !pick.featured);
         setCode(pick?.code || '');
         setKey(pick?.fields.find((f) => f.key === 'apiKey')?.value || '');
         setModelCode(pick?.imageEdit.suggestedModels?.[0] || '');
@@ -281,7 +286,7 @@ export const AiSetupWizard: React.FC<{
         purpose: 'clean',
         platform: p.code,
         model: m,
-        displayName: exist?.displayName || `图片处理-${p.name}`,
+        displayName: exist?.displayName || (p.featured ? `图片处理-${m}` : `图片处理-${p.name}`),
         billing: 'image',
         enabled: 1,
         isDefault: makeDefault ? 1 : exist?.isDefault ? 1 : 0,
@@ -434,12 +439,10 @@ export const AiSetupWizard: React.FC<{
             <>
               <div>
                 <div className="text-sm font-semibold text-[#1D1D1F]">选择一个平台</div>
-                <p className="text-[11px] text-[#86868B] mt-0.5">
-                  选你已有账号的平台；都没有就选「火山方舟」或「阿里云百炼」，注册后按下一步的说明操作。双击卡片可直接进入下一步。
-                </p>
+                <p className="text-[11px] text-[#86868B] mt-0.5">推荐用聚合平台：注册一个账号、填一个 Key，图片处理和文字识别都能用。双击卡片可直接进入下一步。</p>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {platforms.map((x) => (
+              {(() => {
+                const card = (x: WizardPlatform, big: boolean) => (
                   <button
                     key={x.code}
                     type="button"
@@ -448,25 +451,50 @@ export const AiSetupWizard: React.FC<{
                       choosePlatform(x.code);
                       go(2);
                     }}
-                    className={`text-left p-4 rounded-2xl border-2 cursor-pointer transition-colors ${
+                    className={`w-full text-left ${big ? 'p-5' : 'p-4'} rounded-2xl border-2 cursor-pointer transition-colors ${
                       code === x.code ? 'border-[#0071E3] bg-[#0071E3]/[0.04]' : 'border-transparent bg-[#F5F5F7]/90 hover:bg-[#F0F0F3]'
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-sm font-semibold text-[#1D1D1F]">{x.name}</span>
+                      <span className={`${big ? 'text-base' : 'text-sm'} font-semibold text-[#1D1D1F]`}>
+                        {x.name}
+                        {big ? <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-[#0071E3] text-white align-middle">推荐</span> : null}
+                      </span>
                       {x.configured ? (
                         <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[#34C759]/10 text-[#248A3D]">已配置 Key</span>
                       ) : (
                         <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-black/[0.05] text-[#86868B]">未配置</span>
                       )}
                     </div>
+                    {big && x.intro ? <div className="text-xs text-[#1D1D1F] mt-2 leading-relaxed">{x.intro}</div> : null}
                     <div className="text-[11px] text-[#6E6E73] mt-1.5 font-mono truncate">
-                      {x.imageEdit.suggestedModels?.[0] || '—'}
+                      {big ? '推荐模型：' + (x.imageEdit.suggestedModels || []).slice(0, 2).join('、') : x.imageEdit.suggestedModels?.[0] || '—'}
                     </div>
                     {x.guide?.modelTip ? <div className="text-[11px] text-[#86868B] mt-1 leading-snug">{x.guide.modelTip}</div> : null}
                   </button>
-                ))}
-              </div>
+                );
+                const featured = platforms.filter((x) => x.featured);
+                const others = platforms.filter((x) => !x.featured);
+                return (
+                  <>
+                    <div className="space-y-3">{featured.map((x) => card(x, true))}</div>
+                    {others.length ? (
+                      <div className="pt-1">
+                        <button
+                          type="button"
+                          onClick={() => setShowOtherPlatforms((v) => !v)}
+                          className="text-[11px] font-semibold text-[#0071E3] cursor-pointer"
+                        >
+                          {showOtherPlatforms ? '收起其他平台' : `已有其他平台的账号？展开 ${others.length} 个直连平台`}
+                        </button>
+                        {showOtherPlatforms ? (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">{others.map((x) => card(x, false))}</div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </>
+                );
+              })()}
             </>
           )}
 
