@@ -1,5 +1,6 @@
 import { ScanItem, Task, User } from '../types';
 import { authImageUrl } from './client';
+import type { OcrTask, OcrPage, OcrSourceTask, OcrTextPage } from '../types';
 import { DEFAULT_UI_PARAMS, nestToUiParams } from './params';
 
 /** Friendly duration: 320ms / 1.2s / 12.3s / 1分05秒; empty when missing */
@@ -17,7 +18,7 @@ export function formatProcessingTime(ms?: number | null): string {
   return mins + '分' + String(secs).padStart(2, '0') + '秒';
 }
 
-function formatTime(t?: string) {
+export function formatTime(t?: string) {
   if (!t) return '';
   try {
     const d = new Date(t);
@@ -133,4 +134,68 @@ export function mapTask(raw: any, images?: any[]): Task {
       return pt == null || !Number.isFinite(Number(pt)) ? undefined : Number(pt);
     })(),
   } as Task;
+}
+
+export function mapOcrTask(raw: any): OcrTask {
+  const pt = raw.processingTimeMs;
+  return {
+    id: String(raw.id),
+    name: raw.name || '未命名 OCR 任务',
+    sourceTaskId: String(raw.sourceTaskId ?? ''),
+    sourceTaskName: raw.sourceTaskName || '',
+    status: (raw.status || 'pending') as OcrTask['status'],
+    totalCount: Number(raw.totalCount) || 0,
+    doneCount: Number(raw.doneCount) || 0,
+    confirmedCount: Number(raw.confirmedCount) || 0,
+    errorMessage: raw.errorMessage || null,
+    errorCode: raw.errorCode || null,
+    estimatedCost: raw.estimatedCost != null ? Number(raw.estimatedCost) : null,
+    actualCost: raw.actualCost != null ? Number(raw.actualCost) || 0 : 0,
+    processingTimeMs: pt == null || !Number.isFinite(Number(pt)) ? undefined : Number(pt),
+    ocrModelName: raw.ocrModelName || null,
+    uncertainCount: Number(raw.uncertainCount) || 0,
+    charCount: Number(raw.charCount) || 0,
+    createdAt: formatTime(raw.createdAt),
+    updatedAt: formatTime(raw.updatedAt || raw.createdAt),
+  };
+}
+
+export function mapOcrPage(raw: any, taskId: string | number, pageNumber: number): OcrPage {
+  return {
+    id: String(raw.id),
+    taskId: String(taskId),
+    pageNumber,
+    fileName: raw.fileName || `page_${pageNumber}`,
+    status: (raw.status || 'pending') as OcrPage['status'],
+    imageUrl: authImageUrl(raw.imageUrl),
+    width: Number(raw.width) || 0,
+    height: Number(raw.height) || 0,
+    charCount: Number(raw.charCount) || 0,
+    uncertainCount: Number(raw.uncertainCount) || 0,
+    errorMessage: raw.errorMessage || null,
+    columns: raw.data?.columns,
+  };
+}
+
+export function mapOcrSource(raw: any): OcrSourceTask {
+  return {
+    id: String(raw.id),
+    name: raw.name || '',
+    surname: raw.surname || undefined,
+    totalCount: Number(raw.totalCount) || 0,
+    usableCount: Number(raw.usableCount) || 0,
+    updatedAt: formatTime(raw.updatedAt),
+  };
+}
+
+export function mapOcrTextPage(raw: any): OcrTextPage {
+  return {
+    pageId: String(raw.pageId),
+    pageNo: Number(raw.pageNo) || 0,
+    fileName: raw.fileName || '',
+    status: raw.status,
+    uncertainCount: Number(raw.uncertainCount) || 0,
+    charCount: Number(raw.charCount) || 0,
+    columns: Array.isArray(raw.columns) ? raw.columns : [],
+  };
 }

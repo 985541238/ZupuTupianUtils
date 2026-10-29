@@ -4,6 +4,8 @@ import { AlertCircle, ExternalLink } from 'lucide-react';
 import { AiModalShell, WizardPlatform } from './AiSetupWizard';
 
 export type AiProblem = {
+  /** 来自 OCR 识别任务（默认是图片处理任务） */
+  kind?: 'ocr';
   taskId?: string;
   taskName?: string;
   /** 服务端给的说明；「\n详情：」后面是平台原始信息 */

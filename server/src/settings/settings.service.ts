@@ -5,7 +5,7 @@ import { Setting } from './setting.entity';
 import { AiModel } from './ai-model.entity';
 import { Task } from '../tasks/task.entity';
 import { decryptSecret, encryptSecret, maskSecret } from '../common/secret';
-import { DEFAULT_CLEAN_PROMPT, DEFAULT_OCR_PROMPT, LEGACY_CLEAN_PROMPTS } from './prompts';
+import { DEFAULT_CLEAN_PROMPT, DEFAULT_OCR_PROMPT, LEGACY_CLEAN_PROMPTS, LEGACY_OCR_PROMPTS } from './prompts';
 import { PLATFORMS, PlatformCode, getPlatformDef, guessPlatform } from './platforms';
 
 export const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
@@ -62,6 +62,10 @@ export class SettingsService implements OnModuleInit {
       for (const legacy of LEGACY_CLEAN_PROMPTS) {
         const r = await this.models.update({ purpose: 'clean', prompt: legacy }, { prompt: DEFAULT_CLEAN_PROMPT });
         if (r.affected) this.logger.log(`已把 ${r.affected} 个图片处理模型的提示词升级为新版（只去污渍、整体不变）`);
+      }
+      for (const legacy of LEGACY_OCR_PROMPTS) {
+        const r = await this.models.update({ purpose: 'ocr', prompt: legacy }, { prompt: DEFAULT_OCR_PROMPT });
+        if (r.affected) this.logger.log(`已把 ${r.affected} 个文字识别模型的提示词升级为新版（拆分双行小字、框更紧）`);
       }
     } catch (e) {
       this.logger.error(`升级提示词失败: ${e}`);

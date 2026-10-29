@@ -1,13 +1,17 @@
 import React from 'react';
 import { User } from '../types';
-import { BookOpen, LogOut, ChevronLeft, Settings, LayoutList } from 'lucide-react';
+import { BookOpen, LogOut, ChevronLeft, Settings, Image as ImageIcon, ScanText } from 'lucide-react';
 
-export type MainViewTab = 'tasks' | 'workbench' | 'settings';
+export type MainViewTab = 'tasks' | 'workbench' | 'ocr' | 'ocrReview' | 'settings';
 
 interface TopNavProps {
   currentTab: MainViewTab;
   onBackToTasks: () => void;
   onOpenSettings?: () => void;
+  /** 进入 OCR 识别任务列表 */
+  onOpenOcr?: () => void;
+  /** 从 OCR 审阅返回 OCR 任务列表 */
+  onBackToOcr?: () => void;
   user: User;
   onLogout: () => void;
   activeTaskName?: string;
@@ -18,6 +22,8 @@ export const TopNav: React.FC<TopNavProps> = ({
   currentTab,
   onBackToTasks,
   onOpenSettings,
+  onOpenOcr,
+  onBackToOcr,
   user,
   onLogout,
   activeTaskName,
@@ -32,15 +38,15 @@ export const TopNav: React.FC<TopNavProps> = ({
     <header className="h-16 apple-glass border-b border-black/[0.06] px-6 lg:px-10 flex items-center justify-between gap-4 select-none shrink-0 z-30">
       {/* 左：品牌 + 导航（审核页显示返回与当前任务） */}
       <div className="flex items-center gap-5 min-w-0">
-        {currentTab === 'workbench' ? (
+        {currentTab === 'workbench' || currentTab === 'ocrReview' ? (
           <div className="flex items-center gap-3 min-w-0">
             <button
-              onClick={onBackToTasks}
+              onClick={currentTab === 'ocrReview' && onBackToOcr ? onBackToOcr : onBackToTasks}
               className="flex items-center gap-1.5 h-9 px-3.5 rounded-xl bg-white hover:bg-[#F5F5F7] border border-black/[0.08] text-sm font-semibold text-[#1D1D1F] transition-all cursor-pointer shadow-2xs"
-              title="返回任务列表"
+              title={currentTab === 'ocrReview' ? '返回 OCR 任务列表' : '返回任务列表'}
             >
               <ChevronLeft className="w-4 h-4 stroke-[2.2] text-[#0071E3]" />
-              <span>返回任务列表</span>
+              <span>{currentTab === 'ocrReview' ? '返回 OCR 列表' : '返回任务列表'}</span>
             </button>
             <div className="h-5 w-px bg-black/[0.08]" />
             <div className="flex items-center gap-2 text-sm min-w-0">
@@ -50,7 +56,7 @@ export const TopNav: React.FC<TopNavProps> = ({
               </span>
               {activeTaskProgress && (
                 <span className="font-mono text-xs px-2 py-0.5 rounded-full bg-[#0071E3]/10 text-[#0071E3] font-semibold shrink-0">
-                  {activeTaskProgress.reviewed}/{activeTaskProgress.total} 页已核
+                  {activeTaskProgress.reviewed}/{activeTaskProgress.total} {currentTab === 'ocrReview' ? '页已确认' : '页已核'}
                 </span>
               )}
             </div>
@@ -65,9 +71,15 @@ export const TopNav: React.FC<TopNavProps> = ({
             </div>
             <nav className="flex items-center gap-1">
               <button type="button" onClick={onBackToTasks} className={navBtn(currentTab === 'tasks')}>
-                <LayoutList className="w-4 h-4" />
-                任务
+                <ImageIcon className="w-4 h-4" />
+                图片处理
               </button>
+              {onOpenOcr ? (
+                <button type="button" onClick={onOpenOcr} className={navBtn(currentTab === 'ocr')}>
+                  <ScanText className="w-4 h-4" />
+                  OCR识别
+                </button>
+              ) : null}
               {onOpenSettings ? (
                 <button type="button" onClick={onOpenSettings} className={navBtn(currentTab === 'settings')}>
                   <Settings className="w-4 h-4" />

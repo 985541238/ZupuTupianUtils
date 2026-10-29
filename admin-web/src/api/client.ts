@@ -115,6 +115,27 @@ export const api = {
     request<any>('/files/browse' + (path != null ? '?path=' + encodeURIComponent(path) : '')),
   getDefaultFolder: () => request<{ path: string }>('/files/default-folder'),
 
+  // ---- OCR 识别任务 ----
+  getOcrTasks: () => request<any[]>('/ocr-tasks'),
+  getOcrSources: () => request<any[]>('/ocr-tasks/sources'),
+  createOcrTask: (data: { name?: string; sourceTaskId: number | string; ocrModelId?: number | null }) =>
+    request<any>('/ocr-tasks', { method: 'POST', body: JSON.stringify(data) }),
+  getOcrTask: (id: string | number) => request<any>('/ocr-tasks/' + id),
+  deleteOcrTask: (id: string | number) => request<any>('/ocr-tasks/' + id, { method: 'DELETE' }),
+  startOcrTask: (id: string | number) => request<any>('/ocr-tasks/' + id + '/start', { method: 'POST', body: '{}' }),
+  getOcrPages: (id: string | number) => request<any[]>('/ocr-tasks/' + id + '/pages'),
+  getOcrPage: (id: string | number, pageId: string | number) => request<any>(`/ocr-tasks/${id}/pages/${pageId}`),
+  saveOcrPage: (id: string | number, pageId: string | number, columns: any[]) =>
+    request<any>(`/ocr-tasks/${id}/pages/${pageId}`, { method: 'PUT', body: JSON.stringify({ columns }) }),
+  confirmOcrPage: (id: string | number, pageId: string | number, columns?: any[]) =>
+    request<any>(`/ocr-tasks/${id}/pages/${pageId}/confirm`, { method: 'POST', body: JSON.stringify(columns ? { columns } : {}) }),
+  reopenOcrPage: (id: string | number, pageId: string | number) =>
+    request<any>(`/ocr-tasks/${id}/pages/${pageId}/reopen`, { method: 'POST', body: '{}' }),
+  recognizeOcrPage: (id: string | number, pageId: string | number) =>
+    request<any>(`/ocr-tasks/${id}/pages/${pageId}/recognize`, { method: 'POST', body: '{}' }),
+  confirmOcrTask: (id: string | number) => request<any>('/ocr-tasks/' + id + '/confirm', { method: 'POST', body: '{}' }),
+  getOcrText: (id: string | number) => request<any>('/ocr-tasks/' + id + '/text'),
+
   getSettings: () => request<any>('/settings'),
   saveAliyun: (body: any) => request<any>('/settings/aliyun', { method: 'PUT', body: JSON.stringify(body) }),
   testAliyun: () => request<any>('/settings/aliyun/test', { method: 'POST', body: '{}' }),
@@ -203,4 +224,8 @@ export async function previewImageBlob(
   // ai = 这一页仍以大模型结果为准（调参数只更新备用的算法结果）
   (blob as any).resultMode = res.headers.get('X-Result-Mode') || 'algo';
   return blob;
+}
+
+export function ocrExportUrl(taskId: string | number, mode: 'columns' | 'flow' = 'columns'): string {
+  return `${BASE}/ocr-tasks/${taskId}/export?mode=${mode}&access_token=${encodeURIComponent(getToken())}`;
 }

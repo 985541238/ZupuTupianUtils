@@ -431,7 +431,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
         {/* Top Header & New Task Button */}
         <div className="flex items-center justify-between gap-4 mb-5 pb-3.5 border-b border-black/[0.06]">
           <div>
-            <h1 className="text-2xl font-bold text-[#1D1D1F] tracking-tight">任务列表</h1>
+            <h1 className="text-2xl font-bold text-[#1D1D1F] tracking-tight">图片处理任务</h1>
             <p className="text-sm text-[#86868B] mt-1 font-medium">
               一本谱书一个任务：把旧谱复印页处理成白底黑字，供后续识别与数据化
             </p>
@@ -1097,18 +1097,9 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                   )}
 
                   <div className="pt-4 border-t border-black/[0.06]">
-                    <div className="flex items-start gap-2.5 opacity-60 cursor-not-allowed" title="下期开放">
-                      <input type="checkbox" className="mt-0.5" checked={false} disabled readOnly />
-                      <span className="min-w-0">
-                        <span className="flex items-center gap-2 text-sm font-semibold text-[#1D1D1F]">
-                          AI 识别文字
-                          <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-black/[0.06] text-[#6E6E73] font-semibold">下期开放</span>
-                        </span>
-                        <span className="block text-xs text-[#86868B] mt-1 leading-relaxed">
-                          图片处理完成后自动识别每页文字，并标出没把握的字。
-                        </span>
-                      </span>
-                    </div>
+                    <p className="text-xs text-[#86868B] leading-relaxed">
+                      文字识别是单独的任务：图片处理审阅完成后，到顶部「OCR 识别」选择本任务，即可识别整本文字。
+                    </p>
                   </div>
                 </div>
               </div>
