@@ -663,7 +663,15 @@ export class TasksService implements OnModuleInit {
     const cur = this.aiJobs.get(Number(img.id));
     if (cur?.state === 'running') return { state: 'running', startedAt: cur.startedAt };
     if (img.status === 'processing') throw new BadRequestException('这一页正在整本处理中，请稍后再试');
-    const modelId = Number(body?.modelId || img.aiModelId || task.cleanModelId || 0);
+    // 用户明确选了模型就必须用它；它不可用时报错让用户重新选，不能悄悄换成别的模型（会花不一样的钱）
+    const explicitId = Number(body?.modelId || 0);
+    if (explicitId) {
+      const chosen = await this.settings.getModel(explicitId);
+      if (!chosen || !chosen.enabled || chosen.purpose !== 'clean') {
+        throw new BadRequestException('所选的图片处理模型已被停用或删除，请重新选择一个模型');
+      }
+    }
+    const modelId = explicitId || Number(img.aiModelId || task.cleanModelId || 0);
     let model = modelId ? await this.settings.getModel(modelId) : null;
     if (!model || !model.enabled || model.purpose !== 'clean') model = await this.settings.defaultModel('clean');
     if (!model) throw new BadRequestException('请先在「模型配置」添加并启用图片处理模型');

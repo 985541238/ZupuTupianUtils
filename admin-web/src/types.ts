@@ -135,6 +135,8 @@ export interface OcrTask {
   failedCount: number;
   /** 识别之后图片处理里又调整过的页数 */
   staleCount?: number;
+  /** 任务选用的识别模型是否还可用（被删/停用时开始前要先重新选） */
+  modelUsable?: boolean;
   /** 正在识别的页（页序号 + 开始时间戳） */
   processingPages: { pageNo: number; startedAt: number }[];
   createdAt: string;
@@ -157,6 +159,11 @@ export interface OcrPage {
   errorMessage?: string | null;
   /** 图片处理里重新调整过这一页，识别文字基于旧图 */
   imageChanged?: boolean;
+  /** 本页文字是哪个模型识别的 */
+  modelName?: string | null;
+  /** 有重新识别前的上一版可以恢复 */
+  hasPrev?: boolean;
+  prevModelName?: string | null;
   /** 图片处理里这一页后来被标为未通过 */
   imageRejected?: boolean;
   /** 只有单页详情接口才带 */

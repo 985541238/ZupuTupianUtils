@@ -118,6 +118,10 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   const [rightPanelTab, setRightPanelTab] = useState<'params' | 'aiClean'>('params');
   const [cleanModels, setCleanModels] = useState<any[]>([]);
   const [selectedCleanModelId, setSelectedCleanModelId] = useState<number | null>(null);
+  /** 每个图片处理模型处理一页大约多少钱（元），下拉里直接比较 */
+  const [cleanPerPage, setCleanPerPage] = useState<Record<number, number | null>>({});
+  /** 每页最近一次大模型处理失败的原因：留在面板里，不是弹一下就没了 */
+  const [aiNotes, setAiNotes] = useState<Record<string, string>>({});
   const [aiProcessBusy, setAiProcessBusy] = useState(false);
   /** 正在后台用大模型处理的页（可同时处理多页，处理期间可翻页） */
   const [aiBusyIds, setAiBusyIds] = useState<string[]>([]);
@@ -569,6 +573,12 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
           enabled.find((m: any) => m.isDefault) ||
           enabled[0];
         setSelectedCleanModelId(def ? Number(def.id) : null);
+        enabled.forEach((m: any) => {
+          api
+            .estimateCost(Number(m.id), 1)
+            .then((r: any) => !cancelled && setCleanPerPage((o) => ({ ...o, [Number(m.id)]: r?.priced && r.cost != null ? Number(r.cost) : null })))
+            .catch(() => {});
+        });
       } catch {
         if (!cancelled) {
           setCleanModels([]);
@@ -578,6 +588,13 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
     })();
     return () => { cancelled = true; };
   }, []);
+
+  // 翻到另一页时，下拉默认选这一页上次用过的模型（没有就保持原选择）
+  React.useEffect(() => {
+    const mid = currentItem?.aiModelId;
+    if (mid && cleanModels.some((m: any) => Number(m.id) === Number(mid))) setSelectedCleanModelId(Number(mid));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentItem?.id, cleanModels.length]);
 
   /** 服务端返回的图片数据 → 刷新当前页显示（结果图、缓存、会话预览） */
   const applyServerImage = (raw: any, item: ScanItem) => {
@@ -611,13 +628,23 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
       return;
     }
     const item = currentItem;
+    if (item.hasAiResult) {
+      const m = cleanModels.find((x: any) => Number(x.id) === Number(selectedCleanModelId));
+      const per = selectedCleanModelId != null ? cleanPerPage[selectedCleanModelId] : null;
+      if (!window.confirm(`这一页已经有大模型结果了。用「${m?.displayName || '所选模型'}」重新处理会再收一次费${per != null ? `（约 ¥${per.toFixed(2)}）` : ''}，处理成功后会替换现在的大模型结果。继续吗？`)) return;
+    }
+    setAiNotes((o) => {
+      const n = { ...o };
+      delete n[item.id];
+      return n;
+    });
     setAiBusyIds((ids) => [...ids, item.id]);
     const finish = () => setAiBusyIds((ids) => ids.filter((x) => x !== item.id));
     try {
       await api.aiProcessImage(task.id, item.id, { modelId: selectedCleanModelId || undefined });
     } catch (e: any) {
       finish();
-      alert(e?.message || '提交大模型处理失败');
+      setAiNotes((o) => ({ ...o, [item.id]: e?.message || '提交大模型处理失败' }));
       return;
     }
     const started = Date.now();
@@ -641,7 +668,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
             `第 ${item.pageNumber} 页已用大模型处理完成${Number.isFinite(cost) && cost > 0 ? `，本页累计 ¥${cost.toFixed(2)}` : ''}`,
           );
         } else if (r.state === 'failed') {
-          alert(`第 ${item.pageNumber} 页大模型处理失败：${r.error || '未知原因'}`);
+          setAiNotes((o) => ({ ...o, [item.id]: `第 ${item.pageNumber} 页大模型处理失败：${r.error || '未知原因'}` }));
         } else {
           alert('没有找到这一页的处理记录（服务可能重启过），请重新点击「使用大模型处理」');
         }
@@ -1726,7 +1753,11 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                   >
                     {!cleanModels.length && <option value="">暂无可用模型，请先到「模型配置」添加</option>}
                     {cleanModels.map((m) => (
-                      <option key={m.id} value={m.id}>{m.displayName}</option>
+                      <option key={m.id} value={m.id}>
+                        {m.displayName}
+                        {cleanPerPage[Number(m.id)] != null ? ` · 约¥${cleanPerPage[Number(m.id)]!.toFixed(2)}/页` : ''}
+                        {currentItem?.aiModelId && Number(m.id) === Number(currentItem.aiModelId) ? ' · 本页上次用的' : ''}
+                      </option>
                     ))}
                   </select>
                 </div>
@@ -1739,6 +1770,12 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                   <Sparkles className={`w-3.5 h-3.5 ${curAiBusy ? 'animate-spin' : ''}`} />
                   <span>{curAiBusy ? '处理中…（约 20~60 秒）' : currentItem?.hasAiResult ? '用大模型重新处理' : '使用大模型处理'}</span>
                 </button>
+                {currentItem && aiNotes[currentItem.id] && !curAiBusy ? (
+                  <div className="rounded-xl bg-[#FF3B30]/[0.07] border border-[#FF3B30]/20 px-3 py-2.5 text-[12px] text-[#C62828] leading-relaxed">
+                    <p>{aiNotes[currentItem.id]}</p>
+                    <p className="mt-1 text-[11px] text-[#86868B]">失败不会自动重试。可以在上面换一个模型，再点一次。</p>
+                  </div>
+                ) : null}
               </div>
               {currentItem ? (
                 <div className="p-3.5 bg-white rounded-2xl border border-black/[0.06] shadow-2xs space-y-3">

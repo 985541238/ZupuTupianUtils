@@ -144,6 +144,8 @@ export class OcrService implements OnModuleInit {
         .filter((p) => p.status === 'processing')
         .map((p) => ({ pageNo: Number(p.sortOrder) + 1, startedAt: new Date(p.updatedAt).getTime() })),
       ocrModelName: model?.displayName || null,
+      /** 任务选用的识别模型还在且已启用；否则开始前要先让用户重新选 */
+      modelUsable: !!model && !!model.enabled && model.purpose === 'ocr',
       staleCount,
       uncertainCount: sum?.unc || 0,
       charCount: sum?.chars || 0,
@@ -356,11 +358,11 @@ export class OcrService implements OnModuleInit {
   }
 
   /** 识别一页：调模型 → 按图片摆到逐字位置 → 存库。模型已返回之后的失败也要把费用记上。 */
-  private async recognizeInner(taskId: number, pageId: number) {
+  private async recognizeInner(taskId: number, pageId: number, modelOverrideId?: number) {
     const task = await this.tasks.findOne({ where: { id: taskId } });
     const page = await this.pages.findOne({ where: { id: pageId } });
     if (!task || !page) return;
-    const model = await this.settings.getModel(task.ocrModelId);
+    const model = await this.settings.getModel(modelOverrideId || task.ocrModelId);
     if (!model) throw new Error('识别模型不存在');
     // 永远用图片处理里「当前」的结果图（用户可能在那边重新调整过）
     const live = (await this.liveImages([page])).get(Number(page.id))!;
@@ -409,6 +411,12 @@ export class OcrService implements OnModuleInit {
       this.logger.warn(`layout failed, use even layout: ${e?.message || e}`);
       layout = this.evenLayout(page.width || 1000, page.height || 1400, result.columns, result.uncertain);
     }
+    // 重新识别：先把上一版（含人工修改）留一份，用户觉得新的不如旧的可以恢复
+    if (page.dataJson) {
+      page.prevDataJson = page.dataJson;
+      page.prevModelName = page.modelName;
+    }
+    page.modelName = model.displayName || model.model;
     this.fillPage(page, layout);
     const bad = layout.columns.filter((c) => c.x && c.x >= 3 && Math.abs(c.chars.length - c.x) >= 2 && Math.abs(c.chars.length - c.x) / c.x > 0.25).length;
     page.errorMessage = result.partial ? '模型输出不完整（可能被截断），后面的文字可能缺失，请对照图片核对，必要时重新识别。' : bad ? `有 ${bad} 列的字数与图上对不上（可能漏字或并字），已用橙色标出，请逐列核对，或换个模型重新识别。` : null;
@@ -578,7 +586,7 @@ export class OcrService implements OnModuleInit {
 
   private pageView(p: OcrPage, withData: boolean, live?: { path: string; sig: string | null; rejected: boolean }) {
     const bust = 't=' + encodeURIComponent(live?.sig || String(new Date(p.updatedAt || Date.now()).getTime()));
-    const { dataJson, imagePath: savedPath, imageSig, ...rest } = p as any;
+    const { dataJson, imagePath: savedPath, imageSig, prevDataJson, ...rest } = p as any;
     const imagePath = live?.path || savedPath;
     let data: any = null;
     if (withData && dataJson) {
@@ -591,6 +599,7 @@ export class OcrService implements OnModuleInit {
     return {
       ...rest,
       /** 图片处理里重新调整过这一页，识别文字是基于旧图的 */
+      hasPrev: !!prevDataJson,
       imageChanged: this.isStale(p, live),
       /** 图片处理里这一页后来被标成了「未通过」 */
       imageRejected: !!live?.rejected,
@@ -659,6 +668,27 @@ export class OcrService implements OnModuleInit {
     return this.pageView(p, true);
   }
 
+  /** 恢复重新识别之前的那一版（含当时的人工修改）；再点一次又换回新的 */
+  async restorePage(userId: number, id: number, pageId: number) {
+    const t = await this.getTask(userId, id);
+    const p = await this.getPage(t.id, pageId);
+    if (p.status === 'processing' || this.pageJobs.has(Number(p.id))) throw new BadRequestException('这一页正在识别，请稍后再试');
+    if (!p.prevDataJson) throw new BadRequestException('没有可恢复的上一版');
+    const cur = p.dataJson;
+    const curName = p.modelName;
+    const d = JSON.parse(p.prevDataJson) as { columns: LayoutColumn[] };
+    p.dataJson = p.prevDataJson;
+    p.modelName = p.prevModelName;
+    p.prevDataJson = cur;
+    p.prevModelName = curName;
+    this.fillPage(p, { width: p.width || 0, height: p.height || 0, columns: d.columns || [] });
+    p.status = 'ready';
+    p.errorMessage = null;
+    await this.pages.save(p);
+    await this.afterPageChange(t);
+    return this.pageView(p, true);
+  }
+
   async reopenPage(userId: number, id: number, pageId: number) {
     const t = await this.getTask(userId, id);
     const p = await this.getPage(t.id, pageId);
@@ -684,7 +714,7 @@ export class OcrService implements OnModuleInit {
   }
 
   /** 单页重新识别（再收一次费，覆盖人工修改） */
-  async recognizePage(userId: number, id: number, pageId: number, body: { modelId?: number } = {}) {
+  async recognizePage(userId: number, id: number, pageId: number, body: { modelId?: number; setDefault?: boolean } = {}) {
     const t = await this.getTask(userId, id);
     const p = await this.getPage(t.id, pageId);
     const tid = Number(t.id);
@@ -706,10 +736,12 @@ export class OcrService implements OnModuleInit {
       throw new BadRequestException(e?.message || String(e));
     }
     // 后台执行，接口马上返回；前端轮询页面状态（识别一页常要几十秒，不让请求一直挂着）
-    if (body?.modelId && Number(model.id) !== Number(t.ocrModelId)) {
+    // 单页换模型只对这一页生效；用户勾选「后面的页也用它」才改任务的模型
+    if (body?.modelId && body?.setDefault && Number(model.id) !== Number(t.ocrModelId)) {
       t.ocrModelId = Number(model.id);
       await this.tasks.save(t);
     }
+    const useModelId = Number(model.id);
     const hadData = !!p.dataJson;
     p.status = 'processing';
     p.errorMessage = null;
@@ -717,7 +749,7 @@ export class OcrService implements OnModuleInit {
     this.pageJobs.add(Number(p.id));
     void (async () => {
       try {
-        await this.recognizeInner(tid, p.id);
+        await this.recognizeInner(tid, p.id, useModelId);
       } catch (e: any) {
         const msg = e instanceof AiConfigError ? e.message : String(e?.message || e);
         this.logger.warn(`OCR page ${p.id} re-recognize failed: ${msg}`);

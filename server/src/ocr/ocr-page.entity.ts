@@ -41,6 +41,17 @@ export class OcrPage {
   @Column({ name: 'data_json', type: 'mediumtext', nullable: true })
   dataJson: string | null;
 
+  /** 本页的文字是哪个模型识别的（换模型对比时看得出来） */
+  @Column({ name: 'model_name', type: 'varchar', length: 128, nullable: true })
+  modelName: string | null;
+
+  /** 重新识别前的上一版（含人工修改）。只留一版，可「恢复上一版」，再点一次又换回来 */
+  @Column({ name: 'prev_data_json', type: 'mediumtext', nullable: true })
+  prevDataJson: string | null;
+
+  @Column({ name: 'prev_model_name', type: 'varchar', length: 128, nullable: true })
+  prevModelName: string | null;
+
   @Column({ name: 'error_message', type: 'text', nullable: true })
   errorMessage: string | null;
 

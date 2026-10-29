@@ -438,19 +438,51 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
     }
   };
 
-  const recognizeAgain = async (modelId?: number | null) => {
+  /** 恢复重新识别之前的那一版（含当时的人工修改）；再点一次又换回新的 */
+  const restorePrev = async () => {
+    if (!cur) return;
+    setBusy(true);
+    try {
+      if (saveTimer.current) window.clearTimeout(saveTimer.current);
+      await flushSave();
+      const raw = await api.restoreOcrPage(task.id, cur.id);
+      const cols: OcrColumn[] | undefined = raw?.data?.columns;
+      if (cols) {
+        cache.current.set(cur.id, cols);
+        setColumns(cols);
+      }
+      patchPage(cur.id, {
+        status: 'ready',
+        modelName: raw.modelName || null,
+        prevModelName: raw.prevModelName || null,
+        hasPrev: !!raw.hasPrev,
+        charCount: Number(raw.charCount) || 0,
+        uncertainCount: Number(raw.uncertainCount) || 0,
+        errorMessage: null,
+      });
+      setSel(null);
+      onTaskChanged?.();
+      showToast('已恢复上一版；想换回刚才的结果，再点一次「换回」即可');
+    } catch (e: any) {
+      showToast(e?.message || '恢复失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const recognizeAgain = async (modelId?: number | null, setDefault = false) => {
     if (!cur) return;
     setRerunDlg(false);
     setBusy(true);
     try {
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
       dirty.current = null;
-      await api.recognizeOcrPage(task.id, cur.id, modelId);
+      await api.recognizeOcrPage(task.id, cur.id, modelId, setDefault);
       // 后台识别：先把这页标成「识别中」，列表轮询会在完成后自动更新
       cache.current.delete(cur.id);
       setColumns(null);
-      patchPage(cur.id, { status: 'processing', errorMessage: null });
-      showToast(`第 ${cur.pageNumber} 页开始识别，完成后会自动显示`);
+      patchPage(cur.id, { status: 'processing', errorMessage: null, hasPrev: columns ? true : cur.hasPrev });
+      showToast(`第 ${cur.pageNumber} 页开始识别，完成后会自动显示${columns ? '（旧的这一版会保留，可随时恢复）' : ''}`);
     } catch (e: any) {
       if (e?.errorCode && onOpenSetup) {
         alert(e.message);
@@ -838,6 +870,20 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                       {busy ? '处理中…' : '完成本页并看下一页'}
                     </button>
                   )}
+                  {cur.modelName ? (
+                    <p className="text-[11px] text-[#86868B] text-center">本页由「{cur.modelName}」识别</p>
+                  ) : null}
+                  {cur.hasPrev && cur.status !== 'processing' ? (
+                    <button
+                      disabled={busy}
+                      onClick={() => void restorePrev()}
+                      className="w-full h-9 text-[13px] font-semibold rounded-xl bg-white border border-black/[0.1] text-[#1D1D1F] hover:bg-[#F5F5F7] cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5"
+                      title="恢复到重新识别之前的文字（含当时的修改），再点一次可换回"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      恢复上一版{cur.prevModelName ? `（${cur.prevModelName}）` : ''}
+                    </button>
+                  ) : null}
                   <button
                     disabled={busy || cur.status === 'processing'}
                     onClick={() => setRerunDlg(true)}
@@ -888,15 +934,21 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
         title={columns ? `重新识别第 ${cur?.pageNumber} 页` : `识别第 ${cur?.pageNumber} 页`}
         desc={
           columns
-            ? '会再调用一次识别模型（产生费用），并覆盖这一页现有的文字和你做过的修改。可以换一个模型试试。'
+            ? `会再调用一次识别模型（产生费用）。${cur?.modelName ? `这一页现在是「${cur.modelName}」识别的，` : ''}换个模型往往比原模型再识别一次更有用。`
             : '失败就是失败，不会自动重试。可以换一个模型再识别这一页。'
         }
+        warn={
+          columns
+            ? `新结果会替换这一页现有的文字${columns.some((c) => c.chars.some((x) => x.e === 1)) ? `（包括你改过的 ${columns.reduce((a, c) => a + c.chars.filter((x) => x.e === 1).length, 0)} 处）` : ''}，但旧的这一版会保留，不满意可以点「恢复上一版」。`
+            : undefined
+        }
+        defaultChoice={{ label: '后面的页也用这个模型', checked: false }}
         confirmText="开始识别"
         currentModelId={task.ocrModelId}
         pageCount={1}
         onClose={() => setRerunDlg(false)}
         onOpenSetup={onOpenSetup}
-        onConfirm={(modelId) => recognizeAgain(modelId)}
+        onConfirm={(modelId, setDefault) => recognizeAgain(modelId, setDefault)}
       />
 
       {finishDlg && (

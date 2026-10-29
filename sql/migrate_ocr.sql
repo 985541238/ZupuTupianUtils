@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS `ocr_pages` (
   `height` INT NULL,
   `status` VARCHAR(32) NOT NULL DEFAULT 'pending' COMMENT 'pending|processing|ready|confirmed|failed',
   `data_json` MEDIUMTEXT NULL COMMENT '逐列逐字结果 {columns:[{id,box,chars:[{t,b,u,e,alt,r}]}]}',
+  `model_name` VARCHAR(128) NULL COMMENT '识别本页的模型',
+  `prev_data_json` MEDIUMTEXT NULL COMMENT '重新识别前的上一版',
+  `prev_model_name` VARCHAR(128) NULL,
   `error_message` TEXT NULL,
   `char_count` INT NOT NULL DEFAULT 0,
   `uncertain_count` INT NOT NULL DEFAULT 0,
@@ -50,3 +53,4 @@ CREATE TABLE IF NOT EXISTS `ocr_pages` (
 
 -- 老库升级（已有 ocr_pages 表时执行一次；启动时服务也会自动补，列已存在会忽略）
 -- ALTER TABLE `ocr_pages` ADD COLUMN `image_sig` VARCHAR(128) NULL AFTER `image_path`;
+-- ALTER TABLE `ocr_pages` ADD COLUMN `model_name` VARCHAR(128) NULL, ADD COLUMN `prev_data_json` MEDIUMTEXT NULL, ADD COLUMN `prev_model_name` VARCHAR(128) NULL;

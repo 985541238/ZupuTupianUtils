@@ -20,15 +20,25 @@ export const OcrModelPicker: React.FC<{
   currentModelId?: number | null;
   /** 将识别的页数，用于估算费用 */
   pageCount?: number;
-  onConfirm: (modelId: number) => void | Promise<void>;
+  /** 额外提醒（比如：重新识别会覆盖你改过的 N 处，但会保留上一版） */
+  warn?: string;
+  /** 「后面的页也用这个模型」勾选项；不传就不显示（比如整本继续识别，本来就是改任务的模型） */
+  defaultChoice?: { label: string; checked: boolean } | null;
+  onConfirm: (modelId: number, setDefault: boolean) => void | Promise<void>;
   onClose: () => void;
   onOpenSetup?: (platform?: string | null, step?: 1 | 2 | 3) => void;
-}> = ({ open, title, desc, confirmText, currentModelId, pageCount = 1, onConfirm, onClose, onOpenSetup }) => {
+}> = ({ open, title, desc, confirmText, currentModelId, pageCount = 1, warn, defaultChoice, onConfirm, onClose, onOpenSetup }) => {
+  const [perPage, setPerPage] = useState<Record<number, number | null>>({});
+  const [setDefault, setSetDefault] = useState(false);
   const [models, setModels] = useState<any[]>([]);
   const [modelId, setModelId] = useState<number | null>(null);
   const [est, setEst] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (open) setSetDefault(!!defaultChoice?.checked);
+  }, [open, defaultChoice?.checked]);
 
   useEffect(() => {
     if (!open) return;
@@ -41,6 +51,13 @@ export const OcrModelPicker: React.FC<{
         const keep = enabled.find((m: any) => Number(m.id) === Number(currentModelId));
         const def = keep || enabled.find((m: any) => m.isDefault) || enabled[0];
         setModelId(def ? Number(def.id) : null);
+        // 每个模型每页大约多少钱，让人在下拉里直接比较
+        enabled.forEach((m: any) => {
+          api
+            .estimateCost(Number(m.id), 1)
+            .then((r) => setPerPage((o) => ({ ...o, [Number(m.id)]: r?.priced && r.cost != null ? Number(r.cost) : null })))
+            .catch(() => {});
+        });
       })
       .catch(() => setModels([]))
       .finally(() => setLoading(false));
@@ -87,7 +104,10 @@ export const OcrModelPicker: React.FC<{
             >
               {models.map((m) => (
                 <option key={m.id} value={m.id}>
-                  {m.displayName}（{m.model}）{Number(m.id) === Number(currentModelId) ? ' · 当前' : ''}
+                  {m.displayName}
+                  {perPage[Number(m.id)] != null ? ` · 约¥${perPage[Number(m.id)]!.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}/页` : ''}
+                  {looksTextOnly(m) ? ' · 纯文字，不能看图' : ''}
+                  {Number(m.id) === Number(currentModelId) ? ' · 当前用的' : ''}
                 </option>
               ))}
             </select>
@@ -104,10 +124,23 @@ export const OcrModelPicker: React.FC<{
         ) : (
           <p className="text-xs text-[#C93400]">还没有启用的文字识别模型，请先添加。</p>
         )}
+        {sel ? (
+          <p className="text-[11px] text-[#86868B] mt-1.5 font-mono break-all">
+            {sel.model}
+            {sel.platformName ? ` · ${sel.platformName}` : ''}
+          </p>
+        ) : null}
         {sel && looksTextOnly(sel) ? (
           <p className="text-xs text-[#C93400] mt-1.5 leading-relaxed bg-[#FF9500]/10 rounded-lg px-2.5 py-2">
             「{sel.model}」看起来是纯文字模型，不能真正看图。建议换成带视觉的模型（如 GLM-4.5V、Qwen-VL 系列）。
           </p>
+        ) : null}
+        {warn ? <p className="text-xs text-[#6E6E73] mt-3 leading-relaxed bg-[#F5F5F7] rounded-lg px-2.5 py-2">{warn}</p> : null}
+        {defaultChoice ? (
+          <label className="flex items-center gap-2 mt-3 text-[13px] text-[#1D1D1F] cursor-pointer select-none">
+            <input type="checkbox" checked={setDefault} onChange={(e) => setSetDefault(e.target.checked)} className="accent-[#0071E3] w-4 h-4" />
+            {defaultChoice.label}
+          </label>
         ) : null}
         <div className="flex items-baseline justify-between rounded-xl bg-[#F5F5F7] px-3.5 py-2.5 mt-3">
           <span className="text-xs text-[#6E6E73]">预估费用（{pageCount} 页）</span>
@@ -128,7 +161,7 @@ export const OcrModelPicker: React.FC<{
               if (!modelId) return;
               setSubmitting(true);
               try {
-                await onConfirm(modelId);
+                await onConfirm(modelId, setDefault);
               } finally {
                 setSubmitting(false);
               }

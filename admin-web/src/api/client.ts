@@ -134,8 +134,13 @@ export const api = {
     request<any>(`/ocr-tasks/${id}/pages/${pageId}/reopen`, { method: 'POST', body: '{}' }),
   realignOcrPage: (id: string | number, pageId: string | number) =>
     request<any>(`/ocr-tasks/${id}/pages/${pageId}/realign`, { method: 'POST', body: '{}' }),
-  recognizeOcrPage: (id: string | number, pageId: string | number, modelId?: number | null) =>
-    request<any>(`/ocr-tasks/${id}/pages/${pageId}/recognize`, { method: 'POST', body: JSON.stringify(modelId ? { modelId } : {}) }),
+  recognizeOcrPage: (id: string | number, pageId: string | number, modelId?: number | null, setDefault?: boolean) =>
+    request<any>(`/ocr-tasks/${id}/pages/${pageId}/recognize`, {
+      method: 'POST',
+      body: JSON.stringify(modelId ? { modelId, setDefault: !!setDefault } : {}),
+    }),
+  restoreOcrPage: (id: string | number, pageId: string | number) =>
+    request<any>(`/ocr-tasks/${id}/pages/${pageId}/restore`, { method: 'POST', body: '{}' }),
   confirmOcrTask: (id: string | number) => request<any>('/ocr-tasks/' + id + '/confirm', { method: 'POST', body: '{}' }),
   getOcrText: (id: string | number) => request<any>('/ocr-tasks/' + id + '/text'),
 

@@ -34,6 +34,9 @@ export const OCR_SCHEMA_SQL: string[] = [
   \`height\` INT NULL,
   \`status\` VARCHAR(32) NOT NULL DEFAULT 'pending' COMMENT 'pending|processing|ready|confirmed|failed',
   \`data_json\` MEDIUMTEXT NULL COMMENT '逐列逐字结果 {columns:[{id,box,chars:[{t,b,u,e,alt,r}]}]}',
+  \`model_name\` VARCHAR(128) NULL COMMENT '识别本页的模型',
+  \`prev_data_json\` MEDIUMTEXT NULL COMMENT '重新识别前的上一版',
+  \`prev_model_name\` VARCHAR(128) NULL,
   \`error_message\` TEXT NULL,
   \`char_count\` INT NOT NULL DEFAULT 0,
   \`uncertain_count\` INT NOT NULL DEFAULT 0,
@@ -52,4 +55,7 @@ export const OCR_SCHEMA_SQL: string[] = [
 /** 老库升级：补列（已存在会报错，忽略即可） */
 export const OCR_ALTER_SQL: string[] = [
   "ALTER TABLE `ocr_pages` ADD COLUMN `image_sig` VARCHAR(128) NULL COMMENT '识别时所用图片的签名' AFTER `image_path`",
+  "ALTER TABLE `ocr_pages` ADD COLUMN `model_name` VARCHAR(128) NULL",
+  "ALTER TABLE `ocr_pages` ADD COLUMN `prev_data_json` MEDIUMTEXT NULL",
+  "ALTER TABLE `ocr_pages` ADD COLUMN `prev_model_name` VARCHAR(128) NULL",
 ];

@@ -439,7 +439,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                     <div className="flex items-center justify-end gap-2 shrink-0 md:pl-2">
                       {(task.status === 'pending' || task.status === 'failed') && (
                         <button
-                          onClick={() => (task.status === 'failed' || task.doneCount > 0 ? setRetryTask(task) : onStart(task.id))}
+                          onClick={() => (task.status === 'failed' || task.doneCount > 0 || task.modelUsable === false ? setRetryTask(task) : onStart(task.id))}
                           className="h-10 px-5 text-sm font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
                         >
                           <Play className="w-3 h-3 fill-current" />
@@ -741,9 +741,11 @@ export const OcrTaskCenterView: React.FC<Props> = ({
 
         <OcrModelPicker
           open={!!retryTask}
-          title={retryTask?.status === 'failed' ? '继续识别' : '重试失败的页'}
+          title={retryTask?.modelUsable === false ? '请重新选择识别模型' : retryTask?.status === 'failed' ? '继续识别' : retryTask?.doneCount ? '重试失败的页' : '开始识别'}
           desc={
-            retryTask?.status === 'failed'
+            retryTask?.modelUsable === false
+              ? '这个任务原来用的识别模型已被删除或停用，请选一个能看图的模型。之后这个任务都用你选的这个。'
+              : retryTask?.status === 'failed'
               ? '只识别还没完成的页，已识别的页不会重复识别和收费。可以换一个模型。'
               : `只重新识别失败的 ${retryTask?.failedCount || 0} 页，已识别的页不会重复收费。失败就是失败，不会自动重试，换个模型试试往往更好。`
           }
