@@ -82,6 +82,9 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
   const [busy, setBusy] = useState(false);
   const [confirmDlg, setConfirmDlg] = useState<null | { pending: number; placeholder: number; thenNext: boolean }>(null);
   const [rerunDlg, setRerunDlg] = useState(false);
+  /** 要单独重识别的列（序号从 0 起） */
+  const [colDlg, setColDlg] = useState<number | null>(null);
+  const [colBusy, setColBusy] = useState<number | null>(null);
   const [finishDlg, setFinishDlg] = useState(false);
 
   const cur = pages.find((p) => p.id === curId) || null;
@@ -438,6 +441,48 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
     }
   };
 
+  /** 只重新识别某一列：服务端把这一列裁出来单独识别，旧的一版保留可恢复 */
+  const recognizeColumn = async (col: number, modelId: number) => {
+    if (!cur) return;
+    setColDlg(null);
+    setColBusy(col);
+    try {
+      if (saveTimer.current) window.clearTimeout(saveTimer.current);
+      await flushSave();
+      const raw = await api.recognizeOcrColumn(task.id, cur.id, col, modelId);
+      const cols: OcrColumn[] | undefined = raw?.data?.columns;
+      if (cols) {
+        cache.current.set(cur.id, cols);
+        setColumns(cols);
+      }
+      patchPage(cur.id, {
+        status: 'ready',
+        modelName: raw.modelName || null,
+        prevModelName: raw.prevModelName || null,
+        hasPrev: !!raw.hasPrev,
+        charCount: Number(raw.charCount) || 0,
+        uncertainCount: Number(raw.uncertainCount) || 0,
+      });
+      setSel(null);
+      onTaskChanged?.();
+      showToast(`第 ${col + 1} 列已重新识别，旧的一版保留，不满意可「恢复上一版」`);
+    } catch (e: any) {
+      showToast(e?.message || '这一列识别失败，原来的内容没有改动');
+    } finally {
+      setColBusy(null);
+    }
+  };
+
+  /** 删除一整列（模型把页边印章、杂点当成了文字列，或把一列拆多了） */
+  const removeColumn = (col: number) => {
+    if (!columns) return;
+    const c = columns[col];
+    const text = c.chars.map((x) => x.t).join('');
+    if (!window.confirm(`删除第 ${col + 1} 列「${text.slice(0, 12)}${text.length > 12 ? '…' : ''}」（${c.chars.length} 字）？这一步不能撤销。`)) return;
+    applyColumns(columns.filter((_, i) => i !== col).map((x, i) => ({ ...x, id: i })));
+    setSel(null);
+  };
+
   /** 恢复重新识别之前的那一版（含当时的人工修改）；再点一次又换回新的 */
   const restorePrev = async () => {
     if (!cur) return;
@@ -786,7 +831,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                         <div className="text-xs font-semibold text-[#1D1D1F] mb-1.5">本页文字（从右到左，点字跳到图上位置）</div>
                         <div className="rounded-2xl bg-[#F5F5F7] border border-black/[0.05] p-2.5 space-y-1.5 max-h-[300px] overflow-y-auto">
                           {columns.map((c, ci) => (
-                            <div key={ci} className="flex gap-2 items-start">
+                            <div key={ci} className="group flex gap-2 items-start">
                               <span className="text-[10px] text-[#86868B] tabular-nums w-5 pt-1 shrink-0 text-right">{ci + 1}</span>
                               <div className="flex flex-wrap" style={{ fontFamily: FONT }}>
                                 {c.chars.map((ch, k) => {
@@ -812,6 +857,24 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                                   );
                                 })}
                               </div>
+                              <span className="ml-auto shrink-0 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+                                <button
+                                  disabled={colBusy != null || busy}
+                                  onClick={() => setColDlg(ci)}
+                                  title="只重新识别这一列（把这一列裁出来单独识别，更准）"
+                                  className="p-1 rounded text-[#6E6E73] hover:text-[#0071E3] hover:bg-[#0071E3]/10 cursor-pointer disabled:opacity-40"
+                                >
+                                  {colBusy === ci ? <Sparkles className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
+                                </button>
+                                <button
+                                  disabled={colBusy != null || busy}
+                                  onClick={() => removeColumn(ci)}
+                                  title="删除这一列（页边印章、杂点被当成文字时）"
+                                  className="p-1 rounded text-[#6E6E73] hover:text-[#FF3B30] hover:bg-[#FF3B30]/10 cursor-pointer disabled:opacity-40"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </span>
                             </div>
                           ))}
                         </div>
@@ -951,6 +1014,19 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
         onConfirm={(modelId, setDefault) => recognizeAgain(modelId, setDefault)}
       />
 
+      <OcrModelPicker
+        open={colDlg != null}
+        title={`只重新识别第 ${(colDlg ?? 0) + 1} 列`}
+        desc="把这一列从图上裁出来单独识别，比整页识别更清楚；只花一次小图的费用。可以换模型。"
+        warn="这一列现有的文字会被替换，旧的一版会保留，不满意可以「恢复上一版」。"
+        confirmText="识别这一列"
+        currentModelId={task.ocrModelId}
+        pageCount={1}
+        onClose={() => setColDlg(null)}
+        onOpenSetup={onOpenSetup}
+        onConfirm={(modelId) => (colDlg != null ? recognizeColumn(colDlg, modelId) : undefined)}
+      />
+
       {finishDlg && (
         <Modal onClose={() => setFinishDlg(false)}>
           <div className="flex items-start gap-3 mb-4">
@@ -1040,6 +1116,27 @@ interface CanvasProps {
 /** 这一列的字数和图上对不上（模型漏字或几个字并成一个） */
 const colMismatch = (c: OcrColumn) => !!c.x && c.x >= 3 && Math.abs(c.chars.length - c.x) >= 2 && Math.abs(c.chars.length - c.x) / c.x > 0.25;
 
+/** 两列的框大面积重叠：多半是模型把同一列/小字注拆成了好几列，格子叠在了同一处 */
+const overlapCols = (cols: OcrColumn[] | null): Set<number> => {
+  const out = new Set<number>();
+  if (!cols) return out;
+  for (let i = 0; i < cols.length; i++) {
+    const a = cols[i].box;
+    if (!(a[2] > a[0] && a[3] > a[1])) continue;
+    for (let j = i + 1; j < cols.length; j++) {
+      const b = cols[j].box;
+      if (!(b[2] > b[0] && b[3] > b[1])) continue;
+      const ox = Math.min(a[2], b[2]) - Math.max(a[0], b[0]);
+      const oy = Math.min(a[3], b[3]) - Math.max(a[1], b[1]);
+      if (ox > 0.6 * Math.min(a[2] - a[0], b[2] - b[0]) && oy > 0.5 * Math.min(a[3] - a[1], b[3] - b[1])) {
+        out.add(i);
+        out.add(j);
+      }
+    }
+  }
+  return out;
+};
+
 const sameSel = (a: Sel, b: Sel) => !!a && !!b && a.col === b.col && a.idx === b.idx;
 
 const PageCanvas: React.FC<CanvasProps> = ({
@@ -1092,6 +1189,7 @@ const PageCanvas: React.FC<CanvasProps> = ({
   const dw = Math.round(W * scale);
   const dh = Math.round(H * scale);
 
+  const overlapSet = useMemo(() => overlapCols(columns), [columns]);
   const active: Sel = hover || sel;
   const activeChar = active && columns?.[active.col]?.chars[active.idx];
   const selChar = sel && columns?.[sel.col]?.chars[sel.idx];
@@ -1208,14 +1306,14 @@ const PageCanvas: React.FC<CanvasProps> = ({
         {/* 字数对不上的列：红色虚线框 + 角标，提示这一列可能漏字/并字 */}
         {columns &&
           columns.map((c, ci) =>
-            colMismatch(c) ? (
+            colMismatch(c) || overlapSet.has(ci) ? (
               <div
                 key={'mm' + ci}
                 className="absolute border-2 border-dashed border-[#FF3B30]/70 rounded-sm pointer-events-none"
                 style={{ left: c.box[0] * scale - 4, top: c.box[1] * scale - 4, width: (c.box[2] - c.box[0]) * scale + 8, height: (c.box[3] - c.box[1]) * scale + 8 }}
               >
                 <span className="absolute -top-5 left-0 whitespace-nowrap text-[10px] font-semibold text-white bg-[#FF3B30] rounded px-1.5 py-0.5">
-                  字数对不上：识别 {c.chars.length}，图上约 {c.x}
+                  {overlapSet.has(ci) && !colMismatch(c) ? `第 ${ci + 1} 列和相邻列重叠，可能被拆乱了` : `字数对不上：识别 ${c.chars.length}，图上约 ${c.x}`}
                 </span>
               </div>
             ) : null,
@@ -1233,7 +1331,10 @@ const PageCanvas: React.FC<CanvasProps> = ({
               const isHover = sameSel(hover, { col: ci, idx: k });
               const textOn = !compare && showText;
               const dim = onlyPending && !pending && !isSel && !isHover;
-              const tone = !textOn
+              const blank = ch.z === 1 && ch.e !== 1;
+              const tone = blank
+                ? 'border-dashed border-[#8E8E93] bg-[#8E8E93]/10 text-[#6E6E73]'
+                : !textOn
                 ? pending
                   ? ch.t === '□'
                     ? 'border-[#FF3B30]/70 bg-[#FF3B30]/10'
@@ -1259,10 +1360,10 @@ const PageCanvas: React.FC<CanvasProps> = ({
                     isSel ? 'ring-2 ring-[#0071E3] z-10 !bg-[#0071E3]/25' : ''
                   } ${isHover ? '!bg-[#FFD60A]/45 !border-[#FF9500] ring-2 ring-[#FF9500] z-20' : ''} ${dim ? 'opacity-25' : ''}`}
                   style={{ left: x1 * scale, top: y1 * scale, width: w, height: h }}
-                  title={pending ? ch.r || '待核对：点击修改' : '点击修改'}
+                  title={blank ? '图上这里是空白：可能是多给的字。点击后可删除或修改' : pending ? ch.r || '待核对：点击修改' : '点击修改'}
                 >
                   {textOn ? (
-                    <span style={{ fontFamily: FONT, fontSize: Math.max(8, Math.min(w, h) * 0.82), lineHeight: 1, fontWeight: 600, opacity: textOpacity }}>
+                    <span style={{ fontFamily: FONT, fontSize: Math.max(8, Math.min(w, h) * 0.82), lineHeight: 1, fontWeight: 600, opacity: blank ? 0.45 : textOpacity }}>
                       {ch.t}
                     </span>
                   ) : null}
@@ -1464,7 +1565,9 @@ const TextReader: React.FC<{
                           ? 'bg-[#FFD60A]/60 text-[#1D1D1F] ring-2 ring-[#FF9500]'
                           : isSel
                             ? 'bg-[#0071E3] text-white'
-                            : ch.t === '□'
+                            : ch.z === 1 && ch.e !== 1
+                              ? 'bg-[#8E8E93]/15 text-[#8E8E93] border border-dashed border-[#8E8E93]'
+                              : ch.t === '□'
                               ? 'bg-[#FF3B30]/15 text-[#C62828]'
                               : pending
                                 ? 'bg-[#FF9500]/22 text-[#B45309]'

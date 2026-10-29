@@ -139,6 +139,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(modelId ? { modelId, setDefault: !!setDefault } : {}),
     }),
+  recognizeOcrColumn: (id: string | number, pageId: string | number, col: number, modelId?: number | null) =>
+    request<any>(`/ocr-tasks/${id}/pages/${pageId}/columns/${col}/recognize`, { method: 'POST', body: JSON.stringify(modelId ? { modelId } : {}) }),
   restoreOcrPage: (id: string | number, pageId: string | number) =>
     request<any>(`/ocr-tasks/${id}/pages/${pageId}/restore`, { method: 'POST', body: '{}' }),
   confirmOcrTask: (id: string | number) => request<any>('/ocr-tasks/' + id + '/confirm', { method: 'POST', body: '{}' }),

@@ -76,6 +76,18 @@ export class OcrController {
     return this.ocr.realignPage(req.user.id, id, pageId);
   }
 
+  /** 只重新识别某一列（可换模型）；会产生一次小图的费用，旧的一版保留可恢复 */
+  @Post(':id/pages/:pageId/columns/:col/recognize')
+  recognizeColumn(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('pageId', ParseIntPipe) pageId: number,
+    @Param('col', ParseIntPipe) col: number,
+    @Body() body: any,
+  ) {
+    return this.ocr.recognizeColumn(req.user.id, id, pageId, col, body || {});
+  }
+
   @Post(':id/pages/:pageId/restore')
   restore(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Param('pageId', ParseIntPipe) pageId: number) {
     return this.ocr.restorePage(req.user.id, id, pageId);

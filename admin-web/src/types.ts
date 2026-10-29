@@ -93,6 +93,8 @@ export interface Task {
 
 /** OCR 识别：一个字及其在图片上的位置（像素） */
 export interface OcrChar {
+  /** 1 = 这个位置在图上是空白（没有笔画）：多半是模型多给的字 */
+  z?: 0 | 1;
   t: string;
   b: [number, number, number, number];
   /** 1 = 模型没把握 / 占位符，需要人看 */

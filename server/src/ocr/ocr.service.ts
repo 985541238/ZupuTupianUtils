@@ -11,6 +11,9 @@ import { SettingsService } from '../settings/settings.service';
 import { AliyunService, AiConfigError, OcrParseError } from '../ai/aliyun.service';
 import { getPlatformDef } from '../settings/platforms';
 import { OCR_ALTER_SQL, OCR_SCHEMA_SQL } from './ocr-schema';
+import * as os from 'os';
+import * as path from 'path';
+import { COLUMN_OCR_PROMPT } from '../settings/prompts';
 import { LayoutChar, LayoutColumn, PageLayout, layoutPage } from './ocr-layout';
 
 // 这些属于配置问题，整本暂停；限流(quota)等其它错误只让这一页失败，可重试
@@ -419,7 +422,21 @@ export class OcrService implements OnModuleInit {
     page.modelName = model.displayName || model.model;
     this.fillPage(page, layout);
     const bad = layout.columns.filter((c) => c.x && c.x >= 3 && Math.abs(c.chars.length - c.x) >= 2 && Math.abs(c.chars.length - c.x) / c.x > 0.25).length;
-    page.errorMessage = result.partial ? '模型输出不完整（可能被截断），后面的文字可能缺失，请对照图片核对，必要时重新识别。' : bad ? `有 ${bad} 列的字数与图上对不上（可能漏字或并字），已用橙色标出，请逐列核对，或换个模型重新识别。` : null;
+    const blankN = layout.columns.reduce((a, c) => a + c.chars.filter((x) => x.z === 1).length, 0);
+    // 列数：模型识别出的列数和图上数出来的列数差得多，多半是漏列/把一列拆成多列/把小字注当成了单独的列
+    const colGap =
+      layout.detected && layout.detected >= 4 && Math.abs(layout.columns.length - layout.detected) >= 3 && Math.abs(layout.columns.length - layout.detected) / layout.detected > 0.25
+        ? `模型识别出 ${layout.columns.length} 列，图上大约有 ${layout.detected} 列，列数可能不对（页边小字、双行小注会让数字有偏差）。请对照图片检查，有问题的列可以「重识别本列」或删除。`
+        : '';
+    page.errorMessage =
+      [
+        result.partial ? '模型输出不完整（可能被截断），后面的文字可能缺失，请对照图片核对，必要时重新识别。' : '',
+        bad ? `有 ${bad} 列的字数与图上对不上（可能漏字或并字），已用红框标出，请逐列核对。` : '',
+        blankN ? `有 ${blankN} 个字落在了图上的空白处（灰色虚线格），多半是模型多给的字或位置没对上，请核对后删除或重识别该列。` : '',
+        colGap,
+      ]
+        .filter(Boolean)
+        .join('') || null;
     page.status = 'ready';
     page.processingTimeMs = Date.now() - started;
     await this.pages.save(page);
@@ -630,6 +647,7 @@ export class OcrService implements OnModuleInit {
         const out: LayoutChar = { t, b: box(ch?.b, [0, 0, 0, 0]) };
         if (ch?.u === 1) out.u = 1;
         if (ch?.e === 1) out.e = 1;
+        if (ch?.z === 1) out.z = 1;
         if (Array.isArray(ch?.alt)) out.alt = ch.alt.map((s: any) => String(s)).filter((s: string) => Array.from(s).length === 1).slice(0, 5);
         if (typeof ch?.r === 'string' && ch.r) out.r = ch.r.slice(0, 60);
         return out;
@@ -666,6 +684,102 @@ export class OcrService implements OnModuleInit {
     await this.pages.save(p);
     await this.afterPageChange(t);
     return this.pageView(p, true);
+  }
+
+  /**
+   * 只重新识别某一列：把这一列从处理后的图上裁出来（略带边距），单独交给模型。
+   * 整页识别时模型常数错一列的字数；单列图又清楚又小，识别更准，费用也只是一次小图。
+   * 同步返回（单列图很快）。重做前留一版上一版，可恢复。
+   */
+  async recognizeColumn(userId: number, id: number, pageId: number, colIdx: number, body: { modelId?: number } = {}) {
+    const t = await this.getTask(userId, id);
+    const p = await this.getPage(t.id, pageId);
+    if (p.status === 'processing' || this.pageJobs.has(Number(p.id))) throw new BadRequestException('这一页正在识别，请稍后再试');
+    if (!p.dataJson) throw new BadRequestException('这一页还没有识别结果');
+    const data = JSON.parse(p.dataJson) as { columns: LayoutColumn[] };
+    const col = data.columns[colIdx];
+    if (!col) throw new BadRequestException('没有这一列');
+    const [bx1, by1, bx2, by2] = col.box || [0, 0, 0, 0];
+    if (!(bx2 > bx1 && by2 > by1)) throw new BadRequestException('这一列没有位置信息，无法单独识别');
+
+    let model = t.ocrModelId ? await this.settings.getModel(t.ocrModelId) : null;
+    if (body?.modelId) {
+      const chosen = await this.settings.getModel(Number(body.modelId));
+      if (!chosen || !chosen.enabled || chosen.purpose !== 'ocr') throw new BadRequestException('所选识别模型不可用，请重新选择');
+      model = chosen;
+    }
+    if (!model || !model.enabled) throw new BadRequestException({ message: '识别模型已被删除或停用，请换一个识别模型后重试。', errorCode: 'model:' });
+    try {
+      await this.aliyun.assertReady(model);
+    } catch (e: any) {
+      if (e instanceof AiConfigError) throw new BadRequestException({ message: e.message, errorCode: `${e.kind}:${e.platform || ''}` });
+      throw new BadRequestException(e?.message || String(e));
+    }
+    const live = (await this.liveImages([p])).get(Number(p.id))!;
+    if (!live.path || !fs.existsSync(live.path)) throw new BadRequestException('处理后图片找不到了，请回到图片处理确认该页');
+    const meta = await sharp(live.path, { failOn: 'none' }).metadata();
+    const W = meta.width || p.width || 1;
+    const H = meta.height || p.height || 1;
+    const cw = bx2 - bx1;
+    const padX = Math.max(10, Math.round(cw * 0.18));
+    const padY = Math.max(10, Math.round((by2 - by1) * 0.03));
+    const x0 = Math.max(0, Math.floor(bx1 - padX));
+    const y0 = Math.max(0, Math.floor(by1 - padY));
+    const x1 = Math.min(W, Math.ceil(bx2 + padX));
+    const y1 = Math.min(H, Math.ceil(by2 + padY));
+    const tmp = path.join(os.tmpdir(), `ocr_col_${p.id}_${Date.now()}.png`);
+    await sharp(live.path, { failOn: 'none' })
+      .rotate()
+      .flatten({ background: '#ffffff' })
+      .extract({ left: x0, top: y0, width: x1 - x0, height: y1 - y0 })
+      .png()
+      .toFile(tmp);
+    try {
+      let out;
+      try {
+        out = await this.aliyun.ocr(tmp, model, { prompt: COLUMN_OCR_PROMPT, maxSide: 1600 });
+      } catch (e: any) {
+        if (e instanceof OcrParseError) {
+          const c = this.settings.toCny(model, this.aliyun.cost(model, e.usage)) || 0;
+          await this.settings.learnTokens(Number(model.id), e.usage.tokensIn, e.usage.tokensOut);
+          await this.addCost(Number(t.id), c);
+        }
+        if (e instanceof AiConfigError) throw new BadRequestException({ message: e.message, errorCode: `${e.kind}:${e.platform || ''}` });
+        throw new BadRequestException('这一列识别失败：' + (e?.message || e));
+      }
+      const { result, usage } = out;
+      const cost = this.settings.toCny(model, this.aliyun.cost(model, usage)) || 0;
+      await this.settings.learnTokens(Number(model.id), usage.tokensIn, usage.tokensOut);
+      await this.addCost(Number(t.id), cost);
+      p.cost = String((Number(p.cost) || 0) + cost);
+
+      // 单列图里模型有时仍返回多列（双行注）：全部接上，替换原来的这一列
+      const lay = await layoutPage(tmp, result.columns, result.uncertain);
+      const dx = x0;
+      const dy = y0;
+      const shift = (b: number[]): [number, number, number, number] => [b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy];
+      const fresh: LayoutColumn[] = lay.columns.map((c) => ({
+        ...c,
+        box: shift(c.box),
+        chars: c.chars.map((ch) => ({ ...ch, b: shift(ch.b) })),
+      }));
+      if (!fresh.length || fresh.every((c) => !c.chars.length)) throw new BadRequestException('模型没有返回这一列的文字，原来的内容没有改动。');
+      p.prevDataJson = p.dataJson;
+      p.prevModelName = p.modelName;
+      const cols = [...data.columns.slice(0, colIdx), ...fresh, ...data.columns.slice(colIdx + 1)].map((c, i) => ({ ...c, id: i }));
+      this.fillPage(p, { width: p.width || W, height: p.height || H, columns: cols });
+      p.modelName = model.displayName || model.model;
+      if (p.status === 'confirmed') p.status = 'ready';
+      await this.pages.save(p);
+      await this.afterPageChange(t);
+      return this.pageView(p, true, live);
+    } finally {
+      try {
+        fs.unlinkSync(tmp);
+      } catch {
+        /* 忽略 */
+      }
+    }
   }
 
   /** 恢复重新识别之前的那一版（含当时的人工修改）；再点一次又换回新的 */

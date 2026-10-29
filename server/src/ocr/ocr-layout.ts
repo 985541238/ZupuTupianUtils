@@ -19,6 +19,8 @@ export interface LayoutChar {
   alt?: string[];
   /** 备注原因 */
   r?: string;
+  /** 1 = 这个位置在图上几乎是空白（没有笔画）：多半是模型多给的字，或这一列的位置没对上 */
+  z?: 0 | 1;
 }
 
 export interface LayoutColumn {
@@ -34,6 +36,8 @@ export interface PageLayout {
   width: number;
   height: number;
   columns: LayoutColumn[];
+  /** 按图上墨迹竖向投影数出来的列数（参考值，含小字注时会有偏差） */
+  detected?: number;
 }
 
 const MAX_SIDE = 1400;
@@ -106,6 +110,12 @@ export async function layoutPage(
       chars: chars.map((ch, k) => {
         const hit = un.find((u) => u.index === k);
         const item: LayoutChar = { t: ch, b: scaleBox(cells[k], 1 / s, W, H) };
+        // 这一格在图上几乎没有笔画 → 空白处，不能当成这个字的位置，要让人看到
+        if (ch !== '□' && inkDensity(ink, w, h, cells[k]) < 0.012) {
+          item.z = 1;
+          item.u = 1;
+          item.r = '这个位置图上是空白，可能是模型多给的字，或这一列的位置没对上';
+        }
         if (hit || ch === '□') {
           item.u = 1;
           if (hit?.candidates?.length) item.alt = hit.candidates.slice(0, 5);
@@ -116,7 +126,7 @@ export async function layoutPage(
       }),
     });
   });
-  return { width: W, height: H, columns: out };
+  return { width: W, height: H, columns: out, detected: detected.length };
 }
 
 /** 整页竖向投影，找出一列一列的文字（从右到左），[x1,x2] */
@@ -420,4 +430,19 @@ function pitchCells(
     out.push([col[0], col[1] + k * pitch, col[2], Math.min(col[3], col[1] + (k + 1) * pitch)]);
   }
   return out;
+}
+
+/** 一个格子里墨迹所占的比例（0~1） */
+function inkDensity(ink: Uint8Array, w: number, h: number, b: [number, number, number, number]): number {
+  const x1 = Math.max(0, Math.floor(b[0]));
+  const y1 = Math.max(0, Math.floor(b[1]));
+  const x2 = Math.min(w, Math.ceil(b[2]));
+  const y2 = Math.min(h, Math.ceil(b[3]));
+  if (x2 <= x1 || y2 <= y1) return 0;
+  let c = 0;
+  for (let y = y1; y < y2; y++) {
+    const row = y * w;
+    for (let x = x1; x < x2; x++) if (ink[row + x]) c++;
+  }
+  return c / ((x2 - x1) * (y2 - y1));
 }

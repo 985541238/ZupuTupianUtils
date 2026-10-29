@@ -171,10 +171,10 @@ export class AliyunService {
 
   // ---------------- 文字识别 ----------------
 
-  async ocr(imagePath: string, model: AiModel): Promise<{ result: OcrResult; usage: Usage; raw: string }> {
+  async ocr(imagePath: string, model: AiModel, opts: { prompt?: string; maxSide?: number } = {}): Promise<{ result: OcrResult; usage: Usage; raw: string }> {
     if (this.mock) return this.mockOcr(imagePath);
     const cfg = await this.assertReady(model);
-    const dataUri = await this.toDataUri(imagePath, 2048);
+    const dataUri = await this.toDataUri(imagePath, opts.maxSide || 2048);
     const build = () => {
       const body: any = {
         model: model.model,
@@ -183,7 +183,7 @@ export class AliyunService {
             role: 'user',
             content: [
               { type: 'image_url', image_url: { url: dataUri } },
-              { type: 'text', text: model.prompt || DEFAULT_OCR_PROMPT },
+              { type: 'text', text: opts.prompt || model.prompt || DEFAULT_OCR_PROMPT },
             ],
           },
         ],
