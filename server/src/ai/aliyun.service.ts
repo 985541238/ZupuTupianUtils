@@ -557,8 +557,8 @@ export class AliyunService {
           model: model.model,
           prompt,
           image,
-          // 5.0 官方推荐档位 2K
-          size: isSeedream5 ? '2K' : size || '2K',
+          // 按原图（裁剪后）尺寸要求；平台不接受时下面会自动去掉尺寸再试
+          size: size || '2K',
           ...(isSeedream5 ? {} : { sequential_image_generation: 'disabled' }),
           response_format: 'url',
           stream: false,
