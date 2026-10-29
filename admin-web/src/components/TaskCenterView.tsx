@@ -41,14 +41,10 @@ interface TaskCenterViewProps {
 
 type TimeFilterType = 'all' | 'today' | 'week' | 'month' | 'custom';
 
-/** 列表里的阶段：按后端真实状态分组（之前「处理中」被算进审阅中、「已暂停」被算进待处理） */
-type Stage = 'pending' | 'processing' | 'paused' | 'reviewing' | 'completed';
+/** 列表里的阶段：只分三类。未处理、处理中、暂停（失败）都算「待处理」，卡片上的状态标签仍会显示具体情况 */
+type Stage = 'pending' | 'reviewing' | 'completed';
 function stageOf(t: Task): Stage {
   switch (t.nestStatus) {
-    case 'processing':
-      return 'processing';
-    case 'failed':
-      return 'paused';
     case 'reviewing':
       return 'reviewing';
     case 'completed':
@@ -61,8 +57,6 @@ function stageOf(t: Task): Stage {
 const STAGE_TABS: { key: 'all' | Stage; label: string; tone: string }[] = [
   { key: 'all', label: '全部', tone: 'text-[#1D1D1F]' },
   { key: 'pending', label: '待处理', tone: 'text-[#FF9500]' },
-  { key: 'processing', label: '处理中', tone: 'text-[#0071E3]' },
-  { key: 'paused', label: '已暂停', tone: 'text-[#FF3B30]' },
   { key: 'reviewing', label: '审阅中', tone: 'text-[#0071E3]' },
   { key: 'completed', label: '已完成', tone: 'text-[#34C759]' },
 ];
@@ -463,8 +457,8 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
         </div>
 
         {/* 筛选栏：状态 / 创建时间（含自定义日期） / 搜索 */}
-        <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
-          <div className="flex flex-wrap items-center p-1 bg-[#E5E5EA]/75 rounded-xl border border-black/[0.04]">
+        <div className="flex flex-wrap xl:flex-nowrap items-center gap-3 mb-5">
+          <div className="flex items-center p-1 bg-[#E5E5EA]/75 rounded-xl border border-black/[0.04] shrink-0">
             {STAGE_TABS.map((t) => (
               <button
                 key={t.key}
@@ -479,8 +473,8 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
             ))}
           </div>
 
-          <div className="flex flex-wrap items-center gap-2.5">
-            <div className="flex items-center p-1 bg-[#E5E5EA]/75 rounded-xl border border-black/[0.04]">
+          <div className="flex items-center gap-2.5 min-w-0 flex-1 justify-end">
+            <div className="flex items-center p-1 bg-[#E5E5EA]/75 rounded-xl border border-black/[0.04] shrink-0">
               <span className="text-[#86868B] pl-2 pr-1.5 text-[13px] font-medium flex items-center gap-1.5">
                 <Calendar className="w-4 h-4 text-[#0071E3]" />
                 创建时间
@@ -506,15 +500,14 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                   {t.label}
                 </button>
               ))}
-            </div>
-            {timeFilter === 'custom' ? (
-              <div className="flex items-center gap-1.5 h-10 px-2.5 bg-white border border-black/[0.08] rounded-xl text-[13px]">
+              {timeFilter === 'custom' ? (
+              <div className="flex items-center gap-1 h-8 ml-1 px-1.5 bg-white rounded-lg text-[13px] shadow-xs">
                 <input
                   type="date"
                   value={dateFrom}
                   max={dateTo || undefined}
                   onChange={(e) => setDateFrom(e.target.value)}
-                  className="h-8 px-1.5 bg-transparent text-[#1D1D1F] focus:outline-none cursor-pointer"
+                  className="h-7 w-[118px] px-1 bg-transparent text-[#1D1D1F] focus:outline-none cursor-pointer"
                   aria-label="开始日期"
                 />
                 <span className="text-[#86868B]">至</span>
@@ -523,7 +516,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                   value={dateTo}
                   min={dateFrom || undefined}
                   onChange={(e) => setDateTo(e.target.value)}
-                  className="h-8 px-1.5 bg-transparent text-[#1D1D1F] focus:outline-none cursor-pointer"
+                  className="h-7 w-[118px] px-1 bg-transparent text-[#1D1D1F] focus:outline-none cursor-pointer"
                   aria-label="结束日期"
                 />
                 {dateFrom || dateTo ? (
@@ -540,16 +533,17 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                   </button>
                 ) : null}
               </div>
-            ) : null}
+              ) : null}
+            </div>
 
-            <div className="relative">
+            <div className="relative flex-1 min-w-[180px] max-w-[300px]">
               <Search className="w-4 h-4 text-[#86868B] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="搜索族谱名称…"
-                className="w-60 h-10 pl-9 pr-8 text-[13px] bg-white border border-black/[0.08] rounded-xl focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] transition-all text-[#1D1D1F]"
+                className="w-full h-10 pl-9 pr-8 text-[13px] bg-white border border-black/[0.08] rounded-xl focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] transition-all text-[#1D1D1F]"
               />
               {searchQuery && (
                 <button

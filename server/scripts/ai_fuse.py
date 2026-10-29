@@ -163,14 +163,14 @@ def main() -> int:
     small[1:] = stats[1:, cv2.CC_STAT_AREA] < min_area
     keep &= ~small[lab]
 
-    # 笔画保留原图的浓淡过渡（边缘不发毛），其余纯白
-    soft = cv2.dilate(keep.astype(np.uint8), disk(1)).astype(bool)
-    lo = float(np.percentile(n[keep], 5)) if np.any(keep) else 0.0
+    # 白底黑字：笔画纯黑，只在笔画边缘 1 像素按原图浓淡做过渡（不发毛、不锯齿），其余纯白
+    soft = cv2.dilate(keep.astype(np.uint8), disk(1)).astype(bool) & ~keep
     hi = float(t_o + 12)
-    v = np.clip((n.astype(np.float32) - lo) / max(1.0, hi - lo), 0, 1) ** 1.4 * 255.0
+    lo = hi * 0.5
+    edge = np.clip((n.astype(np.float32) - lo) / max(1.0, hi - lo), 0, 1) * 255.0
     out = np.full((h, w), 255, np.uint8)
-    out[soft] = v[soft].astype(np.uint8)
-    out[keep] = np.minimum(out[keep], (v[keep] * 0.6).astype(np.uint8))
+    out[soft] = edge[soft].astype(np.uint8)
+    out[keep] = 0
 
     ok, buf = cv2.imencode(".png", out)
     if not ok:

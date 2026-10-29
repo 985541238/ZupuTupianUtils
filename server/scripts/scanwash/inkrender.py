@@ -231,6 +231,21 @@ def remove_stain_blobs(mask: np.ndarray, lum: np.ndarray, stroke_w: float, p: In
     return out, int(bad.sum())
 
 
+def _close_bg(lum: np.ndarray, k: int) -> np.ndarray:
+    """大核闭运算估计纸面亮度。背景是缓变的，在缩小图上做再放大回去，结果几乎一样、快很多。"""
+    f = max(1, k // 15)
+    if f <= 1:
+        return cv2.morphologyEx(lum, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    h, w = lum.shape[:2]
+    small = cv2.resize(lum, (max(1, w // f), max(1, h // f)), interpolation=cv2.INTER_AREA)
+    # 缩小时用 AREA 会把细笔画“冲淡”，先在原图上做一次小核闭运算抹掉笔画再缩
+    pre = cv2.morphologyEx(lum, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (f * 2 + 1, f * 2 + 1)))
+    small = cv2.resize(pre, (max(1, w // f), max(1, h // f)), interpolation=cv2.INTER_AREA)
+    ks = max(3, int(k / f)) | 1
+    bg = cv2.morphologyEx(small, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ks, ks)))
+    return cv2.resize(bg, (w, h), interpolation=cv2.INTER_LINEAR)
+
+
 def split_stain_layer(mask: np.ndarray, lum: np.ndarray, stroke_w: float, p: InkParams) -> tuple[np.ndarray, dict]:
     """逐个连通域区分“字”和“污渍”。
 
@@ -247,7 +262,7 @@ def split_stain_layer(mask: np.ndarray, lum: np.ndarray, stroke_w: float, p: Ink
     m8 = mask.astype(np.uint8)
     lum = lum.astype(np.float32)
     k_bg = int(7 * stroke_w) | 1
-    bg = cv2.morphologyEx(lum, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_bg, k_bg)))
+    bg = _close_bg(lum, k_bg)
     gx = cv2.Sobel(lum, cv2.CV_32F, 1, 0)
     gy = cv2.Sobel(lum, cv2.CV_32F, 0, 1)
     gm = np.sqrt(gx * gx + gy * gy)

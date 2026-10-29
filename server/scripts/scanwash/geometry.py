@@ -37,8 +37,9 @@ def correct(bgr: np.ndarray, tier: str) -> GeometryResult:
 
     angle = _skew_angle(gray)
     if abs(angle) >= 0.3:
-        gray = _rotate(gray, angle)
+        # 只转彩色图一次，灰度由它换算（省掉一次整页旋转）
         work_bgr = _rotate(work_bgr, angle)
+        gray = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2GRAY)
     else:
         angle = 0.0
     return GeometryResult(gray=gray, angle=angle, warnings=warnings, outside_ratio=outside_ratio, bgr=work_bgr)
@@ -161,7 +162,7 @@ def _warp(bgr: np.ndarray, quad: np.ndarray) -> np.ndarray:
         bgr,
         transform,
         (out_w, out_h),
-        flags=cv2.INTER_LANCZOS4,
+        flags=cv2.INTER_CUBIC,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=(paper, paper, paper),
     )
@@ -179,11 +180,13 @@ def _skew_angle(gray: np.ndarray) -> float:
     base = _projection_var(_quick_ink(small))
     best_angle = 0.0
     best_var = base
+    # 只是找角度：用双线性插值、纸色只算一次（比 Lanczos 快数倍，选出的角度相同）
+    fill = int(np.median(small))
     for step in range(-10, 11):
         angle = step * 0.25
         if angle == 0:
             continue
-        varied = _projection_var(_quick_ink(_rotate(small, angle)))
+        varied = _projection_var(_quick_ink(_rotate(small, angle, fast=True, fill=fill)))
         if varied > best_var:
             best_angle = angle
             best_var = varied
@@ -207,9 +210,14 @@ def _projection_var(ink: np.ndarray) -> float:
     return float(projection.var())
 
 
-def _rotate(image: np.ndarray, angle: float) -> np.ndarray:
+def _rotate(image: np.ndarray, angle: float, fast: bool = False, fill: int | None = None) -> np.ndarray:
     height, width = image.shape[:2]
     matrix = cv2.getRotationMatrix2D((width / 2, height / 2), angle, 1.0)
+    if fast and image.ndim == 2:
+        return cv2.warpAffine(
+            image, matrix, (width, height), flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT, borderValue=int(fill if fill is not None else np.median(image)),
+        )
     if image.ndim == 2:
         fill = int(np.median(image))
         border = fill
@@ -221,7 +229,7 @@ def _rotate(image: np.ndarray, angle: float) -> np.ndarray:
         image,
         matrix,
         (width, height),
-        flags=cv2.INTER_LANCZOS4,
+        flags=cv2.INTER_CUBIC,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=border,
     )

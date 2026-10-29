@@ -8,6 +8,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import sharp from 'sharp';
 import archiver from 'archiver';
@@ -355,7 +356,10 @@ export class TasksService implements OnModuleInit {
       }
 
       const queue = imgs.filter((i) => !DONE_OK.has(i.status));
-      const concurrency = cleanModel ? (await this.settings.getGeneral()).concurrency : 1;
+      // 大模型：按「同时处理页数」设置（受平台限流约束）；算法：按 CPU 核数并行（每页一个独立进程）
+      const concurrency = cleanModel
+        ? (await this.settings.getGeneral()).concurrency
+        : Math.max(2, Math.min(Number(process.env.ALGO_CONCURRENCY) || os.cpus().length, 8));
       let stopReason: AiConfigError | null = null;
 
       const finishOne = async () => {
