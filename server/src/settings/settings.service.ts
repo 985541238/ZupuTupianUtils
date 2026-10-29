@@ -596,6 +596,67 @@ export class SettingsService implements OnModuleInit {
   }
 
   /** 预估费用（人民币） */
+  /**
+   * OCR 固定使用百度文字识别（高精度含位置版）。库里保留一条内置记录，
+   * 只用来记账（单价）和给任务一个引用，用户在界面上看不到、也不用管。
+   */
+  async baiduOcrEngine(): Promise<AiModel> {
+    let row = await this.models.findOne({ where: { purpose: 'ocr', platform: 'baidu', model: 'baidu-ocr-accurate' } });
+    if (!row) {
+      row = this.models.create({
+        purpose: 'ocr',
+        platform: 'baidu',
+        model: 'baidu-ocr-accurate',
+        displayName: '百度文字识别（高精度含位置版）',
+        billing: 'image',
+        priceImage: '0.01',
+        enabled: 1,
+        isDefault: 1,
+      } as any);
+      row = await this.models.save(row);
+    } else if (!row.enabled || row.billing !== 'image') {
+      row.enabled = 1;
+      row.billing = 'image';
+      row = await this.models.save(row);
+    }
+    return row;
+  }
+
+  async baiduOcrReady(): Promise<boolean> {
+    const p = await this.getPlatformSecrets('baidu');
+    return !!(p?.values.ocrApiKey && p?.values.ocrSecretKey);
+  }
+
+  /** 百度文字识别配置（给设置页）：Key 回显方式与平台账号一致 */
+  async getBaiduOcrConfig() {
+    const all = await this.readPlatforms();
+    const v = all['baidu']?.values || {};
+    const ak = decryptSecret(v.ocrApiKey || '');
+    const sk = decryptSecret(v.ocrSecretKey || '');
+    const row = await this.baiduOcrEngine();
+    return {
+      apiKey: ak,
+      secretKey: sk,
+      apiKeyMasked: maskSecret(ak),
+      secretKeyMasked: maskSecret(sk),
+      configured: !!(ak && sk),
+      price: row.priceImage != null ? Number(row.priceImage) : null,
+    };
+  }
+
+  async saveBaiduOcrConfig(body: { apiKey?: string; secretKey?: string; price?: number | string | null }) {
+    const values: Record<string, string> = {};
+    if (body.apiKey !== undefined) values.ocrApiKey = String(body.apiKey || '');
+    if (body.secretKey !== undefined) values.ocrSecretKey = String(body.secretKey || '');
+    if (Object.keys(values).length) await this.savePlatform('baidu', { values });
+    if (body.price !== undefined) {
+      const row = await this.baiduOcrEngine();
+      row.priceImage = decimalOrNull(body.price, row.priceImage);
+      await this.models.save(row);
+    }
+    return this.getBaiduOcrConfig();
+  }
+
   estimateCost(model: AiModel | null, pageCount: number): number | null {
     return this.toCny(model, this.estimateRaw(model, pageCount));
   }

@@ -170,6 +170,18 @@ export const api = {
   testModel: (body: { id?: number; purpose?: 'ocr' | 'clean'; platform?: string; baseUrl?: string; apiKey?: string; model?: string }) =>
     request<any>('/settings/models/test', { method: 'POST', body: JSON.stringify(body || {}) }),
   listOcrModels: () => request<any[]>('/settings/models/ocr'),
+  getBaiduOcrConfig: () =>
+    request<{ apiKey: string; secretKey: string; apiKeyMasked: string; secretKeyMasked: string; configured: boolean; price: number | null }>('/settings/baidu-ocr'),
+  saveBaiduOcrConfig: (body: { apiKey?: string; secretKey?: string; price?: number | string | null }) =>
+    request<{ apiKey: string; secretKey: string; apiKeyMasked: string; secretKeyMasked: string; configured: boolean; price: number | null }>('/settings/baidu-ocr', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  testBaiduOcr: (body: { apiKey?: string; secretKey?: string }) =>
+    request<{ ok: boolean; ms?: number; reply?: string; error?: string; detail?: string; mock?: boolean }>('/settings/baidu-ocr/test', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   listCleanModels: () => request<any[]>('/settings/models/clean'),
   estimateCost: (modelId: number, pageCount: number) =>
     request<any>('/settings/estimate?modelId=' + modelId + '&pageCount=' + pageCount),

@@ -4,6 +4,7 @@ import { parseCurlExample } from '../utils/parseCurlExample';
 import { AiSetupWizard } from './AiSetupWizard';
 import { SecretInput } from './SecretInput';
 import { looksTextOnly } from './OcrModelPicker';
+import { BaiduOcrPanel } from './BaiduOcrPanel';
 import { Plus, Save, Trash2, RefreshCw, ScanText, Wand2, CheckCircle2, AlertCircle, X, KeyRound, ExternalLink } from 'lucide-react';
 
 type AiModel = {
@@ -392,13 +393,13 @@ function PlatformListCard({ platforms, onEdit }: { platforms: Platform[]; onEdit
   );
 }
 
-export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
+export const SettingsView: React.FC<{ onBack?: () => void; initialTab?: 'ocr' | 'clean' | 'platform' }> = ({ initialTab }) => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [models, setModels] = useState<AiModel[]>([]);
   const [mock, setMock] = useState(false);
   const [err, setErr] = useState('');
-  const [modelTab, setModelTab] = useState<'ocr' | 'clean' | 'platform'>('clean');
+  const [modelTab, setModelTab] = useState<'ocr' | 'clean' | 'platform'>(initialTab || 'clean');
   const [editing, setEditing] = useState<ModelDraft | null>(null);
   const [platforms, setPlatforms] = useState<Platform[]>([]);
   const [general, setGeneral] = useState<GeneralCfg>({ concurrency: 3, timeoutSec: 300, publicBaseUrl: '', usdRate: 7.2 });
@@ -830,7 +831,7 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
                     modelTab === 'ocr' ? 'bg-[#34C759]/12 text-[#248A3D]' : 'bg-black/[0.06] text-[#86868B]'
                   }`}
                 >
-                  {ocrModels.length}
+                  百度
                 </span>
               </button>
               <button
@@ -874,18 +875,7 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
             </div>
 
             {modelTab === 'ocr' ? (
-              <ModelListCard
-                platformName={platformName}
-                title="OCR 文字识别模型"
-                hint="用于建任务 AI 识别与审阅页「AI 识别本页」；单价用于费用预估"
-                icon={<ScanText className="w-4 h-4" />}
-                iconTone="bg-[#34C759]/12 text-[#248A3D]"
-                models={ocrModels}
-                emptyText="暂无 OCR 模型。请先添加，否则新建任务无法勾选 AI 识别。"
-                onAdd={() => openNew('ocr')}
-                onEdit={openEdit}
-                onRemove={(id) => void removeModel(id)}
-              />
+              <BaiduOcrPanel onChanged={() => void load()} />
             ) : modelTab === 'clean' ? (
               <ModelListCard
                 platformName={platformName}
@@ -1400,7 +1390,7 @@ export const SettingsView: React.FC<{ onBack?: () => void }> = () => {
               </div>
             );
             const general = pDef.fields.filter((f) => f.scope === 'general');
-            const ocr = pDef.fields.filter((f) => f.scope === 'ocr');
+            const ocr: typeof pDef.fields = []; // 百度文字识别的 Key 统一在「OCR 文字识别」页配置
             return (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
                 <div className="space-y-3">

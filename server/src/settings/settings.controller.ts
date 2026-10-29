@@ -184,8 +184,31 @@ export class SettingsController {
   }
 
   @Get('models/ocr')
-  ocrModels() {
-    return this.settings.listEnabledOcrModels();
+  async ocrModels() {
+    // OCR 只用百度文字识别：只返回这一条内置引擎
+    const m = await this.settings.baiduOcrEngine();
+    return [this.settings.toPublicModel(m)];
+  }
+
+  @Get('baidu-ocr')
+  baiduOcrConfig() {
+    return this.settings.getBaiduOcrConfig();
+  }
+
+  @Put('baidu-ocr')
+  saveBaiduOcr(@Body() body: { apiKey?: string; secretKey?: string; price?: number | string | null }) {
+    return this.settings.saveBaiduOcrConfig(body || {});
+  }
+
+  @Post('baidu-ocr/test')
+  async testBaiduOcr(@Body() body: { apiKey?: string; secretKey?: string }) {
+    if (process.env.AI_MOCK === '1') return { ok: false, mock: true, error: '当前为 AI_MOCK，未真实连通' };
+    try {
+      const r = await this.aliyun.pingBaiduOcr({ apiKey: body?.apiKey, secretKey: body?.secretKey });
+      return { ok: true, ms: r.ms, reply: r.reply };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e), kind: e?.kind || null, detail: e?.detail || '' };
+    }
   }
 
   @Get('models/clean')

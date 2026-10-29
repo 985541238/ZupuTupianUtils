@@ -997,15 +997,14 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
         title={columns ? `重新识别第 ${cur?.pageNumber} 页` : `识别第 ${cur?.pageNumber} 页`}
         desc={
           columns
-            ? `会再调用一次识别模型（产生费用）。${cur?.modelName ? `这一页现在是「${cur.modelName}」识别的，` : ''}换个模型往往比原模型再识别一次更有用。`
-            : '失败就是失败，不会自动重试。可以换一个模型再识别这一页。'
+            ? `会再调用一次百度文字识别（产生费用）。`
+            : '失败就是失败，不会自动重试。'
         }
         warn={
           columns
             ? `新结果会替换这一页现有的文字${columns.some((c) => c.chars.some((x) => x.e === 1)) ? `（包括你改过的 ${columns.reduce((a, c) => a + c.chars.filter((x) => x.e === 1).length, 0)} 处）` : ''}，但旧的这一版会保留，不满意可以点「恢复上一版」。`
             : undefined
         }
-        defaultChoice={{ label: '后面的页也用这个模型', checked: false }}
         confirmText="开始识别"
         currentModelId={task.ocrModelId}
         pageCount={1}
@@ -1017,7 +1016,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
       <OcrModelPicker
         open={colDlg != null}
         title={`只重新识别第 ${(colDlg ?? 0) + 1} 列`}
-        desc="把这一列从图上裁出来单独识别，比整页识别更清楚；只花一次小图的费用。可以换模型。"
+        desc="把这一列从图上裁出来单独识别，比整页识别更清楚；只花一次小图的费用。"
         warn="这一列现有的文字会被替换，旧的一版会保留，不满意可以「恢复上一版」。"
         confirmText="识别这一列"
         currentModelId={task.ocrModelId}

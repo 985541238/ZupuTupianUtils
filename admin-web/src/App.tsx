@@ -62,6 +62,13 @@ export default function App() {
   // 大模型出错时的说明弹窗 / 引导配置弹窗
   const [aiProblem, setAiProblem] = useState<AiProblem | null>(null);
   const [setup, setSetup] = useState<{ platform: string | null; step?: 1 | 2 | 3; onDone?: () => void } | null>(null);
+  const [settingsTab, setSettingsTab] = useState<'ocr' | 'clean' | 'platform' | undefined>(undefined);
+  /** OCR 只用百度文字识别：需要配置时直接跳到设置里的「OCR 文字识别」页 */
+  const openOcrSetup = useCallback(() => {
+    setAiProblem(null);
+    setSettingsTab('ocr');
+    setCurrentTab('settings');
+  }, []);
   const openSetup = useCallback((platform: string | null = null, step?: 1 | 2 | 3, onDone?: () => void) => {
     setAiProblem(null);
     setSetup({ platform, step, onDone });
@@ -530,7 +537,7 @@ export default function App() {
           />
         )}
 
-        {currentTab === 'settings' && <SettingsView />}
+        {currentTab === 'settings' && <SettingsView key={settingsTab || 'default'} initialTab={settingsTab} />}
 
         {currentTab === 'ocr' && (
           <OcrTaskCenterView
@@ -542,7 +549,7 @@ export default function App() {
             onCreate={handleCreateOcr}
             onDelete={handleDeleteOcr}
             onShowProblem={showOcrProblem}
-            onOpenSetup={openSetup}
+            onOpenSetup={openOcrSetup}
             onGoImageTasks={goToTasks}
           />
         )}
@@ -553,7 +560,7 @@ export default function App() {
             task={activeOcr}
             onFinishTask={handleFinishOcr}
             onTaskChanged={() => void loadOcrTasks()}
-            onOpenSetup={openSetup}
+            onOpenSetup={openOcrSetup}
           />
         )}
 
@@ -640,7 +647,7 @@ export default function App() {
       <AiProblemDialog
         problem={aiProblem}
         onClose={() => setAiProblem(null)}
-        onOpenSetup={(platform, step) => openSetup(platform, step)}
+        onOpenSetup={(platform, step) => (aiProblem?.kind === 'ocr' ? openOcrSetup() : openSetup(platform, step))}
         onRetry={(taskId) => {
           const kind = aiProblem?.kind;
           setAiProblem(null);

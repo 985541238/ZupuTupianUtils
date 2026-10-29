@@ -129,7 +129,7 @@ export class OcrService implements OnModuleInit {
   }
 
   private async taskView(t: OcrTask, sum?: { unc: number; chars: number }, live: OcrPage[] = []) {
-    const model = t.ocrModelId ? await this.settings.getModel(t.ocrModelId) : null;
+    const model = await this.settings.baiduOcrEngine();
     // 识别之后，图片处理里又重新调整过的页数
     let staleCount = 0;
     try {
@@ -148,7 +148,7 @@ export class OcrService implements OnModuleInit {
         .map((p) => ({ pageNo: Number(p.sortOrder) + 1, startedAt: new Date(p.updatedAt).getTime() })),
       ocrModelName: model?.displayName || null,
       /** 任务选用的识别模型还在且已启用；否则开始前要先让用户重新选 */
-      modelUsable: !!model && !!model.enabled && model.purpose === 'ocr',
+      modelUsable: await this.settings.baiduOcrReady(),
       staleCount,
       uncertainCount: sum?.unc || 0,
       charCount: sum?.chars || 0,
@@ -186,11 +186,7 @@ export class OcrService implements OnModuleInit {
     );
     if (!imgs.length) throw new BadRequestException('该图片处理任务里没有「通过」的页面，无法识别');
 
-    let model = body.ocrModelId ? await this.settings.getModel(Number(body.ocrModelId)) : null;
-    if (!model) model = await this.settings.defaultModel('ocr');
-    if (!model || !model.enabled || model.purpose !== 'ocr') {
-      throw new BadRequestException('请先到「模型配置」添加并启用文字识别模型');
-    }
+    const model = await this.settings.baiduOcrEngine();
     const name = String(body.name || '').trim() || `${src.name} · OCR`;
     const est = this.settings.estimateCost(model, imgs.length);
     const now = new Date();
@@ -258,20 +254,9 @@ export class OcrService implements OnModuleInit {
     if (this.running.has(tid)) return { message: '正在识别中', task: await this.getView(userId, tid) };
     if (task.status === 'completed') throw new BadRequestException('任务已完成');
 
-    // 重试/继续时可以换模型：选了就改成任务当前使用的模型
-    let model = task.ocrModelId ? await this.settings.getModel(task.ocrModelId) : null;
-    if (body?.modelId) {
-      const chosen = await this.settings.getModel(Number(body.modelId));
-      if (!chosen || !chosen.enabled || chosen.purpose !== 'ocr') throw new BadRequestException('所选识别模型不可用，请重新选择');
-      model = chosen;
-      task.ocrModelId = Number(chosen.id);
-    }
-    if (!model || !model.enabled || model.purpose !== 'ocr') {
-      throw new BadRequestException({
-        message: '这个任务选用的识别模型已被删除或停用。请换一个识别模型后重试。',
-        errorCode: 'model:',
-      });
-    }
+    // OCR 只用百度文字识别，不再选模型
+    const model = await this.settings.baiduOcrEngine();
+    task.ocrModelId = Number(model.id);
     try {
       await this.aliyun.assertReady(model); // 不花钱：只检查 Key 是否已填
     } catch (e: any) {
@@ -300,8 +285,7 @@ export class OcrService implements OnModuleInit {
     try {
       const task = await this.tasks.findOne({ where: { id: tid } });
       if (!task) return;
-      const model = await this.settings.getModel(task.ocrModelId);
-      if (!model) throw new Error('识别模型不存在');
+      const model = await this.settings.baiduOcrEngine();
       const queue = await this.pages.find({
         where: { ocrTaskId: tid, status: In(['pending', 'failed', 'processing']) },
         order: { sortOrder: 'ASC' },
@@ -365,8 +349,8 @@ export class OcrService implements OnModuleInit {
     const task = await this.tasks.findOne({ where: { id: taskId } });
     const page = await this.pages.findOne({ where: { id: pageId } });
     if (!task || !page) return;
-    const model = await this.settings.getModel(modelOverrideId || task.ocrModelId);
-    if (!model) throw new Error('识别模型不存在');
+    void modelOverrideId;
+    const model = await this.settings.baiduOcrEngine();
     // 永远用图片处理里「当前」的结果图（用户可能在那边重新调整过）
     const live = (await this.liveImages([page])).get(Number(page.id))!;
     if (live.rejected) throw new Error('这一页在图片处理里已被标为「未通过」，请先回到图片处理重新确认该页');
@@ -702,13 +686,7 @@ export class OcrService implements OnModuleInit {
     const [bx1, by1, bx2, by2] = col.box || [0, 0, 0, 0];
     if (!(bx2 > bx1 && by2 > by1)) throw new BadRequestException('这一列没有位置信息，无法单独识别');
 
-    let model = t.ocrModelId ? await this.settings.getModel(t.ocrModelId) : null;
-    if (body?.modelId) {
-      const chosen = await this.settings.getModel(Number(body.modelId));
-      if (!chosen || !chosen.enabled || chosen.purpose !== 'ocr') throw new BadRequestException('所选识别模型不可用，请重新选择');
-      model = chosen;
-    }
-    if (!model || !model.enabled) throw new BadRequestException({ message: '识别模型已被删除或停用，请换一个识别模型后重试。', errorCode: 'model:' });
+    const model = await this.settings.baiduOcrEngine();
     try {
       await this.aliyun.assertReady(model);
     } catch (e: any) {
@@ -834,13 +812,7 @@ export class OcrService implements OnModuleInit {
     const tid = Number(t.id);
     if (this.running.has(tid)) throw new BadRequestException('整本正在识别中，请稍后再试');
     if (p.status === 'processing' || this.pageJobs.has(Number(p.id))) throw new BadRequestException('这一页正在识别，请稍后再试');
-    let model = t.ocrModelId ? await this.settings.getModel(t.ocrModelId) : null;
-    if (body?.modelId) {
-      const chosen = await this.settings.getModel(Number(body.modelId));
-      if (!chosen || !chosen.enabled || chosen.purpose !== 'ocr') throw new BadRequestException('所选识别模型不可用，请重新选择');
-      model = chosen;
-    }
-    if (!model || !model.enabled) throw new BadRequestException({ message: '识别模型已被删除或停用，请换一个识别模型后重试。', errorCode: 'model:' });
+    const model = await this.settings.baiduOcrEngine();
     try {
       await this.aliyun.assertReady(model);
     } catch (e: any) {
@@ -851,10 +823,6 @@ export class OcrService implements OnModuleInit {
     }
     // 后台执行，接口马上返回；前端轮询页面状态（识别一页常要几十秒，不让请求一直挂着）
     // 单页换模型只对这一页生效；用户勾选「后面的页也用它」才改任务的模型
-    if (body?.modelId && body?.setDefault && Number(model.id) !== Number(t.ocrModelId)) {
-      t.ocrModelId = Number(model.id);
-      await this.tasks.save(t);
-    }
     const useModelId = Number(model.id);
     const hadData = !!p.dataJson;
     p.status = 'processing';

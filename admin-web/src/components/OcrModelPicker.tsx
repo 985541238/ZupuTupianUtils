@@ -34,6 +34,7 @@ export const OcrModelPicker: React.FC<{
   const [modelId, setModelId] = useState<number | null>(null);
   const [est, setEst] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
+  const [configured, setConfigured] = useState<boolean | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -43,6 +44,7 @@ export const OcrModelPicker: React.FC<{
   useEffect(() => {
     if (!open) return;
     setLoading(true);
+    api.getBaiduOcrConfig().then((c) => setConfigured(!!c?.configured)).catch(() => setConfigured(null));
     api
       .listOcrModels()
       .then((list) => {
@@ -92,56 +94,28 @@ export const OcrModelPicker: React.FC<{
           </div>
         </div>
 
-        <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">识别模型</label>
+        <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">识别方式</label>
         {loading ? (
           <p className="text-xs text-[#86868B]">加载中…</p>
-        ) : models.length ? (
-          <div className="flex items-center gap-2">
-            <select
-              value={modelId ?? ''}
-              onChange={(e) => setModelId(Number(e.target.value))}
-              className="flex-1 min-w-0 px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium cursor-pointer"
-            >
-              {models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.displayName}
-                  {perPage[Number(m.id)] != null ? ` · 约¥${perPage[Number(m.id)]!.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}/页` : ''}
-                  {looksTextOnly(m) ? ' · 纯文字，不能看图' : ''}
-                  {Number(m.id) === Number(currentModelId) ? ' · 当前用的' : ''}
-                </option>
-              ))}
-            </select>
+        ) : (
+          <div className="rounded-xl bg-[#F5F5F7] border border-black/[0.06] px-3.5 py-2.5 text-[13px] font-medium text-[#1D1D1F]">
+            百度文字识别（高精度含位置版）
+            {perPage[modelId ?? 0] != null ? (
+              <span className="text-[#86868B] font-normal"> · 约¥{perPage[modelId ?? 0]!.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}/页</span>
+            ) : null}
+          </div>
+        )}
+        {!loading && configured === false ? (
+          <div className="mt-2 text-xs text-[#C93400] bg-[#FF9500]/10 rounded-lg px-2.5 py-2 leading-relaxed">
+            还没有配置百度文字识别的 Key，识别不了。
             {onOpenSetup ? (
-              <button
-                type="button"
-                onClick={() => onOpenSetup(null, 1)}
-                className="px-3 py-2.5 text-xs font-semibold bg-[#E5E5EA] hover:bg-[#D1D1D6] text-[#1D1D1F] rounded-xl cursor-pointer whitespace-nowrap"
-              >
-                添加模型
+              <button type="button" onClick={() => { onClose(); onOpenSetup(null, 1); }} className="ml-1 font-semibold text-[#0071E3] hover:underline cursor-pointer">
+                去配置
               </button>
             ) : null}
           </div>
-        ) : (
-          <p className="text-xs text-[#C93400]">还没有启用的文字识别模型，请先添加。</p>
-        )}
-        {sel ? (
-          <p className="text-[11px] text-[#86868B] mt-1.5 font-mono break-all">
-            {sel.model}
-            {sel.platformName ? ` · ${sel.platformName}` : ''}
-          </p>
-        ) : null}
-        {sel && looksTextOnly(sel) ? (
-          <p className="text-xs text-[#C93400] mt-1.5 leading-relaxed bg-[#FF9500]/10 rounded-lg px-2.5 py-2">
-            「{sel.model}」看起来是纯文字模型，不能真正看图。建议换成带视觉的模型（如 GLM-4.5V、Qwen-VL 系列）。
-          </p>
         ) : null}
         {warn ? <p className="text-xs text-[#6E6E73] mt-3 leading-relaxed bg-[#F5F5F7] rounded-lg px-2.5 py-2">{warn}</p> : null}
-        {defaultChoice ? (
-          <label className="flex items-center gap-2 mt-3 text-[13px] text-[#1D1D1F] cursor-pointer select-none">
-            <input type="checkbox" checked={setDefault} onChange={(e) => setSetDefault(e.target.checked)} className="accent-[#0071E3] w-4 h-4" />
-            {defaultChoice.label}
-          </label>
-        ) : null}
         <div className="flex items-baseline justify-between rounded-xl bg-[#F5F5F7] px-3.5 py-2.5 mt-3">
           <span className="text-xs text-[#6E6E73]">预估费用（{pageCount} 页）</span>
           <span className="text-sm font-bold text-[#1D1D1F] tabular-nums">{est != null ? `¥${est.toFixed(2)}` : '—'}</span>
@@ -156,7 +130,7 @@ export const OcrModelPicker: React.FC<{
             取消
           </button>
           <button
-            disabled={!modelId || submitting}
+            disabled={!modelId || submitting || configured === false}
             onClick={async () => {
               if (!modelId) return;
               setSubmitting(true);

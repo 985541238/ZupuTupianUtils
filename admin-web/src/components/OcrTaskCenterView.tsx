@@ -3,7 +3,7 @@ import { OcrTask, OcrSourceTask } from '../types';
 import { api, ocrExportUrl } from '../api/client';
 import { formatProcessingTime, mapOcrSource } from '../api/mappers';
 import { inferErrorCode } from './AiProblemDialog';
-import { OcrModelPicker, looksTextOnly } from './OcrModelPicker';
+import { OcrModelPicker } from './OcrModelPicker';
 import {
   Play,
   Plus,
@@ -96,6 +96,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
   const [taskName, setTaskName] = useState('');
   const [nameTouched, setNameTouched] = useState(false);
   const [models, setModels] = useState<any[]>([]);
+  const [cfgReady, setCfgReady] = useState<boolean | null>(null);
   const [modelId, setModelId] = useState<number | null>(null);
   const [est, setEst] = useState<{ cost: number | null; priced: boolean }>({ cost: null, priced: false });
   const [creating, setCreating] = useState(false);
@@ -132,7 +133,8 @@ export const OcrTaskCenterView: React.FC<Props> = ({
     setNameTouched(false);
     setSourcesLoading(true);
     try {
-      const [src, ms] = await Promise.all([api.getOcrSources(), api.listOcrModels().catch(() => [])]);
+      const [src, ms, cfg] = await Promise.all([api.getOcrSources(), api.listOcrModels().catch(() => []), api.getBaiduOcrConfig().catch(() => null)]);
+      setCfgReady(cfg ? !!cfg.configured : null);
       const list = (src || []).map(mapOcrSource);
       setSources(list);
       if (list.length === 1) setSourceId(list[0].id);
@@ -652,40 +654,19 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                       />
                     </div>
                     <div>
-                      <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">识别模型</label>
-                      {models.length ? (
-                        <div className="flex items-center gap-2">
-                          <select
-                            value={modelId ?? ''}
-                            onChange={(e) => setModelId(Number(e.target.value))}
-                            className="flex-1 min-w-0 px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium cursor-pointer"
-                          >
-                            {models.map((m) => (
-                              <option key={m.id} value={m.id}>
-                                {m.displayName}（{m.model}）
-                              </option>
-                            ))}
-                          </select>
+                      <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">识别方式</label>
+                      <div className="rounded-xl bg-[#F5F5F7] border border-black/[0.06] px-3.5 py-2.5 text-[13px] font-medium text-[#1D1D1F]">
+                        百度文字识别（高精度含位置版）
+                      </div>
+                      {cfgReady === false ? (
+                        <p className="text-xs text-[#C93400] mt-1.5 leading-relaxed bg-[#FF9500]/10 rounded-lg px-2.5 py-2">
+                          还没有配置百度文字识别的 Key，可以先建任务，但识别前需要配置。
                           {onOpenSetup ? (
-                            <button
-                              type="button"
-                              onClick={() => onOpenSetup(null, 1)}
-                              className="px-3 py-2.5 text-xs font-semibold bg-[#E5E5EA] hover:bg-[#D1D1D6] text-[#1D1D1F] rounded-xl cursor-pointer whitespace-nowrap"
-                            >
-                              换模型 / 配置
+                            <button type="button" onClick={() => onOpenSetup(null, 1)} className="ml-1 font-semibold text-[#0071E3] hover:underline cursor-pointer">
+                              去配置
                             </button>
                           ) : null}
-                        </div>
-                      ) : (
-                        <p className="text-xs text-[#C93400] leading-relaxed">还没有启用的文字识别模型，请先到顶部「模型配置」添加。</p>
-                      )}
-                      {selectedModel && looksTextOnly(selectedModel) ? (
-                        <p className="text-xs text-[#C93400] mt-1.5 leading-relaxed bg-[#FF9500]/10 rounded-lg px-2.5 py-2">
-                          「{selectedModel.model}」看起来是纯文字模型，不能真正看图，识别结果可能是编的或直接失败。建议换成带视觉的模型（如 GLM-4.5V、Qwen-VL 系列）。
                         </p>
-                      ) : null}
-                      {selectedModel && !selectedModel.hasKey && selectedModel.hasKey !== undefined ? (
-                        <p className="text-xs text-[#C93400] mt-1">这个模型还没有可用的 API Key，开始识别前需要先填写。</p>
                       ) : null}
                     </div>
                     <div className="flex items-baseline justify-between gap-3 rounded-xl bg-[#F5F5F7] px-3.5 py-2.5">
@@ -696,7 +677,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                         ) : est.priced && est.cost != null ? (
                           `¥${est.cost.toFixed(2)}`
                         ) : (
-                          <span className="text-xs font-normal text-[#C93400]">该模型没填单价，到「模型配置」补上即可估算</span>
+                          <span className="text-xs font-normal text-[#C93400]">还没填单价，到「模型配置 → OCR 文字识别」补上即可估算</span>
                         )}
                       </span>
                     </div>
@@ -741,13 +722,13 @@ export const OcrTaskCenterView: React.FC<Props> = ({
 
         <OcrModelPicker
           open={!!retryTask}
-          title={retryTask?.modelUsable === false ? '请重新选择识别模型' : retryTask?.status === 'failed' ? '继续识别' : retryTask?.doneCount ? '重试失败的页' : '开始识别'}
+          title={retryTask?.modelUsable === false ? '先配置百度文字识别' : retryTask?.status === 'failed' ? '继续识别' : retryTask?.doneCount ? '重试失败的页' : '开始识别'}
           desc={
             retryTask?.modelUsable === false
-              ? '这个任务原来用的识别模型已被删除或停用，请选一个能看图的模型。之后这个任务都用你选的这个。'
+              ? '还没有配置百度文字识别的 Key。请先到「模型配置 → OCR 文字识别」按引导配置，再回来识别。'
               : retryTask?.status === 'failed'
-              ? '只识别还没完成的页，已识别的页不会重复识别和收费。可以换一个模型。'
-              : `只重新识别失败的 ${retryTask?.failedCount || 0} 页，已识别的页不会重复收费。失败就是失败，不会自动重试，换个模型试试往往更好。`
+              ? '只识别还没完成的页，已识别的页不会重复识别和收费。'
+              : `只重新识别失败的 ${retryTask?.failedCount || 0} 页，已识别的页不会重复收费。失败就是失败，不会自动重试。`
           }
           confirmText="开始识别"
           currentModelId={retryTask?.ocrModelId}
