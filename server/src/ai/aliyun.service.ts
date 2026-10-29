@@ -26,6 +26,8 @@ export interface OcrUncertain {
 export interface OcrResult {
   columns: OcrColumn[];
   uncertain: OcrUncertain[];
+  /** 模型输出被截断或格式不对，是从残缺内容里捞出来的，后面可能缺字 */
+  partial?: boolean;
 }
 
 export interface Usage {
@@ -56,6 +58,17 @@ export class AiConfigError extends Error {
 
 /** 模型已经出图（已扣费）之后才发生的错误：不能自动重试，否则会重复扣费 */
 export class AiChargedError extends Error {}
+
+/** 模型已返回内容（已计费）但解析不出文字：带上用量，调用方要把费用记上 */
+export class OcrParseError extends Error {
+  constructor(
+    message: string,
+    public usage: Usage,
+    public raw: string,
+  ) {
+    super(message);
+  }
+}
 
 /** 把平台的报错翻译成普通用户能看懂、知道下一步怎么做的话 */
 export function classifyAiError(status: number, code: string, rawMsg: string, platform: string | null): Error {
@@ -162,29 +175,67 @@ export class AliyunService {
     if (this.mock) return this.mockOcr(imagePath);
     const cfg = await this.assertReady(model);
     const dataUri = await this.toDataUri(imagePath, 2048);
-    const body: any = {
-      model: model.model,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'image_url', image_url: { url: dataUri } },
-            { type: 'text', text: model.prompt || DEFAULT_OCR_PROMPT },
-          ],
-        },
-      ],
-      stream: true,
-      stream_options: { include_usage: true },
+    const build = (lean: boolean) => {
+      const body: any = {
+        model: model.model,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'image_url', image_url: { url: dataUri } },
+              { type: 'text', text: model.prompt || DEFAULT_OCR_PROMPT },
+            ],
+          },
+        ],
+        stream: true,
+        stream_options: { include_usage: true },
+      };
+      // enable_thinking / thinking_budget 是阿里云百炼的扩展参数；硅基流动也支持 enable_thinking（识别不需要长思考，关掉快很多）
+      if (!cfg.platform || cfg.platform === 'aliyun') {
+        body.enable_thinking = !!model.enableThinking;
+        if (model.enableThinking) body.thinking_budget = 81920;
+      } else if (cfg.platform === 'siliconflow' && !lean && !model.enableThinking) {
+        body.enable_thinking = false;
+      }
+      return body;
     };
-    // enable_thinking / thinking_budget 是阿里云百炼的扩展参数，其他平台（含聚合平台）不传
-    if (!cfg.platform || cfg.platform === 'aliyun') {
-      body.enable_thinking = !!model.enableThinking;
-      if (model.enableThinking) body.thinking_budget = 81920;
+
+    let lean = false;
+    let lastErr: any = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const { content, usage } = await this.streamChat(cfg, build(lean));
+        const u = { ...usage, images: 1 };
+        const result = parseOcr(content);
+        if (!result.columns.length) {
+          throw new OcrParseError('模型没有返回可用的识别结果（它可能不支持看图，请换成带视觉的模型，如 GLM-4.5V、Qwen-VL）。', u, content);
+        }
+        return { result, usage: u, raw: content };
+      } catch (e: any) {
+        lastErr = e;
+        if (e instanceof OcrParseError) throw e; // 已经出结果（已计费），不重复调用
+        if (e instanceof AiConfigError) {
+          // 不认识 enable_thinking 之类的参数：去掉再试一次（400 不计费）
+          if (e.kind === 'param' && !lean && cfg.platform === 'siliconflow') {
+            lean = true;
+            continue;
+          }
+          // 限流：等几秒再试，别让整页白白失败
+          if (e.kind === 'quota' && attempt < 2) {
+            await new Promise((r) => setTimeout(r, 4000 * (attempt + 1)));
+            continue;
+          }
+          throw e;
+        }
+        // 网络抖动 / 平台 5xx / 卡住被放弃：自动再试一次
+        if (attempt < 1 && /连不上|服务暂时出错|长时间没有返回|连接中断/.test(String(e?.message || ''))) {
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+        throw e;
+      }
     }
-    const { content, usage } = await this.streamChat(cfg, body);
-    const result = parseOcr(content);
-    if (!result.columns.length) throw new Error('模型没有返回可用的识别结果：' + content.slice(0, 200));
-    return { result, usage: { ...usage, images: 1 }, raw: content };
+    throw lastErr || new Error('识别失败');
   }
 
   /** 只发一句文字，验证 Key 和地址可用。不在此处走 AI_MOCK 假成功；由调用方先校验 Key / Mock。 */
@@ -213,7 +264,11 @@ export class AliyunService {
     return { ok: true, ms: Date.now() - t, reply: content.slice(0, 50), usage };
   }
 
-  private async streamChat(cfg: AliyunConfig & { platform?: string | null }, body: any): Promise<{ content: string; usage: Usage }> {
+  private async streamChat(
+    cfg: AliyunConfig & { platform?: string | null },
+    body: any,
+    opts: { idleMs?: number } = {},
+  ): Promise<{ content: string; usage: Usage }> {
     const url = cfg.baseUrl + '/chat/completions';
     const res = await this.fetchWithTimeout(
       url,
@@ -230,8 +285,37 @@ export class AliyunService {
     const reader = (res.body as any).getReader();
     const decoder = new TextDecoder();
     let buf = '';
+    // 响应头回来后 fetch 的超时就不管用了：自己盯着流，太久没动静或总时长超限就放弃，避免一直卡住
+    const idleMs = opts.idleMs ?? 90_000;
+    const deadline = Date.now() + cfg.timeoutSec * 1000;
+    const readOnce = () =>
+      new Promise<{ value?: Uint8Array; done: boolean }>((resolve, reject) => {
+        const left = deadline - Date.now();
+        if (left <= 0) return reject(new Error(`模型处理超时（超过 ${cfg.timeoutSec} 秒）。可稍后重试，或到「平台账号 → 通用设置」把超时时间调大。`));
+        const wait = Math.min(idleMs, left);
+        const t = setTimeout(() => {
+          reader.cancel().catch(() => {});
+          reject(
+            new Error(
+              left <= idleMs
+                ? `模型处理超时（超过 ${cfg.timeoutSec} 秒）。可稍后重试，或到「平台账号 → 通用设置」把超时时间调大。`
+                : `模型长时间没有返回内容（超过 ${Math.round(idleMs / 1000)} 秒），已放弃这次请求。`,
+            ),
+          );
+        }, wait);
+        reader.read().then(
+          (r: any) => {
+            clearTimeout(t);
+            resolve(r);
+          },
+          (e: any) => {
+            clearTimeout(t);
+            reject(new Error('与模型服务的连接中断：' + (e?.message || e)));
+          },
+        );
+      });
     for (;;) {
-      const { value, done } = await reader.read();
+      const { value, done } = await readOnce();
       if (done) break;
       buf += decoder.decode(value, { stream: true });
       let nl: number;
@@ -813,7 +897,7 @@ function outputRoot() {
 /** 解析模型返回的 JSON，容忍 ```json 包裹、前后多余文字 */
 export function parseOcr(content: string): OcrResult {
   let text = (content || '').trim();
-  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)(?:```|$)/i);
   if (fence) text = fence[1].trim();
   const a = text.indexOf('{');
   const b = text.lastIndexOf('}');
@@ -825,22 +909,53 @@ export function parseOcr(content: string): OcrResult {
       data = null;
     }
   }
-  if (!data) {
-    // 模型没按格式输出：整段文字按行当作列
-    const lines = text.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-    const columns = lines.map((t) => ({ text: t, box: null as any }));
+  if (!data && text.trimStart().startsWith('[')) {
+    try {
+      data = JSON.parse(text.slice(text.indexOf('['), text.lastIndexOf(']') + 1));
+    } catch {
+      data = null;
+    }
+  }
+
+  const fromLines = (lines: string[]): OcrResult => {
+    const columns = lines
+      .map((t) => ({ text: t.replace(/\s+/g, ''), box: null as any }))
+      .filter((c) => c.text.length > 0);
     const uncertain: OcrUncertain[] = [];
     addBoxUncertain(columns, uncertain);
     return { columns, uncertain };
+  };
+
+  if (!data) {
+    // 没按格式输出，或输出被截断：JSON 样子的从引号里捞中文串，否则整段按行当作列
+    if (/[{\[]/.test(text) && /"/.test(text)) {
+      const strs = Array.from(text.matchAll(/"((?:[^"\\]|\\.){2,})"/g))
+        .map((m) => m[1])
+        .filter((t) => /[\u3400-\u9fff]/.test(t));
+      if (strs.length) return { ...fromLines(strs), partial: true };
+    }
+    return fromLines(text.split(/\r?\n/).map((s) => s.trim()));
   }
-  const columns: OcrColumn[] = (Array.isArray(data.columns) ? data.columns : [])
+
+  // 模型常把列放在不同名字下：columns / text / lines / content / result，元素可以是字符串或 {text}
+  const pick = (d: any): any[] | null => {
+    if (Array.isArray(d)) return d;
+    for (const k of ['columns', 'text', 'lines', 'content', 'result', 'results', 'data', 'items']) {
+      const v = d?.[k];
+      if (Array.isArray(v)) return v;
+      if (typeof v === 'string' && v.trim()) return v.split(/\r?\n/);
+    }
+    return null;
+  };
+  const raw = pick(data) || [];
+  const columns: OcrColumn[] = raw
     .map((c: any) => ({
-      text: String(typeof c === 'string' ? c : c?.text ?? '').replace(/\s+/g, ''),
-      box: normBox(c?.box),
+      text: String(typeof c === 'string' ? c : c?.text ?? c?.content ?? '').replace(/\s+/g, ''),
+      box: normBox(typeof c === 'object' ? c?.box : null),
     }))
     .filter((c: OcrColumn) => c.text.length > 0);
   const uncertain: OcrUncertain[] = [];
-  for (const u of Array.isArray(data.uncertain) ? data.uncertain : []) {
+  for (const u of Array.isArray(data?.uncertain) ? data.uncertain : []) {
     const col = Math.round(Number(u?.col));
     if (!Number.isFinite(col) || col < 0 || col >= columns.length) continue;
     const colText = Array.from(columns[col].text);

@@ -8,12 +8,13 @@ import { OcrPage } from './ocr-page.entity';
 import { Task } from '../tasks/task.entity';
 import { TaskImage } from '../tasks/task-image.entity';
 import { SettingsService } from '../settings/settings.service';
-import { AliyunService, AiConfigError } from '../ai/aliyun.service';
+import { AliyunService, AiConfigError, OcrParseError } from '../ai/aliyun.service';
 import { getPlatformDef } from '../settings/platforms';
 import { OCR_SCHEMA_SQL } from './ocr-schema';
 import { LayoutChar, LayoutColumn, PageLayout, layoutPage } from './ocr-layout';
 
-const FAIL_STOP = new Set(['arrears', 'auth', 'model', 'quota', 'config']);
+// 这些属于配置问题，整本暂停；限流(quota)等其它错误只让这一页失败，可重试
+const FAIL_STOP = new Set(['arrears', 'auth', 'model', 'config']);
 
 @Injectable()
 export class OcrService implements OnModuleInit {
@@ -21,6 +22,8 @@ export class OcrService implements OnModuleInit {
   /** 正在后台识别的任务 */
   private readonly running = new Set<number>();
   private readonly cancelled = new Set<number>();
+  /** 正在后台重新识别的单页 */
+  private readonly pageJobs = new Set<number>();
 
   constructor(
     @InjectRepository(OcrTask) private readonly tasks: Repository<OcrTask>,
@@ -39,6 +42,12 @@ export class OcrService implements OnModuleInit {
       return;
     }
     // 服务重启会让「识别中」一直停在那里：标成暂停，用户点「继续识别」即可，已识别的页不会重复收费
+    try {
+      // 页面级的后台识别（重新识别）被重启打断：有旧文字的回到待核对，没有的回到未识别
+      await this.pages.query("UPDATE ocr_pages SET status = IF(data_json IS NULL, 'pending', 'ready') WHERE status = 'processing'");
+    } catch (e) {
+      this.logger.error(`恢复 OCR 页面状态失败: ${e}`);
+    }
     try {
       const stuck = await this.tasks.find({ where: { status: 'processing' } });
       for (const t of stuck) {
@@ -81,8 +90,16 @@ export class OcrService implements OnModuleInit {
       : [];
     const byId = new Map<number, { unc: number; chars: number }>();
     for (const r of sums) byId.set(Number(r.tid), { unc: Number(r.unc) || 0, chars: Number(r.chars) || 0 });
+    const live = list.length
+      ? await this.pages.find({
+          where: { ocrTaskId: In(list.map((t) => t.id)), status: In(['processing', 'failed']) },
+          select: ['id', 'ocrTaskId', 'status', 'sortOrder', 'updatedAt'],
+        })
+      : [];
     const out = [];
-    for (const t of list) out.push(await this.taskView(t, byId.get(Number(t.id))));
+    for (const t of list) {
+      out.push(await this.taskView(t, byId.get(Number(t.id)), live.filter((p) => Number(p.ocrTaskId) === Number(t.id))));
+    }
     return out;
   }
 
@@ -94,13 +111,22 @@ export class OcrService implements OnModuleInit {
       .addSelect('SUM(p.char_count)', 'chars')
       .where('p.ocr_task_id = :id', { id })
       .getRawOne();
-    return this.taskView(t, { unc: Number(sums?.unc) || 0, chars: Number(sums?.chars) || 0 });
+    const live = await this.pages.find({
+      where: { ocrTaskId: id, status: In(['processing', 'failed']) },
+      select: ['id', 'ocrTaskId', 'status', 'sortOrder', 'updatedAt'],
+    });
+    return this.taskView(t, { unc: Number(sums?.unc) || 0, chars: Number(sums?.chars) || 0 }, live);
   }
 
-  private async taskView(t: OcrTask, sum?: { unc: number; chars: number }) {
+  private async taskView(t: OcrTask, sum?: { unc: number; chars: number }, live: OcrPage[] = []) {
     const model = t.ocrModelId ? await this.settings.getModel(t.ocrModelId) : null;
     return {
       ...t,
+      failedCount: live.filter((p) => p.status === 'failed').length,
+      /** 正在识别的页（页序号 + 开始时间），前端据此显示「第 N 页识别中 · 已用 X 秒」 */
+      processingPages: live
+        .filter((p) => p.status === 'processing')
+        .map((p) => ({ pageNo: Number(p.sortOrder) + 1, startedAt: new Date(p.updatedAt).getTime() })),
       ocrModelName: model?.displayName || null,
       uncertainCount: sum?.unc || 0,
       charCount: sum?.chars || 0,
@@ -318,7 +344,20 @@ export class OcrService implements OnModuleInit {
     await this.pages.save(page);
 
     const started = Date.now();
-    const { result, usage } = await this.aliyun.ocr(page.imagePath, model);
+    let ocrOut;
+    try {
+      ocrOut = await this.aliyun.ocr(page.imagePath, model);
+    } catch (e: any) {
+      if (e instanceof OcrParseError) {
+        // 模型已经返回（已计费）但解析不出文字：费用要记上
+        const c = this.settings.toCny(model, this.aliyun.cost(model, e.usage)) || 0;
+        await this.settings.learnTokens(Number(model.id), e.usage.tokensIn, e.usage.tokensOut);
+        await this.addCost(taskId, c);
+        await this.pages.update({ id: pageId }, { cost: String((Number(page.cost) || 0) + c) });
+      }
+      throw e;
+    }
+    const { result, usage } = ocrOut;
     const cost = this.settings.toCny(model, this.aliyun.cost(model, usage)) || 0;
     await this.settings.learnTokens(Number(model.id), usage.tokensIn, usage.tokensOut);
     // 费用先记账，后面摆位失败也不会丢
@@ -335,6 +374,7 @@ export class OcrService implements OnModuleInit {
       layout = this.evenLayout(page.width || 1000, page.height || 1400, result.columns, result.uncertain);
     }
     this.fillPage(page, layout);
+    page.errorMessage = result.partial ? '模型输出不完整（可能被截断），后面的文字可能缺失，请对照图片核对，必要时重新识别。' : null;
     page.status = 'ready';
     page.processingTimeMs = Date.now() - started;
     await this.pages.save(page);
@@ -527,7 +567,7 @@ export class OcrService implements OnModuleInit {
     const p = await this.getPage(t.id, pageId);
     const tid = Number(t.id);
     if (this.running.has(tid)) throw new BadRequestException('整本正在识别中，请稍后再试');
-    if (p.status === 'processing') throw new BadRequestException('这一页正在识别，请稍后再试');
+    if (p.status === 'processing' || this.pageJobs.has(Number(p.id))) throw new BadRequestException('这一页正在识别，请稍后再试');
     const model = t.ocrModelId ? await this.settings.getModel(t.ocrModelId) : null;
     if (!model || !model.enabled) throw new BadRequestException({ message: '识别模型已被删除或停用，请到「模型配置」重新添加。', errorCode: 'model:' });
     try {
@@ -538,21 +578,30 @@ export class OcrService implements OnModuleInit {
       }
       throw new BadRequestException(e?.message || String(e));
     }
-    this.running.add(tid);
-    try {
-      await this.recognizeInner(tid, p.id);
-    } catch (e: any) {
-      await this.pages.update({ id: p.id }, { status: p.dataJson ? 'ready' : 'failed', errorMessage: p.dataJson ? null : String(e?.message || e).slice(0, 500) });
-      if (e instanceof AiConfigError) {
-        throw new BadRequestException({ message: e.message, errorCode: `${e.kind}:${e.platform || ''}` });
+    // 后台执行，接口马上返回；前端轮询页面状态（识别一页常要几十秒，不让请求一直挂着）
+    const hadData = !!p.dataJson;
+    p.status = 'processing';
+    p.errorMessage = null;
+    await this.pages.save(p);
+    this.pageJobs.add(Number(p.id));
+    void (async () => {
+      try {
+        await this.recognizeInner(tid, p.id);
+      } catch (e: any) {
+        const msg = e instanceof AiConfigError ? e.message : String(e?.message || e);
+        this.logger.warn(`OCR page ${p.id} re-recognize failed: ${msg}`);
+        await this.pages.update(
+          { id: p.id },
+          hadData
+            ? { status: 'ready', errorMessage: ('重新识别失败，保留原来的文字：' + msg).slice(0, 500) }
+            : { status: 'failed', errorMessage: msg.slice(0, 500) },
+        );
+      } finally {
+        this.pageJobs.delete(Number(p.id));
+        await this.afterPageChange(t);
       }
-      throw new BadRequestException('识别失败：' + (e?.message || e));
-    } finally {
-      this.running.delete(tid);
-    }
-    await this.afterPageChange(t);
-    const fresh = await this.getPage(t.id, pageId);
-    return this.pageView(fresh, true);
+    })();
+    return this.pageView(p, false);
   }
 
   async confirmAll(userId: number, id: number) {

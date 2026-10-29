@@ -128,6 +128,10 @@ export interface OcrTask {
   ocrModelName?: string | null;
   uncertainCount: number;
   charCount: number;
+  /** 识别失败、可重试的页数 */
+  failedCount: number;
+  /** 正在识别的页（页序号 + 开始时间戳） */
+  processingPages: { pageNo: number; startedAt: number }[];
   createdAt: string;
   updatedAt: string;
 }

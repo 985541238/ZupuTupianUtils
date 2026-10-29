@@ -155,6 +155,10 @@ export function mapOcrTask(raw: any): OcrTask {
     ocrModelName: raw.ocrModelName || null,
     uncertainCount: Number(raw.uncertainCount) || 0,
     charCount: Number(raw.charCount) || 0,
+    failedCount: Number(raw.failedCount) || 0,
+    processingPages: Array.isArray(raw.processingPages)
+      ? raw.processingPages.map((p: any) => ({ pageNo: Number(p.pageNo) || 0, startedAt: Number(p.startedAt) || 0 }))
+      : [],
     createdAt: formatTime(raw.createdAt),
     updatedAt: formatTime(raw.updatedAt || raw.createdAt),
   };

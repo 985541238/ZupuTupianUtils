@@ -101,6 +101,28 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
     };
   }, [loadList]);
 
+  // 整本还在识别时，每 3 秒刷新页面列表：识别好的页马上能点开审阅
+  const taskLive = task.status === 'processing' || pages.some((p) => p.status === 'processing');
+  useEffect(() => {
+    if (!taskLive) return;
+    const t = window.setInterval(() => {
+      api
+        .getOcrPages(task.id)
+        .then((raw) => {
+          const fresh = (raw || []).map((r, i) => mapOcrPage(r, task.id, i + 1));
+          setPages((prev) =>
+            fresh.map((f) => {
+              const old = prev.find((p) => p.id === f.id);
+              // 正在人工修改的页，不被服务器上的旧数字覆盖
+              return old && old.status === 'ready' && f.status === 'ready' ? { ...f, uncertainCount: old.uncertainCount, charCount: old.charCount } : f;
+            }),
+          );
+        })
+        .catch(() => {});
+    }, 3000);
+    return () => window.clearInterval(t);
+  }, [taskLive, task.id]);
+
   // ---------- 单页数据与自动保存 ----------
   const cache = useRef<Map<string, OcrColumn[]>>(new Map());
   const dirty = useRef<{ pageId: string; columns: OcrColumn[] } | null>(null);
@@ -141,9 +163,16 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
 
   useEffect(() => () => void flushSave(), [flushSave]);
 
+  const curStatus = cur?.status;
   useEffect(() => {
     if (!curId) {
       setColumns(null);
+      return;
+    }
+    // 还没有识别结果的页：等识别完成（状态变化时本 effect 会重新执行）
+    if ((curStatus === 'pending' || curStatus === 'processing' || curStatus === 'failed') && !cache.current.has(curId)) {
+      setColumns(null);
+      setLoadingPage(false);
       return;
     }
     setSel(null);
@@ -169,7 +198,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
     return () => {
       off = true;
     };
-  }, [curId, task.id, showToast]);
+  }, [curId, curStatus === 'pending' || curStatus === 'processing' || curStatus === 'failed', task.id, showToast]);
 
   const gotoPage = useCallback(
     async (id: string) => {
@@ -356,20 +385,12 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
     try {
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
       dirty.current = null;
-      const raw = await api.recognizeOcrPage(task.id, cur.id);
-      const cols: OcrColumn[] | undefined = raw?.data?.columns;
-      if (cols) {
-        cache.current.set(cur.id, cols);
-        setColumns(cols);
-      }
-      patchPage(cur.id, {
-        status: raw?.status || 'ready',
-        uncertainCount: Number(raw?.uncertainCount) || countPending(cols),
-        charCount: Number(raw?.charCount) || countChars(cols),
-        errorMessage: null,
-      });
-      onTaskChanged?.();
-      showToast(`第 ${cur.pageNumber} 页已重新识别`);
+      await api.recognizeOcrPage(task.id, cur.id);
+      // 后台识别：先把这页标成「识别中」，列表轮询会在完成后自动更新
+      cache.current.delete(cur.id);
+      setColumns(null);
+      patchPage(cur.id, { status: 'processing', errorMessage: null });
+      showToast(`第 ${cur.pageNumber} 页开始识别，完成后会自动显示`);
     } catch (e: any) {
       if (e?.errorCode && onOpenSetup) {
         alert(e.message);
@@ -450,6 +471,11 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                         </span>
                       ) : p.status === 'ready' ? (
                         <span className="text-[10px] font-semibold text-[#0071E3] bg-[#0071E3]/10 px-1.5 py-0.5 rounded-full">待核对</span>
+                      ) : p.status === 'processing' ? (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-[#0071E3] bg-[#0071E3]/10 px-1.5 py-0.5 rounded-full">
+                          <Sparkles className="w-2.5 h-2.5 animate-spin" />
+                          识别中
+                        </span>
                       ) : p.status === 'failed' ? (
                         <span className="text-[10px] font-semibold text-[#C62828] bg-[#FF3B30]/10 px-1.5 py-0.5 rounded-full">识别失败</span>
                       ) : (
@@ -594,10 +620,17 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                 </div>
 
                 <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
-                  {cur.status === 'failed' || (!columns && !loadingPage) ? (
-                    <div className="rounded-2xl bg-[#FFF5F5] border border-[#FF3B30]/15 p-3 text-[13px] text-[#C62828] leading-relaxed">
-                      {cur.status === 'failed' ? cur.errorMessage || '这一页识别失败' : '这一页还没有识别结果'}
+                  {cur.status === 'processing' ? (
+                    <div className="rounded-2xl bg-[#0071E3]/[0.06] border border-[#0071E3]/15 p-3 text-[13px] text-[#0A4FA8] leading-relaxed flex items-start gap-2">
+                      <Sparkles className="w-4 h-4 animate-spin shrink-0 mt-0.5" />
+                      <span>这一页正在识别，完成后自动显示，不用刷新。</span>
                     </div>
+                  ) : cur.status === 'failed' || (!columns && !loadingPage) ? (
+                    <div className="rounded-2xl bg-[#FFF5F5] border border-[#FF3B30]/15 p-3 text-[13px] text-[#C62828] leading-relaxed">
+                      {cur.status === 'failed' ? cur.errorMessage || '这一页识别失败，点下方「识别本页」重试。' : '这一页还没有识别结果'}
+                    </div>
+                  ) : cur.errorMessage && columns ? (
+                    <div className="rounded-2xl bg-[#FF9500]/10 border border-[#FF9500]/25 p-3 text-[13px] text-[#C93400] leading-relaxed">{cur.errorMessage}</div>
                   ) : null}
 
                   {columns ? (
@@ -697,12 +730,12 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                     </button>
                   )}
                   <button
-                    disabled={busy}
+                    disabled={busy || cur.status === 'processing'}
                     onClick={() => (columns ? setRerunDlg(true) : void recognizeAgain())}
                     className="w-full h-9 text-[13px] font-semibold rounded-xl text-[#6E6E73] hover:text-[#1D1D1F] hover:bg-black/[0.04] cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5"
                   >
                     <RotateCcw className="w-3.5 h-3.5" />
-                    {columns ? '重新识别本页' : '识别本页'}
+                    {busy ? '提交中…' : columns ? '重新识别本页' : '识别本页'}
                   </button>
                 </div>
               </aside>
@@ -984,7 +1017,20 @@ const PageCanvas: React.FC<CanvasProps> = ({
             </div>
           )}
 
-          {!loading && !columns && (
+          {!loading && !columns && page.status === 'processing' && (
+            <div className="absolute inset-0 flex items-center justify-center bg-white/55">
+              <div className="bg-white/95 border border-[#0071E3]/20 rounded-2xl px-6 py-5 text-center shadow-lg max-w-[280px]">
+                <Sparkles className="w-6 h-6 animate-spin text-[#0071E3] mx-auto mb-2" />
+                <p className="text-[13px] font-semibold text-[#1D1D1F] ocr-breathe">正在识别这一页…</p>
+                <p className="text-[11px] text-[#86868B] mt-1.5 leading-relaxed">通常要 20～90 秒，识别好会自动显示。可以先看别的页。</p>
+                <div className="w-full bg-[#E5E5EA] rounded-full h-1 overflow-hidden mt-3">
+                  <div className="bg-[#0071E3] ocr-flowing h-full w-full rounded-full" />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {!loading && !columns && page.status !== 'processing' && (
             <div className="absolute inset-0 flex items-center justify-center">
               <div className="bg-white/90 border border-black/[0.08] rounded-2xl px-5 py-4 text-center shadow-lg">
                 <p className="text-[13px] font-semibold text-[#1D1D1F]">这一页还没有识别结果</p>
@@ -996,7 +1042,7 @@ const PageCanvas: React.FC<CanvasProps> = ({
                   }}
                   className="mt-3 h-9 px-4 text-xs font-semibold rounded-lg bg-[#0071E3] text-white cursor-pointer disabled:opacity-60"
                 >
-                  {busy ? '识别中…（约十几秒）' : '识别本页'}
+                  {busy ? '提交中…' : '识别本页'}
                 </button>
               </div>
             </div>

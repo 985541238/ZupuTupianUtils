@@ -145,3 +145,19 @@ input[type="range"]::-webkit-slider-thumb:active {
   animation: floatOrb2 12s ease-in-out infinite;
 }
 
+
+/* 识别中的进度条：未到下一页完成前也在流动，让人知道没卡死 */
+@keyframes ocr-flow {
+  0% { background-position: 0 0; }
+  100% { background-position: 28px 0; }
+}
+.ocr-flowing {
+  background-image: linear-gradient(45deg, rgba(255,255,255,0.28) 25%, transparent 25%, transparent 50%, rgba(255,255,255,0.28) 50%, rgba(255,255,255,0.28) 75%, transparent 75%);
+  background-size: 28px 28px;
+  animation: ocr-flow 0.9s linear infinite;
+}
+@keyframes ocr-breathe {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+.ocr-breathe { animation: ocr-breathe 1.6s ease-in-out infinite; }

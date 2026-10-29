@@ -17,6 +17,7 @@ import {
   CheckCircle2,
   AlertTriangle,
   ScanText,
+  RotateCcw,
 } from 'lucide-react';
 
 interface Props {
@@ -48,6 +49,28 @@ const STAGE_TABS: { key: 'all' | Stage; label: string; tone: string }[] = [
   { key: 'completed', label: '已完成', tone: 'text-[#34C759]' },
 ];
 
+/** 每秒刷新一次的当前时间，用来显示「已用 X 秒」 */
+function useNow(active: boolean) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, [active]);
+  return now;
+}
+
+function elapsedText(ms: number) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return s < 60 ? `${s} 秒` : `${Math.floor(s / 60)} 分 ${String(s % 60).padStart(2, '0')} 秒`;
+}
+
+/** 明显不能看图的模型（纯文字模型）：识别会胡编或直接失败 */
+function looksTextOnly(m: any) {
+  const id = String(m?.model || '');
+  return (/deepseek/i.test(id) && !/ocr|vl/i.test(id)) || /coder|embedding|rerank|bge/i.test(id);
+}
+
 export const OcrTaskCenterView: React.FC<Props> = ({
   tasks,
   loading,
@@ -78,6 +101,9 @@ export const OcrTaskCenterView: React.FC<Props> = ({
   const [modelId, setModelId] = useState<number | null>(null);
   const [est, setEst] = useState<{ cost: number | null; priced: boolean }>({ cost: null, priced: false });
   const [creating, setCreating] = useState(false);
+
+  const anyProcessing = tasks.some((t) => t.status === 'processing');
+  const now = useNow(anyProcessing);
 
   const stageCount = (k: 'all' | Stage) => (k === 'all' ? tasks.length : tasks.filter((t) => stageOf(t) === k).length);
 
@@ -348,13 +374,25 @@ export const OcrTaskCenterView: React.FC<Props> = ({
 
                         {isProcessing && (
                           <div className="pt-1 max-w-xl">
-                            <div className="flex items-center justify-between mb-1">
-                              <span className="text-xs font-medium text-[#86868B]">大模型识别中，可以离开此页，完成后会提示</span>
-                              <span className="text-xs font-semibold text-[#0071E3] tabular-nums">{pct}%</span>
+                            <div className="flex items-center justify-between mb-1 gap-3">
+                              <span className="text-xs font-medium text-[#0071E3] truncate ocr-breathe">
+                                {task.processingPages.length
+                                  ? `正在识别第 ${task.processingPages.map((p) => p.pageNo).join('、')} 页 · 最久已用 ${elapsedText(
+                                      now - Math.min(...task.processingPages.map((p) => p.startedAt || now)),
+                                    )}`
+                                  : '正在准备下一批页面…'}
+                              </span>
+                              <span className="text-xs font-semibold text-[#0071E3] tabular-nums shrink-0">{pct}%</span>
                             </div>
                             <div className="w-full bg-[#E5E5EA] rounded-full h-1.5 overflow-hidden">
-                              <div className="bg-[#0071E3] h-full rounded-full transition-all duration-300 ease-out" style={{ width: `${pct}%` }} />
+                              <div
+                                className="bg-[#0071E3] ocr-flowing h-full rounded-full transition-all duration-500 ease-out"
+                                style={{ width: `${Math.max(pct, 6)}%` }}
+                              />
                             </div>
+                            <p className="text-[11px] text-[#86868B] mt-1.5 leading-relaxed">
+                              大模型识别一页通常要 20～90 秒，多页同时进行。可以离开此页，完成后会提示；识别好的页面现在就能点「先去审阅」。
+                            </p>
                           </div>
                         )}
 
@@ -397,10 +435,28 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                           <span>{task.status === 'failed' && task.doneCount ? '继续识别' : '开始识别'}</span>
                         </button>
                       )}
+                      {isProcessing && task.doneCount > 0 && (
+                        <button
+                          onClick={() => onOpenReview(task.id)}
+                          className="h-10 px-4 text-sm font-semibold rounded-full bg-white border border-[#0071E3]/30 text-[#0071E3] hover:bg-[#0071E3]/[0.05] transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                        >
+                          <span>先去审阅（{task.doneCount} 页）</span>
+                        </button>
+                      )}
                       {isProcessing && (
                         <button disabled className="h-10 px-5 text-sm font-semibold rounded-full bg-[#E8F1FC] text-[#0071E3] cursor-not-allowed flex items-center justify-center gap-1.5">
                           <Sparkles className="w-3.5 h-3.5 animate-spin" />
                           <span>识别中</span>
+                        </button>
+                      )}
+                      {!isProcessing && task.status === 'reviewing' && task.failedCount > 0 && (
+                        <button
+                          onClick={() => onStart(task.id)}
+                          className="h-10 px-4 text-sm font-semibold rounded-full bg-[#FF9500] hover:bg-[#F08C00] text-white shadow-[0_2px_8px_rgba(255,149,0,0.28)] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
+                          title="只重新识别失败的页，已识别的不会重复收费"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          <span>重试失败页（{task.failedCount}）</span>
                         </button>
                       )}
                       {!isProcessing && task.status === 'failed' && task.doneCount > 0 && (
@@ -593,6 +649,11 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                       ) : (
                         <p className="text-xs text-[#C93400] leading-relaxed">还没有启用的文字识别模型，请先到顶部「模型配置」添加。</p>
                       )}
+                      {selectedModel && looksTextOnly(selectedModel) ? (
+                        <p className="text-xs text-[#C93400] mt-1.5 leading-relaxed bg-[#FF9500]/10 rounded-lg px-2.5 py-2">
+                          「{selectedModel.model}」看起来是纯文字模型，不能真正看图，识别结果可能是编的或直接失败。建议换成带视觉的模型（如 GLM-4.5V、Qwen-VL 系列）。
+                        </p>
+                      ) : null}
                       {selectedModel && !selectedModel.hasKey && selectedModel.hasKey !== undefined ? (
                         <p className="text-xs text-[#C93400] mt-1">这个模型还没有可用的 API Key，开始识别前需要先填写。</p>
                       ) : null}
