@@ -177,7 +177,9 @@ export async function baiduAccurateOcr(
     segs.push({ x1, y1, x2, y2, chars, text, prob: l.probability?.average != null ? [Number(l.probability.average)] : [] });
   }
 
-  // 竖排的一列有时被拆成上下几段：横向范围大部分重叠、上下相接的合并回一列
+  // 竖排的一列常被拆成上下几段（中间隔着一大段空白：落款「…月　　數旦」、抬头空格等）。
+  // 竖排的列是左右并排的，所以只要横向范围大部分重叠、上下不重叠，就一定是同一列，不管中间隔多远；
+  // 不合并的话，下面那段会被当成另一列，排在错误的阅读位置。
   const used = new Array(segs.length).fill(false);
   const merged: Seg[] = [];
   const order = segs.map((_, i) => i).sort((a, b) => segs[a].y1 - segs[b].y1);
@@ -194,7 +196,7 @@ export async function baiduAccurateOcr(
         const w = Math.min(cur.x2 - cur.x1, o.x2 - o.x1);
         const tall = cur.y2 - cur.y1 > cur.x2 - cur.x1 && o.y2 - o.y1 > o.x2 - o.x1; // 都是竖条
         const gap = o.y1 - cur.y2;
-        if (tall && w > 0 && ox > 0.7 * w && gap > -0.3 * (o.y2 - o.y1) && gap < Math.max(40, (cur.x2 - cur.x1) * 1.2) && o.y1 >= cur.y1) {
+        if (tall && w > 0 && ox > 0.7 * w && gap > -0.3 * (o.y2 - o.y1) && o.y1 >= cur.y1) {
           used[j2] = true;
           cur = {
             x1: Math.min(cur.x1, o.x1),
