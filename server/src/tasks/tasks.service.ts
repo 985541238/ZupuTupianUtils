@@ -619,6 +619,9 @@ export class TasksService implements OnModuleInit {
           this.writeAiMark(markPath, key, 'mismatch');
           throw new AiMismatchError(
             `大模型这次画出的页面和原图大部分对不上（重画了版面或丢了内容），没有采用它的结果，本页保留算法结果` +
+              (fuse.recall != null
+                ? `【对齐度 ${Math.round((fuse.recall || 0) * 100)}%（要求 ≥70%）${(fuse as any).bad_tiles != null ? `，${(fuse as any).bad_tiles}/${(fuse as any).text_tiles} 个字区画错或丢字` : ''}】`
+                : '') +
               (cost ? `（本次已产生费用 ¥${cost.toFixed(2)}）` : '') +
               '。可以再试一次，或换一个图片处理模型。',
           );

@@ -293,6 +293,7 @@ def main() -> int:
 
     meta = {"recall": round(recall, 3), "coverage": round(coverage, 3), "bad_tiles": nbad, "text_tiles": text_tiles,
             "shift": [round(float(warp[0, 2] / s), 1), round(float(warp[1, 2] / s), 1)], "width": w, "height": h}
+    # 注意：不能放宽这道门。大模型只画对一部分时，对得上的区域里仍会漏掉整个字（实测会让一半的字丢失），宁可整页不用
     if int(np.count_nonzero(a_s2)) < sw * sh * 0.002 or text_tiles == 0 or nbad > text_tiles * 0.4 or recall < 0.7:
         print(json.dumps({"ok": False, "error": "mismatch", **meta}))
         return 2
