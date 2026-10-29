@@ -139,7 +139,17 @@ export class TasksController {
     @Param('imageId', ParseIntPipe) imageId: number,
     @Body() body: any,
   ) {
-    return this.tasks.aiProcessImage(req.user.id, id, imageId, body || {});
+    return this.tasks.startAiProcess(req.user.id, id, imageId, body || {});
+  }
+
+  /** 单页大模型处理进度：state = running | done | failed | none */
+  @Get(':id/images/:imageId/ai-process')
+  aiProcessStatus(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('imageId', ParseIntPipe) imageId: number,
+  ) {
+    return this.tasks.getAiJob(req.user.id, id, imageId);
   }
 
   @Put(':id/images/:imageId/reprocess')

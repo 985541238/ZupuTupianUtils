@@ -31,6 +31,8 @@ export interface PlatformDef {
   featured?: boolean;
   /** 一句话介绍（界面展示） */
   intro?: string;
+  /** 平台计价币种，默认人民币；美元平台按「通用设置」里的汇率折算成人民币记账 */
+  currency?: 'CNY' | 'USD';
   /** 默认服务地址（大模型调用） */
   defaultBaseUrl: string;
   docsUrl: string;
@@ -53,6 +55,8 @@ export interface PlatformDef {
     reason?: string;
     /** 推荐的图生图模型代码（可改） */
     suggestedModels?: string[];
+    /** 推荐模型的参考单价（平台币种/张），新建模型时预填 */
+    referencePrices?: Record<string, number>;
     /** 官方是否明确支持 base64 传图；不确定的平台可切到「公网链接」方式 */
     base64Documented?: boolean;
   };
@@ -68,6 +72,7 @@ export const PLATFORMS: PlatformDef[] = [
     code: 'dataeyes',
     name: 'DataEyes 聚合平台',
     featured: true,
+    currency: 'USD',
     intro: '一个 Key 即可调用 Seedream、Gemini、通义千问、GPT 等上百个模型，图片处理和文字识别都能用',
     defaultBaseUrl: 'https://studio.dataeyes.ai/v1',
     docsUrl: 'https://doczh.dataeyes.ai/',
@@ -99,6 +104,15 @@ export const PLATFORMS: PlatformDef[] = [
     imageEdit: {
       supported: true,
       suggestedModels: ['ByteDance-Seedream-5.0', 'gemini-3.1-flash-image', 'ByteDance-Seedream-5.0-pro', 'wan2.7-image-pro'],
+      // 参考单价（美元/张，取自平台模型广场 2026-10；以平台实际为准，用户可改）
+      referencePrices: {
+        'ByteDance-Seedream-5.0': 0.035,
+        'ByteDance-Seedream-5.0-pro': 0.09,
+        'ByteDance-Seedream-4.5': 0.04,
+        'wan2.7-image-pro': 0.0714,
+        'gemini-2.5-flash-image': 0.039,
+        'gemini-3.1-flash-image': 0.08,
+      },
       base64Documented: true,
     },
   },

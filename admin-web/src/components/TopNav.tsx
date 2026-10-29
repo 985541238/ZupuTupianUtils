@@ -1,11 +1,6 @@
 import React from 'react';
 import { User } from '../types';
-import {
-  BookOpen,
-  LogOut,
-  ChevronLeft,
-  Settings,
-} from 'lucide-react';
+import { BookOpen, LogOut, ChevronLeft, Settings, LayoutList } from 'lucide-react';
 
 export type MainViewTab = 'tasks' | 'workbench' | 'settings';
 
@@ -28,93 +23,77 @@ export const TopNav: React.FC<TopNavProps> = ({
   activeTaskName,
   activeTaskProgress,
 }) => {
+  const navBtn = (active: boolean) =>
+    `h-9 px-4 rounded-xl text-sm font-semibold flex items-center gap-2 transition-colors cursor-pointer ${
+      active ? 'bg-[#0071E3]/10 text-[#0071E3]' : 'text-[#6E6E73] hover:text-[#1D1D1F] hover:bg-black/[0.04]'
+    }`;
+  const name = user.displayName || user.username || '管理员';
   return (
-    <header className="h-14 apple-glass border-b border-black/[0.06] px-5 flex items-center justify-between gap-4 select-none shrink-0 z-30">
-      {/* Zone 1: Brand mark or Workbench Back Navigation */}
-      <div className="flex items-center gap-3 shrink-0">
-        {currentTab === 'tasks' ? (
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-[#0071E3] flex items-center justify-center text-white shadow-[0_2px_8px_rgba(0,113,227,0.3)]">
-              <BookOpen className="w-4 h-4 stroke-[2.2]" />
-            </div>
-            <div className="flex flex-col">
-              <span className="font-semibold text-sm tracking-tight text-[#1D1D1F] whitespace-nowrap">
-                古籍印刷扫描处理台
-              </span>
-              <span className="text-[10px] text-[#86868B] font-mono leading-none">
-                ZupuTupianUtils · 档案还原工作台
-              </span>
-            </div>
-          </div>
-        ) : (
-          <div className="flex items-center gap-3">
+    <header className="h-16 apple-glass border-b border-black/[0.06] px-6 lg:px-10 flex items-center justify-between gap-4 select-none shrink-0 z-30">
+      {/* 左：品牌 + 导航（审核页显示返回与当前任务） */}
+      <div className="flex items-center gap-5 min-w-0">
+        {currentTab === 'workbench' ? (
+          <div className="flex items-center gap-3 min-w-0">
             <button
               onClick={onBackToTasks}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white hover:bg-[#F5F5F7] border border-black/[0.08] text-xs font-semibold text-[#1D1D1F] transition-all cursor-pointer shadow-2xs hover:border-black/[0.15]"
-              title="返回任务与下载列表"
+              className="flex items-center gap-1.5 h-9 px-3.5 rounded-xl bg-white hover:bg-[#F5F5F7] border border-black/[0.08] text-sm font-semibold text-[#1D1D1F] transition-all cursor-pointer shadow-2xs"
+              title="返回任务列表"
             >
               <ChevronLeft className="w-4 h-4 stroke-[2.2] text-[#0071E3]" />
               <span>返回任务列表</span>
             </button>
-
-            <div className="h-4 w-px bg-black/[0.08]" />
-
-            <div className="flex items-center gap-2 text-xs">
-              <span className="text-[#86868B] font-medium hidden sm:inline">正在审阅:</span>
-              <span className="text-[#1D1D1F] font-semibold max-w-[220px] md:max-w-[360px] truncate">
-                {activeTaskName || '未命名扫描卷'}
+            <div className="h-5 w-px bg-black/[0.08]" />
+            <div className="flex items-center gap-2 text-sm min-w-0">
+              <span className="text-[#86868B] hidden sm:inline">正在审阅：</span>
+              <span className="text-[#1D1D1F] font-semibold max-w-[280px] md:max-w-[420px] truncate">
+                {activeTaskName || '未命名'}
               </span>
               {activeTaskProgress && (
-                <span className="font-mono text-[11px] px-2 py-0.5 rounded-full bg-[#0071E3]/10 text-[#0071E3] font-semibold">
+                <span className="font-mono text-xs px-2 py-0.5 rounded-full bg-[#0071E3]/10 text-[#0071E3] font-semibold shrink-0">
                   {activeTaskProgress.reviewed}/{activeTaskProgress.total} 页已核
                 </span>
               )}
             </div>
           </div>
+        ) : (
+          <>
+            <div className="flex items-center gap-2.5 shrink-0">
+              <div className="w-9 h-9 rounded-xl bg-[#0071E3] flex items-center justify-center text-white shadow-[0_2px_8px_rgba(0,113,227,0.3)]">
+                <BookOpen className="w-[18px] h-[18px] stroke-[2.2]" />
+              </div>
+              <span className="font-semibold text-base tracking-tight text-[#1D1D1F] whitespace-nowrap">族谱清晰化工作台</span>
+            </div>
+            <nav className="flex items-center gap-1">
+              <button type="button" onClick={onBackToTasks} className={navBtn(currentTab === 'tasks')}>
+                <LayoutList className="w-4 h-4" />
+                任务
+              </button>
+              {onOpenSettings ? (
+                <button type="button" onClick={onOpenSettings} className={navBtn(currentTab === 'settings')}>
+                  <Settings className="w-4 h-4" />
+                  模型配置
+                </button>
+              ) : null}
+            </nav>
+          </>
         )}
       </div>
 
-      {/* Zone 2: Center is intentionally empty per user request - no tabs on top! */}
-
-      {/* Zone 3: User Profile & Actions */}
-      <div className="flex items-center gap-2.5 shrink-0">
+      {/* 右：用户（头像用姓名首字，不再依赖外网头像图片） */}
+      <div className="flex items-center gap-3 shrink-0">
         <div className="flex items-center gap-2">
-          <img
-            src={user.avatarUrl}
-            alt={user.displayName}
-            referrerPolicy="no-referrer"
-            className="w-7 h-7 rounded-full bg-[#E5E5EA] border border-black/[0.08] object-cover"
-          />
-          <div className="hidden lg:block text-left text-xs leading-none">
-            <div className="font-semibold text-[#1D1D1F] truncate max-w-[120px]">
-              {user.displayName || '管理员'}
-            </div>
-            <div className="text-[10px] text-[#86868B] font-mono mt-0.5">
-              系统总账号
-            </div>
+          <div className="w-8 h-8 rounded-full bg-[#0071E3]/12 text-[#0071E3] flex items-center justify-center text-sm font-semibold">
+            {name.slice(0, 1)}
           </div>
+          <span className="hidden lg:block text-sm font-medium text-[#1D1D1F] truncate max-w-[140px]">{name}</span>
         </div>
-
-        {currentTab !== 'workbench' && onOpenSettings && (
-          <button
-            type="button"
-            onClick={onOpenSettings}
-            title="模型配置"
-            className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
-              currentTab === 'settings'
-                ? 'text-[#0071E3] bg-[#0071E3]/10'
-                : 'text-[#86868B] hover:text-[#1D1D1F] hover:bg-black/[0.04]'
-            }`}
-          >
-            <Settings className="w-3.5 h-3.5" />
-          </button>
-        )}
         <button
           onClick={onLogout}
           title="退出登录"
-          className="p-1.5 text-[#86868B] hover:text-[#1D1D1F] hover:bg-black/[0.04] rounded-lg transition-colors cursor-pointer"
+          className="h-9 px-3 text-sm text-[#6E6E73] hover:text-[#1D1D1F] hover:bg-black/[0.04] rounded-xl transition-colors cursor-pointer flex items-center gap-1.5"
         >
-          <LogOut className="w-3.5 h-3.5" />
+          <LogOut className="w-4 h-4" />
+          <span className="hidden md:inline">退出</span>
         </button>
       </div>
     </header>

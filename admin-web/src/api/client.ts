@@ -157,6 +157,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body || {}),
     }),
+  /** 单页大模型处理进度：state = running | done | failed | none */
+  getAiJob: (taskId: string | number, imageId: string | number) =>
+    request<{ state: 'running' | 'done' | 'failed' | 'none'; elapsedMs?: number; error?: string; errorCode?: string; image?: any }>(
+      `/tasks/${taskId}/images/${imageId}/ai-process`,
+    ),
   /** 切换当前结果：algo = 算法结果，ai = 大模型结果 */
   useImageResult: (taskId: string | number, imageId: string | number, mode: 'algo' | 'ai') =>
     request<any>(`/tasks/${taskId}/images/${imageId}/use-result`, {

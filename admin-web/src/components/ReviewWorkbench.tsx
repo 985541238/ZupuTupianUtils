@@ -119,6 +119,9 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   const [cleanModels, setCleanModels] = useState<any[]>([]);
   const [selectedCleanModelId, setSelectedCleanModelId] = useState<number | null>(null);
   const [aiProcessBusy, setAiProcessBusy] = useState(false);
+  /** 正在后台用大模型处理的页（可同时处理多页，处理期间可翻页） */
+  const [aiBusyIds, setAiBusyIds] = useState<string[]>([]);
+  const curAiBusy = !!currentItem && aiBusyIds.includes(currentItem.id);
   const skipAutoPreviewRef = useRef(false);
   /** LRU of recently viewed page result URLs (server URLs) for instant flip-back. */
   const pageUrlCacheRef = useRef<Map<string, { clean?: string; original?: string }>>(new Map());
@@ -594,27 +597,61 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
     return mapped;
   };
 
-  /** 「使用大模型处理」：本页交给图生图大模型，算法结果保留可切回 */
+  /**
+   * 「使用大模型处理」：提交后台任务后轮询结果。处理期间可以翻页审核别的页，
+   * 不会被代理的请求超时打断；处理完自动刷新这一页。
+   */
   const handleAiProcessPage = async () => {
-    if (!currentItem || aiProcessBusy) return;
+    if (!currentItem || aiBusyIds.includes(currentItem.id)) return;
     if (!cleanModels.length) {
       alert('暂无可用的图片处理模型，请先到「模型配置」添加');
       return;
     }
     const item = currentItem;
-    setAiProcessBusy(true);
+    setAiBusyIds((ids) => [...ids, item.id]);
+    const finish = () => setAiBusyIds((ids) => ids.filter((x) => x !== item.id));
     try {
-      const r = await api.aiProcessImage(task.id, item.id, {
-        modelId: selectedCleanModelId || undefined,
-      });
-      applyServerImage(r, item);
-      const cost = Number(r?.cleanCost);
-      triggerToast(`第 ${item.pageNumber} 页已用大模型处理${r?.aiModelName ? '（' + r.aiModelName + '）' : ''}${Number.isFinite(cost) && cost > 0 ? `，累计 ¥${cost.toFixed(3)}` : ''}`);
+      await api.aiProcessImage(task.id, item.id, { modelId: selectedCleanModelId || undefined });
     } catch (e: any) {
-      alert(e?.message || '大模型处理失败');
-    } finally {
-      setAiProcessBusy(false);
+      finish();
+      alert(e?.message || '提交大模型处理失败');
+      return;
     }
+    const started = Date.now();
+    const poll = async () => {
+      try {
+        const r = await api.getAiJob(task.id, item.id);
+        if (r.state === 'running') {
+          if (Date.now() - started > 15 * 60 * 1000) {
+            finish();
+            alert('大模型处理时间过长，请稍后刷新页面查看结果');
+            return;
+          }
+          window.setTimeout(poll, 2000);
+          return;
+        }
+        finish();
+        if (r.state === 'done' && r.image) {
+          applyServerImage(r.image, item);
+          const cost = Number(r.image?.cleanCost);
+          triggerToast(
+            `第 ${item.pageNumber} 页已用大模型处理完成${Number.isFinite(cost) && cost > 0 ? `，本页累计 ¥${cost.toFixed(2)}` : ''}`,
+          );
+        } else if (r.state === 'failed') {
+          alert(`第 ${item.pageNumber} 页大模型处理失败：${r.error || '未知原因'}`);
+        } else {
+          alert('没有找到这一页的处理记录（服务可能重启过），请重新点击「使用大模型处理」');
+        }
+      } catch (e: any) {
+        // 网络抖动：继续等
+        if (Date.now() - started < 15 * 60 * 1000) window.setTimeout(poll, 4000);
+        else {
+          finish();
+          alert(e?.message || '查询处理结果失败');
+        }
+      }
+    };
+    window.setTimeout(poll, 2000);
   };
 
   /** 在算法结果 / 大模型结果之间切换；没有算法结果时现跑一次算法 */
@@ -1570,7 +1607,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
 
               <button
                 onClick={() => void handleAiProcessPage()}
-                disabled={isProcessing || aiProcessBusy || !cleanModels.length}
+                disabled={isProcessing || curAiBusy || !cleanModels.length}
                 className="px-3.5 py-2 bg-white hover:bg-[#AF52DE]/[0.06] active:scale-[0.98] text-[#8944AB] font-medium text-xs rounded-xl border border-[#AF52DE]/30 shadow-2xs transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
                 title={
                   !cleanModels.length
@@ -1578,8 +1615,8 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                     : '用图生图大模型重新处理本页，算法结果会保留，可在右侧「大模型处理」里切回'
                 }
               >
-                <Sparkles className={`w-4 h-4 ${aiProcessBusy ? 'animate-spin' : ''}`} />
-                <span>{aiProcessBusy ? '大模型处理中…' : '使用大模型处理'}</span>
+                <Sparkles className={`w-4 h-4 ${curAiBusy ? 'animate-spin' : ''}`} />
+                <span>{curAiBusy ? '大模型处理中…' : '使用大模型处理'}</span>
               </button>
 
               
@@ -1692,12 +1729,12 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                 </div>
                 <button
                   type="button"
-                  disabled={aiProcessBusy || !cleanModels.length || !currentItem}
+                  disabled={curAiBusy || !cleanModels.length || !currentItem}
                   onClick={() => void handleAiProcessPage()}
                   className="w-full px-3 py-2.5 rounded-xl text-xs font-semibold bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.25)] cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-60 active:scale-[0.98]"
                 >
-                  <Sparkles className={`w-3.5 h-3.5 ${aiProcessBusy ? 'animate-spin' : ''}`} />
-                  <span>{aiProcessBusy ? '处理中…' : currentItem?.hasAiResult ? '用大模型重新处理' : '使用大模型处理'}</span>
+                  <Sparkles className={`w-3.5 h-3.5 ${curAiBusy ? 'animate-spin' : ''}`} />
+                  <span>{curAiBusy ? '处理中…（约 20~60 秒）' : currentItem?.hasAiResult ? '用大模型重新处理' : '使用大模型处理'}</span>
                 </button>
               </div>
               {currentItem ? (
@@ -1715,7 +1752,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                   <div className="grid grid-cols-2 gap-1 p-1 bg-[#E5E5EA]/70 rounded-xl">
                     <button
                       type="button"
-                      disabled={aiProcessBusy || isProcessing || currentItem.processMode === 'algo'}
+                      disabled={aiProcessBusy || curAiBusy || isProcessing || currentItem.processMode === 'algo'}
                       onClick={() => void handleUseResult('algo')}
                       className={`py-1.5 text-[11px] font-semibold rounded-lg transition-all cursor-pointer disabled:cursor-default ${
                         currentItem.processMode === 'algo' ? 'bg-white text-[#1D1D1F] shadow-xs' : 'text-[#6E6E73] hover:text-[#1D1D1F]'
@@ -1726,7 +1763,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                     </button>
                     <button
                       type="button"
-                      disabled={aiProcessBusy || isProcessing || !currentItem.hasAiResult || currentItem.processMode === 'ai'}
+                      disabled={aiProcessBusy || curAiBusy || isProcessing || !currentItem.hasAiResult || currentItem.processMode === 'ai'}
                       onClick={() => void handleUseResult('ai')}
                       className={`py-1.5 text-[11px] font-semibold rounded-lg transition-all cursor-pointer disabled:cursor-default ${
                         currentItem.processMode === 'ai'

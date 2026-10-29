@@ -25,7 +25,7 @@ import {
 interface TaskCenterViewProps {
   tasks: Task[];
   onStartProcessing: (taskId: string) => void;
-  onCreateTask: (newTask: Partial<Task>, items: ScanItem[], startImmediately: boolean) => void | Promise<void>;
+  onCreateTask: (newTask: Partial<Task>, items: ScanItem[], startImmediately: boolean) => Promise<any>;
   onOpenReview: (taskId: string) => void;
   onDeleteTask?: (taskId: string) => void | Promise<void>;
   processingTaskId: string | null;
@@ -39,7 +39,51 @@ interface TaskCenterViewProps {
   onOpenSetup?: (platform?: string | null, step?: 1 | 2 | 3, onDone?: () => void) => void;
 }
 
-type TimeFilterType = 'all' | 'today' | 'week' | 'month';
+type TimeFilterType = 'all' | 'today' | 'week' | 'month' | 'custom';
+
+/** 列表里的阶段：按后端真实状态分组（之前「处理中」被算进审阅中、「已暂停」被算进待处理） */
+type Stage = 'pending' | 'processing' | 'paused' | 'reviewing' | 'completed';
+function stageOf(t: Task): Stage {
+  switch (t.nestStatus) {
+    case 'processing':
+      return 'processing';
+    case 'failed':
+      return 'paused';
+    case 'reviewing':
+      return 'reviewing';
+    case 'completed':
+      return 'completed';
+    default:
+      return 'pending';
+  }
+}
+
+const STAGE_TABS: { key: 'all' | Stage; label: string; tone: string }[] = [
+  { key: 'all', label: '全部', tone: 'text-[#1D1D1F]' },
+  { key: 'pending', label: '待处理', tone: 'text-[#FF9500]' },
+  { key: 'processing', label: '处理中', tone: 'text-[#0071E3]' },
+  { key: 'paused', label: '已暂停', tone: 'text-[#FF3B30]' },
+  { key: 'reviewing', label: '审阅中', tone: 'text-[#0071E3]' },
+  { key: 'completed', label: '已完成', tone: 'text-[#34C759]' },
+];
+
+type Est = { cost: number | null; priced: boolean; raw: number | null; currency: 'CNY' | 'USD' };
+const EMPTY_EST: Est = { cost: null, priced: false, raw: null, currency: 'CNY' };
+
+/** ¥12.30（约 $1.71） */
+function moneyText(e: Est) {
+  if (e.cost == null) return '';
+  const cny = `¥${e.cost.toFixed(2)}`;
+  return e.currency === 'USD' && e.raw != null ? `${cny}（约 $${e.raw.toFixed(2)}）` : cny;
+}
+
+/** 模型下拉里显示的单价 */
+function modelPriceText(m: any) {
+  if (m?.billing !== 'image' || m?.priceImage == null || m.priceImage === '') return '';
+  const n = Number(m.priceImage);
+  if (!Number.isFinite(n)) return '';
+  return m.currency === 'USD' ? ` · 约 $${n}/张` : ` · ¥${n}/张`;
+}
 
 export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   tasks,
@@ -56,7 +100,9 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   onOpenSetup,
 }) => {
   // Filters: Status, Time, Search
-  const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'reviewing' | 'completed'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | Stage>('all');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
   const [timeFilter, setTimeFilter] = useState<TimeFilterType>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<Task | null>(null);
@@ -64,7 +110,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
 
   // Pagination: 5 items per page
   const [currentPage, setCurrentPage] = useState(1);
-  const pageSize = 5;
+  const pageSize = 10;
 
   // Download state
   const [downloadingTaskId, setDownloadingTaskId] = useState<string | null>(null);
@@ -84,8 +130,9 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   const [selectedCleanModelId, setSelectedCleanModelId] = useState<number | null>(null);
   const [pageCountPreview, setPageCountPreview] = useState(0);
   // 图片处理、AI 识别各自的费用预估（之前共用一个值，会互相覆盖）
-  const [cleanEst, setCleanEst] = useState<{ cost: number | null; priced: boolean }>({ cost: null, priced: false });
-  const [ocrEst, setOcrEst] = useState<{ cost: number | null; priced: boolean }>({ cost: null, priced: false });
+  const [cleanEst, setCleanEst] = useState<Est>(EMPTY_EST);
+  const [ocrEst, setOcrEst] = useState<Est>(EMPTY_EST);
+  const [countingPages, setCountingPages] = useState(false);
   const [folderPath, setFolderPath] = useState('');
   const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [browseCurrent, setBrowseCurrent] = useState('');
@@ -98,16 +145,14 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   const [browseError, setBrowseError] = useState('');
   const [creating, setCreating] = useState(false);
 
-  // Status counts
-  const pendingCount = tasks.filter((t) => t.status === 'pending').length;
-  const reviewingCount = tasks.filter((t) => t.status === 'reviewing').length;
-  const completedCount = tasks.filter((t) => t.status === 'completed').length;
+  // 各阶段数量
+  const stageCount = (k: 'all' | Stage) => (k === 'all' ? tasks.length : tasks.filter((t) => stageOf(t) === k).length);
 
   // Filtered Tasks
   const filteredTasks = useMemo(() => {
     return tasks.filter((task) => {
       // 1. Status Filter
-      if (statusFilter !== 'all' && task.status !== statusFilter) return false;
+      if (statusFilter !== 'all' && stageOf(task) !== statusFilter) return false;
 
       // 2. Time Filter
       if (timeFilter !== 'all' && task.createdAt) {
@@ -118,6 +163,10 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
           if (timeFilter === 'today' && created < startOfToday) return false;
           if (timeFilter === 'week' && created < new Date(startOfToday.getTime() - 6 * 86400000)) return false;
           if (timeFilter === 'month' && (created.getMonth() !== now.getMonth() || created.getFullYear() !== now.getFullYear())) return false;
+          if (timeFilter === 'custom') {
+            if (dateFrom && created < new Date(dateFrom + 'T00:00:00')) return false;
+            if (dateTo && created > new Date(dateTo + 'T23:59:59')) return false;
+          }
         }
       }
 
@@ -129,12 +178,12 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
 
       return true;
     });
-  }, [tasks, statusFilter, timeFilter, searchQuery]);
+  }, [tasks, statusFilter, timeFilter, searchQuery, dateFrom, dateTo]);
 
   // Reset page when filter changes
   React.useEffect(() => {
     setCurrentPage(1);
-  }, [statusFilter, timeFilter, searchQuery]);
+  }, [statusFilter, timeFilter, searchQuery, dateFrom, dateTo]);
 
   // Paginated Slicing
   const totalItems = filteredTasks.length;
@@ -181,17 +230,23 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     const run = async (
       on: boolean,
       modelId: number | null,
-      set: (v: { cost: number | null; priced: boolean }) => void,
+      set: (v: Est) => void,
     ) => {
       if (!on || !modelId || pageCountPreview <= 0) {
-        set({ cost: null, priced: false });
+        set(EMPTY_EST);
         return;
       }
       try {
         const r = await api.estimateCost(modelId, pageCountPreview);
-        if (!off) set({ cost: r.cost != null ? Number(r.cost) : null, priced: !!r.priced });
+        if (!off)
+          set({
+            cost: r.cost != null ? Number(r.cost) : null,
+            priced: !!r.priced,
+            raw: r.rawCost != null ? Number(r.rawCost) : null,
+            currency: r.currency === 'USD' ? 'USD' : 'CNY',
+          });
       } catch {
-        if (!off) set({ cost: null, priced: false });
+        if (!off) set(EMPTY_EST);
       }
     };
     void run(useAiClean, selectedCleanModelId, setCleanEst);
@@ -200,6 +255,32 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
       off = true;
     };
   }, [useAiClean, selectedCleanModelId, useAiRecognition, selectedModelId, pageCountPreview]);
+
+  // 手动输入的文件夹路径也统计图片张数（之前只有「选择目录」才统计）
+  React.useEffect(() => {
+    if (!showCreateModal) return;
+    const pth = folderPath.trim();
+    if (!pth) {
+      setPageCountPreview(0);
+      return;
+    }
+    let off = false;
+    setCountingPages(true);
+    const t = window.setTimeout(async () => {
+      try {
+        const data = await api.browseFolder(pth);
+        if (!off) setPageCountPreview(Number(data?.imageCount) || 0);
+      } catch {
+        if (!off) setPageCountPreview(0);
+      } finally {
+        if (!off) setCountingPages(false);
+      }
+    }, 500);
+    return () => {
+      off = true;
+      window.clearTimeout(t);
+    };
+  }, [folderPath, showCreateModal]);
 
   const totalEstimate =
     (useAiClean && cleanEst.cost != null) || (useAiRecognition && ocrEst.cost != null)
@@ -271,7 +352,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     })();
   };
 
-  const handleCreateSubmit = async () => {
+  const handleCreateSubmit = async (startAfter = false) => {
     if (!taskName.trim()) {
       alert('请填写族谱名称');
       return;
@@ -298,7 +379,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     }
     setCreating(true);
     try {
-      await onCreateTask(
+      const created = await onCreateTask(
         {
           name: taskName.trim(),
           folderPath: folderPath.trim(),
@@ -320,6 +401,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
         false
       );
       setShowCreateModal(false);
+      if (startAfter && created?.id != null) onStartProcessing(String(created.id));
       setTaskName('');
       setGenealogyNote('');
       setFolderPath('');
@@ -349,16 +431,15 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   };
 
   return (
-    <div className="flex-1 overflow-y-auto p-6 lg:p-8 bg-[#F5F5F7] max-w-5xl mx-auto w-full flex flex-col justify-between">
+    <div className="flex-1 overflow-y-auto bg-[#F5F5F7]">
+    <div className="px-6 py-6 lg:px-10 lg:py-8 max-w-[1440px] mx-auto w-full min-h-full flex flex-col justify-between">
       <div>
         {/* Top Header & New Task Button */}
         <div className="flex items-center justify-between gap-4 mb-5 pb-3.5 border-b border-black/[0.06]">
           <div>
-            <h1 className="text-xl font-bold text-[#1D1D1F] tracking-tight">
-              族谱清晰化工作台
-            </h1>
-            <p className="text-xs text-[#86868B] mt-0.5 font-medium">
-              旧谱复印页图片处理（白底黑字）· 供后续 OCR 识别与数据化
+            <h1 className="text-2xl font-bold text-[#1D1D1F] tracking-tight">任务列表</h1>
+            <p className="text-sm text-[#86868B] mt-1 font-medium">
+              一本谱书一个任务：把旧谱复印页处理成白底黑字，供后续识别与数据化
             </p>
           </div>
 
@@ -366,14 +447,14 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
             {onRefresh && (
               <button
                 onClick={onRefresh}
-                className="px-3 py-2 text-xs font-semibold bg-white border border-black/[0.08] text-[#1D1D1F] rounded-xl hover:bg-[#F5F5F7] cursor-pointer"
+                className="h-10 px-4 text-sm font-semibold bg-white border border-black/[0.08] text-[#1D1D1F] rounded-xl hover:bg-[#F5F5F7] cursor-pointer"
               >
                 {loading ? '刷新中…' : '刷新'}
               </button>
             )}
             <button
               onClick={openCreateModal}
-              className="flex items-center gap-1.5 px-4 py-2 bg-[#0071E3] hover:bg-[#0077ED] active:scale-[0.98] text-white text-xs font-semibold rounded-xl shadow-[0_2px_8px_rgba(0,113,227,0.25)] transition-all cursor-pointer whitespace-nowrap shrink-0"
+              className="flex items-center gap-1.5 h-10 px-5 bg-[#0071E3] hover:bg-[#0077ED] active:scale-[0.98] text-white text-sm font-semibold rounded-xl shadow-[0_2px_8px_rgba(0,113,227,0.25)] transition-all cursor-pointer whitespace-nowrap shrink-0"
             >
               <Plus className="w-4 h-4 stroke-[2.5]" />
               <span>新建任务</span>
@@ -381,98 +462,101 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
           </div>
         </div>
 
-        {/* Unified Search, Status & Time Filter Bar */}
-        <div className="flex flex-wrap items-center justify-between gap-3 mb-4.5">
-          {/* Left: Status Filter Segmented Control */}
-          <div className="flex items-center p-0.5 bg-[#E5E5EA]/75 rounded-full border border-black/[0.04]">
-            <button
-              onClick={() => setStatusFilter('all')}
-              className={`px-3.5 py-1 text-xs font-semibold rounded-full transition-all cursor-pointer ${
-                statusFilter === 'all'
-                  ? 'bg-white text-[#1D1D1F] shadow-xs'
-                  : 'text-[#6E6E73] hover:text-[#1D1D1F]'
-              }`}
-            >
-              全部 ({tasks.length})
-            </button>
-            <button
-              onClick={() => setStatusFilter('pending')}
-              className={`px-3.5 py-1 text-xs font-semibold rounded-full transition-all cursor-pointer ${
-                statusFilter === 'pending'
-                  ? 'bg-white text-[#FF9500] shadow-xs'
-                  : 'text-[#6E6E73] hover:text-[#1D1D1F]'
-              }`}
-            >
-              待处理 ({pendingCount})
-            </button>
-            <button
-              onClick={() => setStatusFilter('reviewing')}
-              className={`px-3.5 py-1 text-xs font-semibold rounded-full transition-all cursor-pointer ${
-                statusFilter === 'reviewing'
-                  ? 'bg-white text-[#0071E3] shadow-xs'
-                  : 'text-[#6E6E73] hover:text-[#1D1D1F]'
-              }`}
-            >
-              审阅中 ({reviewingCount})
-            </button>
-            <button
-              onClick={() => setStatusFilter('completed')}
-              className={`px-3.5 py-1 text-xs font-semibold rounded-full transition-all cursor-pointer ${
-                statusFilter === 'completed'
-                  ? 'bg-white text-[#34C759] shadow-xs'
-                  : 'text-[#6E6E73] hover:text-[#1D1D1F]'
-              }`}
-            >
-              已完成 ({completedCount})
-            </button>
+        {/* 筛选栏：状态 / 创建时间（含自定义日期） / 搜索 */}
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+          <div className="flex flex-wrap items-center p-1 bg-[#E5E5EA]/75 rounded-xl border border-black/[0.04]">
+            {STAGE_TABS.map((t) => (
+              <button
+                key={t.key}
+                onClick={() => setStatusFilter(t.key)}
+                className={`h-8 px-3.5 text-[13px] font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap ${
+                  statusFilter === t.key ? `bg-white shadow-xs ${t.tone}` : 'text-[#6E6E73] hover:text-[#1D1D1F]'
+                }`}
+              >
+                {t.label}
+                <span className="ml-1 tabular-nums font-medium opacity-70">{stageCount(t.key)}</span>
+              </button>
+            ))}
           </div>
 
-          {/* Right: Time Filter & Search Input */}
-          <div className="flex items-center gap-2.5">
-            {/* Time Filter Pills */}
-            <div className="flex items-center p-0.5 bg-[#E5E5EA]/75 rounded-xl border border-black/[0.04] text-xs">
-              <span className="text-[#86868B] pl-2 pr-1 text-[11px] font-medium flex items-center gap-1">
-                <Calendar className="w-3 h-3 text-[#0071E3]" />
-                <span>时间:</span>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <div className="flex items-center p-1 bg-[#E5E5EA]/75 rounded-xl border border-black/[0.04]">
+              <span className="text-[#86868B] pl-2 pr-1.5 text-[13px] font-medium flex items-center gap-1.5">
+                <Calendar className="w-4 h-4 text-[#0071E3]" />
+                创建时间
               </span>
               {(
                 [
                   { key: 'all', label: '全部' },
-                  { key: 'today', label: '今日' },
-                  { key: 'week', label: '近7天' },
+                  { key: 'today', label: '今天' },
+                  { key: 'week', label: '近 7 天' },
                   { key: 'month', label: '本月' },
+                  { key: 'custom', label: '自定义' },
                 ] as const
               ).map((t) => (
                 <button
                   key={t.key}
                   onClick={() => setTimeFilter(t.key)}
-                  className={`px-2.5 py-0.8 rounded-lg font-medium transition-all cursor-pointer ${
+                  className={`h-8 px-3 text-[13px] rounded-lg transition-all cursor-pointer whitespace-nowrap ${
                     timeFilter === t.key
-                      ? 'bg-white text-[#0071E3] font-semibold shadow-2xs'
-                      : 'text-[#6E6E73] hover:text-[#1D1D1F]'
+                      ? 'bg-white text-[#0071E3] font-semibold shadow-xs'
+                      : 'text-[#6E6E73] font-medium hover:text-[#1D1D1F]'
                   }`}
                 >
                   {t.label}
                 </button>
               ))}
             </div>
+            {timeFilter === 'custom' ? (
+              <div className="flex items-center gap-1.5 h-10 px-2.5 bg-white border border-black/[0.08] rounded-xl text-[13px]">
+                <input
+                  type="date"
+                  value={dateFrom}
+                  max={dateTo || undefined}
+                  onChange={(e) => setDateFrom(e.target.value)}
+                  className="h-8 px-1.5 bg-transparent text-[#1D1D1F] focus:outline-none cursor-pointer"
+                  aria-label="开始日期"
+                />
+                <span className="text-[#86868B]">至</span>
+                <input
+                  type="date"
+                  value={dateTo}
+                  min={dateFrom || undefined}
+                  onChange={(e) => setDateTo(e.target.value)}
+                  className="h-8 px-1.5 bg-transparent text-[#1D1D1F] focus:outline-none cursor-pointer"
+                  aria-label="结束日期"
+                />
+                {dateFrom || dateTo ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDateFrom('');
+                      setDateTo('');
+                    }}
+                    className="p-1 text-[#86868B] hover:text-[#1D1D1F] cursor-pointer"
+                    title="清除日期"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
 
-            {/* Clean Apple Search Box */}
             <div className="relative">
-              <Search className="w-3.5 h-3.5 text-[#86868B] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <Search className="w-4 h-4 text-[#86868B] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="搜索卷册名称..."
-                className="w-44 pl-8 pr-7 py-1.5 text-xs bg-white border border-black/[0.08] rounded-xl focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] transition-all font-medium text-[#1D1D1F]"
+                placeholder="搜索族谱名称…"
+                className="w-60 h-10 pl-9 pr-8 text-[13px] bg-white border border-black/[0.08] rounded-xl focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] transition-all text-[#1D1D1F]"
               />
               {searchQuery && (
                 <button
                   onClick={() => setSearchQuery('')}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-[#86868B] hover:text-[#1D1D1F] p-0.5"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#86868B] hover:text-[#1D1D1F] p-0.5"
                 >
-                  <X className="w-3 h-3" />
+                  <X className="w-3.5 h-3.5" />
                 </button>
               )}
             </div>
@@ -514,6 +598,8 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                 onClick={() => {
                   setStatusFilter('all');
                   setTimeFilter('all');
+                  setDateFrom('');
+                  setDateTo('');
                   setSearchQuery('');
                 }}
                 className="px-4 py-2 bg-[#E5E5EA] hover:bg-[#D1D1D6] text-[#1D1D1F] text-xs font-semibold rounded-xl cursor-pointer"
@@ -565,30 +651,30 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
 
                     <div className="min-w-0 flex-1 space-y-1.5">
                       <div className="flex items-center gap-2 min-w-0">
-                        <h3 className="text-[15px] font-semibold text-[#1D1D1F] tracking-tight truncate leading-snug">
+                        <h3 className="text-base font-semibold text-[#1D1D1F] tracking-tight truncate leading-snug">
                           {task.name}
                         </h3>
                         {isProcessing ? (
-                          <span className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[#0071E3]/10 text-[#0071E3]">
+                          <span className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#0071E3]/10 text-[#0071E3]">
                             <Sparkles className="w-3 h-3 animate-spin" />
                             处理中
                           </span>
                         ) : task.status === 'pending' || task.nestStatus === 'failed' ? (
-                          <span className="shrink-0 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[#FF9500]/12 text-[#FF9500]">
+                          <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#FF9500]/12 text-[#FF9500]">
                             {task.nestStatus === 'failed' ? '失败' : '待处理'}
                           </span>
                         ) : task.status === 'reviewing' ? (
-                          <span className="shrink-0 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[#0071E3]/10 text-[#0071E3]">
+                          <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#0071E3]/10 text-[#0071E3]">
                             审阅中
                           </span>
                         ) : task.status === 'completed' ? (
-                          <span className="shrink-0 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[#34C759]/12 text-[#34C759]">
+                          <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#34C759]/12 text-[#34C759]">
                             已完成
                           </span>
                         ) : null}
                       </div>
 
-                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-[#86868B] leading-relaxed">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[13px] text-[#86868B] leading-relaxed">
                         <span className="inline-flex items-center gap-1 tabular-nums">
                           <Clock className="w-3 h-3 opacity-70" />
                           {task.createdAt}
@@ -605,7 +691,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         <span className="tabular-nums">共 {task.totalPages} 页</span>
                         <span className="text-black/15">·</span>
                         <span
-                          className={`inline-flex items-center px-1.5 py-px rounded-full text-[10px] font-semibold ${
+                          className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold ${
                             task.useAiClean ? 'bg-[#AF52DE]/12 text-[#8944AB]' : 'bg-black/[0.05] text-[#6E6E73]'
                           }`}
                           title="图片处理方式"
@@ -615,14 +701,14 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         {task.actualCost ? (
                           <>
                             <span className="text-black/15">·</span>
-                            <span className="tabular-nums">费用 ¥{task.actualCost.toFixed(2)}</span>
+                            <span className="tabular-nums">{isProcessing ? '已花费' : '费用'} ¥{task.actualCost.toFixed(2)}</span>
                           </>
                         ) : null}
                         {isProcessing ? (
                           <>
                             <span className="text-black/15">·</span>
                             <span className="text-[#0071E3] font-semibold tabular-nums">
-                              已处理 {Math.min(processDoneLabel, total)}/{task.totalPages} · {processPct}%
+                              已处理 {Math.min(processDoneLabel, total)}/{task.totalPages} 页 · {processPct}%
                             </span>
                           </>
                         ) : task.status === 'reviewing' ? (
@@ -644,12 +730,12 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                       </div>
 
                       {isProcessing && (
-                        <div className="pt-0.5 max-w-md">
+                        <div className="pt-1 max-w-xl">
                           <div className="flex items-center justify-between mb-1">
-                            <span className="text-[10px] font-medium text-[#86868B]">
-                              {task.useAiClean ? '图生图大模型处理中' : '现有算法处理（去污、白底黑字）'}
+                            <span className="text-xs font-medium text-[#86868B]">
+                              {task.useAiClean ? '大模型处理中，可以离开此页，完成后会提示' : '现有算法处理中（去污、白底黑字）'}
                             </span>
-                            <span className="text-[10px] font-semibold text-[#0071E3] tabular-nums">
+                            <span className="text-xs font-semibold text-[#0071E3] tabular-nums">
                               {processPct}%
                             </span>
                           </div>
@@ -664,7 +750,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
 
                       {!isProcessing && task.errorMessage ? (
                         <div
-                          className={`flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] leading-relaxed max-w-xl ${
+                          className={`flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] leading-relaxed max-w-3xl ${
                             task.nestStatus === 'failed' ? 'text-[#C62828]' : 'text-[#C93400]'
                           }`}
                         >
@@ -682,7 +768,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                       ) : null}
 
                       {!isProcessing && task.status === 'reviewing' && task.totalPages > 0 && (
-                        <div className="pt-0.5 max-w-md">
+                        <div className="pt-1 max-w-xl">
                           <div className="w-full bg-[#E5E5EA] rounded-full h-1 overflow-hidden">
                             <div
                               className="bg-[#0071E3] h-full rounded-full transition-all duration-300"
@@ -698,7 +784,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                     {(task.status === 'pending' || task.nestStatus === 'failed') && !isProcessing && (
                       <button
                         onClick={() => onStartProcessing(task.id)}
-                        className="h-9 px-4 text-xs font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
+                        className="h-10 px-5 text-sm font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
                       >
                         <Play className="w-3 h-3 fill-current" />
                         <span>{task.nestStatus === 'failed' && task.doneCount ? '继续处理' : '开始处理'}</span>
@@ -708,7 +794,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                     {isProcessing && (task.status === 'pending' || task.nestStatus === 'processing' || task.nestStatus === 'failed') && (
                       <button
                         disabled
-                        className="h-9 px-4 text-xs font-semibold rounded-full bg-[#E8F1FC] text-[#0071E3] cursor-not-allowed flex items-center justify-center gap-1.5"
+                        className="h-10 px-5 text-sm font-semibold rounded-full bg-[#E8F1FC] text-[#0071E3] cursor-not-allowed flex items-center justify-center gap-1.5"
                       >
                         <Sparkles className="w-3.5 h-3.5 animate-spin" />
                         <span>处理中</span>
@@ -718,7 +804,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                     {!isProcessing && task.status === 'reviewing' && (
                       <button
                         onClick={() => onOpenReview(task.id)}
-                        className="h-9 px-4 text-xs font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
+                        className="h-10 px-5 text-sm font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
                       >
                         <span>进入审阅</span>
                         <ArrowRight className="w-3.5 h-3.5" />
@@ -729,7 +815,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                       <>
                         <button
                           onClick={() => onOpenReview(task.id)}
-                          className="h-9 px-3.5 text-xs font-semibold rounded-full bg-[#F5F5F7] hover:bg-[#EBEBED] text-[#1D1D1F] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
+                          className="h-10 px-4 text-sm font-semibold rounded-full bg-[#F5F5F7] hover:bg-[#EBEBED] text-[#1D1D1F] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
                           title="查看调参与对比审阅"
                         >
                           <Sliders className="w-3.5 h-3.5 text-[#0071E3]" />
@@ -737,7 +823,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         </button>
                         <button
                           onClick={() => handleDownloadTaskZip(task, 'passed')}
-                          className="h-9 px-3.5 text-xs font-semibold rounded-full bg-[#34C759] hover:bg-[#2EB84E] text-white shadow-[0_2px_8px_rgba(52,199,89,0.25)] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
+                          className="h-10 px-4 text-sm font-semibold rounded-full bg-[#34C759] hover:bg-[#2EB84E] text-white shadow-[0_2px_8px_rgba(52,199,89,0.25)] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
                           title="下载已通过净图"
                         >
                           <Download className="w-3.5 h-3.5" />
@@ -745,7 +831,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         </button>
                         <button
                           onClick={() => handleDownloadTaskZip(task, 'failed')}
-                          className="h-9 px-3.5 text-xs font-semibold rounded-full bg-white hover:bg-[#FFF5F5] border border-[#FF3B30]/20 text-[#FF3B30] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
+                          className="h-10 px-4 text-sm font-semibold rounded-full bg-white hover:bg-[#FFF5F5] border border-[#FF3B30]/20 text-[#FF3B30] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
                           title="下载未通过净图"
                         >
                           <Download className="w-3.5 h-3.5" />
@@ -757,7 +843,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                       <button
                         type="button"
                         onClick={() => setDeleteTarget(task)}
-                        className="h-9 w-9 rounded-full flex items-center justify-center text-[#86868B] hover:text-[#FF3B30] hover:bg-[#FF3B30]/10 transition-all cursor-pointer active:scale-[0.96]"
+                        className="h-10 w-10 rounded-full flex items-center justify-center text-[#86868B] hover:text-[#FF3B30] hover:bg-[#FF3B30]/10 transition-all cursor-pointer active:scale-[0.96]"
                         title="删除任务"
                         aria-label="删除任务"
                       >
@@ -833,7 +919,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
       {/* Create Task Modal — 宽版两栏：左「谱书信息」，右「处理方式」，底部常驻费用预估 */}
       {showCreateModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm animate-fade-in">
-          <div className="bg-white rounded-3xl border border-black/[0.08] shadow-[0_24px_64px_rgba(0,0,0,0.18)] max-w-[960px] w-full max-h-[calc(100vh-32px)] flex flex-col animate-apple-in">
+          <div className="bg-white rounded-3xl border border-black/[0.08] shadow-[0_24px_64px_rgba(0,0,0,0.18)] max-w-[1080px] w-full max-h-[calc(100vh-32px)] flex flex-col animate-apple-in">
             <div className="flex items-start justify-between px-6 pt-5 pb-4 border-b border-black/[0.06] shrink-0">
               <div>
                 <h3 className="text-base font-bold text-[#1D1D1F]">新建族谱图片处理任务</h3>
@@ -858,7 +944,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                   </div>
                   <div className="grid grid-cols-[1fr_140px] gap-3">
                     <div>
-                      <label className="block text-xs font-semibold text-[#1D1D1F] mb-1">
+                      <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">
                         族谱名称 <span className="text-[#FF3B30]">*</span>
                       </label>
                       <input
@@ -867,11 +953,11 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         onChange={(e) => setTaskName(e.target.value)}
                         placeholder="例如：《××族谱》卷×"
                         autoFocus
-                        className="w-full px-3.5 py-2.5 text-xs bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
+                        className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-semibold text-[#1D1D1F] mb-1">
+                      <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">
                         姓氏 <span className="text-[#FF3B30]">*</span>
                       </label>
                       <input
@@ -879,12 +965,12 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         value={genealogyNote}
                         onChange={(e) => setGenealogyNote(e.target.value)}
                         placeholder="例如：吴"
-                        className="w-full px-3.5 py-2.5 text-xs bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
+                        className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
                       />
                     </div>
                   </div>
                   <div>
-                    <label className="block text-xs font-semibold text-[#1D1D1F] mb-1">
+                    <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">
                       图片文件夹 <span className="text-[#FF3B30]">*</span>
                     </label>
                     <div className="flex items-center gap-2">
@@ -893,7 +979,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         value={folderPath}
                         onChange={(e) => setFolderPath(e.target.value)}
                         placeholder="粘贴或输入服务器上的文件夹路径"
-                        className="flex-1 min-w-0 px-3.5 py-2.5 text-xs bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-mono text-[#1D1D1F]"
+                        className="flex-1 min-w-0 px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-mono text-[#1D1D1F]"
                       />
                       <button
                         type="button"
@@ -905,16 +991,22 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                       </button>
                     </div>
                     <p className="text-[11px] text-[#86868B] mt-1">
-                      {pageCountPreview ? `文件夹里共 ${pageCountPreview} 张图片` : '选择目录后会显示图片张数，并据此预估费用'}
+                      {countingPages
+                        ? '正在统计图片张数…'
+                        : pageCountPreview
+                          ? `文件夹里共 ${pageCountPreview} 张图片`
+                          : folderPath.trim()
+                            ? '这个文件夹里没有找到图片（支持 jpg / png / tif / bmp / webp）'
+                            : '可直接粘贴路径，或点「选择目录」；会自动统计图片张数'}
                     </p>
                   </div>
                   <div>
-                    <label className="block text-xs font-semibold text-[#1D1D1F] mb-1">任务说明</label>
+                    <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">任务说明</label>
                     <textarea
                       value={taskDescription}
                       onChange={(e) => setTaskDescription(e.target.value)}
                       rows={4}
-                      className="w-full px-3.5 py-2.5 text-xs bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium resize-y leading-relaxed"
+                      className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium resize-y leading-relaxed"
                     />
                   </div>
                 </div>
@@ -925,16 +1017,19 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                     <span className="w-5 h-5 rounded-full bg-[#0071E3] text-white text-[10px] font-bold flex items-center justify-center">2</span>
                     <span className="text-sm font-semibold text-[#1D1D1F]">图片处理方式</span>
                   </div>
-                  <div className="grid grid-cols-2 gap-2.5">
+                  <div className="grid grid-cols-2 gap-3">
                     <button
                       type="button"
                       onClick={() => setUseAiClean(false)}
-                      className={`text-left p-3 rounded-2xl border-2 cursor-pointer transition-colors ${
+                      className={`text-left p-4 rounded-2xl border-2 cursor-pointer transition-colors ${
                         !useAiClean ? 'border-[#0071E3] bg-[#0071E3]/[0.04]' : 'border-transparent bg-[#F5F5F7]/90 hover:bg-[#F0F0F3]'
                       }`}
                     >
-                      <div className="text-xs font-semibold text-[#1D1D1F]">现有算法</div>
-                      <div className="text-[11px] text-[#86868B] mt-1 leading-snug">免费、速度快；干净或轻微泛黄的页效果好</div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-semibold text-[#1D1D1F]">现有算法处理</span>
+                        <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-[#34C759]/12 text-[#248A3D] font-semibold">免费</span>
+                      </div>
+                      <div className="text-xs text-[#86868B] mt-1.5 leading-relaxed">速度快；干净、轻微泛黄的页效果好</div>
                     </button>
                     <button
                       type="button"
@@ -945,128 +1040,128 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         }
                         setUseAiClean(true);
                       }}
-                      className={`text-left p-3 rounded-2xl border-2 cursor-pointer transition-colors ${
+                      className={`text-left p-4 rounded-2xl border-2 cursor-pointer transition-colors ${
                         useAiClean ? 'border-[#AF52DE] bg-[#AF52DE]/[0.05]' : 'border-transparent bg-[#F5F5F7]/90 hover:bg-[#F0F0F3]'
                       }`}
                     >
-                      <div className="text-xs font-semibold text-[#1D1D1F] flex items-center gap-1">
-                        <Sparkles className="w-3.5 h-3.5 text-[#8944AB]" />
-                        图生图大模型
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-semibold text-[#1D1D1F] flex items-center gap-1.5">
+                          <Sparkles className="w-4 h-4 text-[#8944AB]" />
+                          AI 大模型处理
+                        </span>
+                        <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-[#AF52DE]/12 text-[#8944AB] font-semibold">效果更好</span>
                       </div>
-                      <div className="text-[11px] text-[#86868B] mt-1 leading-snug">
-                        {cleanModels.length ? '污渍多、残破的页更干净；按张收费' : '还没配置，点这里打开引导配置（约 3 分钟）'}
+                      <div className="text-xs text-[#86868B] mt-1.5 leading-relaxed">
+                        {cleanModels.length ? '污渍多、残破的页处理得更干净；按张收费' : '还没配置，点这里打开引导配置（约 3 分钟）'}
                       </div>
                     </button>
                   </div>
                   {useAiClean ? (
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="block text-[11px] font-semibold text-[#1D1D1F] mb-1">图片处理模型</label>
-                        <select
-                          value={selectedCleanModelId ?? ''}
-                          onChange={(e) => setSelectedCleanModelId(e.target.value ? Number(e.target.value) : null)}
-                          className="w-full px-3 py-2 text-xs bg-white border border-black/[0.08] rounded-xl"
-                        >
-                          {cleanModels.map((m) => (
-                            <option key={m.id} value={m.id}>{m.displayName}</option>
-                          ))}
-                        </select>
-                      </div>
-                      <div>
-                        <label className="block text-[11px] font-semibold text-[#1D1D1F] mb-1">图片处理费用</label>
-                        <div className="px-3 py-2 text-xs rounded-xl bg-[#F5F5F7] font-mono text-[#1D1D1F] min-h-[34px] flex items-center">
-                          {!pageCountPreview
-                            ? '选目录后估算'
-                            : cleanEst.priced && cleanEst.cost != null
-                              ? `约 ¥${cleanEst.cost.toFixed(2)}`
-                              : '模型未填单价'}
+                    <div className="p-4 rounded-2xl bg-[#AF52DE]/[0.04] border border-[#AF52DE]/15 space-y-3">
+                      <div className="grid grid-cols-[1fr_auto] gap-3 items-end">
+                        <div className="min-w-0">
+                          <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">选择模型</label>
+                          <select
+                            value={selectedCleanModelId ?? ''}
+                            onChange={(e) => setSelectedCleanModelId(e.target.value ? Number(e.target.value) : null)}
+                            className="w-full h-10 px-3 text-[13px] bg-white border border-black/[0.08] rounded-xl"
+                          >
+                            {cleanModels.map((m) => (
+                              <option key={m.id} value={m.id}>
+                                {m.displayName}
+                                {modelPriceText(m)}
+                              </option>
+                            ))}
+                          </select>
                         </div>
+                        <button
+                          type="button"
+                          onClick={() => onOpenSetup?.(null, 3, () => void loadCleanModels())}
+                          className="h-10 px-3 text-xs font-semibold text-[#8944AB] rounded-xl hover:bg-[#AF52DE]/10 cursor-pointer whitespace-nowrap"
+                        >
+                          换模型 / 配置
+                        </button>
                       </div>
-                      <p className="col-span-2 text-[11px] text-[#86868B] leading-relaxed">
-                        整本每页都由大模型处理成白底黑字，不再用现有算法；审核时也可以对单页切回算法结果。
+                      <div className="flex items-baseline justify-between gap-3">
+                        <span className="text-xs text-[#6E6E73]">预估费用</span>
+                        <span className="text-base font-bold text-[#1D1D1F] tabular-nums">
+                          {!pageCountPreview
+                            ? <span className="text-xs font-normal text-[#86868B]">填好文件夹后自动估算</span>
+                            : cleanEst.priced && cleanEst.cost != null
+                              ? moneyText(cleanEst)
+                              : <span className="text-xs font-normal text-[#C93400]">该模型没填单价，到「模型配置」补上即可估算</span>}
+                        </span>
+                      </div>
+                      <p className="text-xs text-[#86868B] leading-relaxed">
+                        整本每页都由大模型处理成白底黑字（大模型效果一般比算法更好）；审核时也可以对单页切回算法结果。
                       </p>
                     </div>
                   ) : (
-                    <p className="text-[11px] text-[#86868B] leading-relaxed">
+                    <p className="text-xs text-[#86868B] leading-relaxed px-1">
                       用现有算法处理整本。审核时如果某页效果不好，可以对那一页点「使用大模型处理」。
                     </p>
                   )}
 
-                  <div className="pt-4 border-t border-black/[0.06] space-y-3">
-                    <label className={`flex items-start gap-2.5 ${ocrModels.length ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'}`}>
-                      <input
-                        type="checkbox"
-                        className="mt-0.5"
-                        checked={useAiRecognition}
-                        disabled={!ocrModels.length}
-                        onChange={(e) => setUseAiRecognition(e.target.checked)}
-                      />
+                  <div className="pt-4 border-t border-black/[0.06]">
+                    <div className="flex items-start gap-2.5 opacity-60 cursor-not-allowed" title="下期开放">
+                      <input type="checkbox" className="mt-0.5" checked={false} disabled readOnly />
                       <span className="min-w-0">
-                        <span className="block text-xs font-semibold text-[#1D1D1F]">同时用 AI 识别文字（可选）</span>
-                        <span className="block text-[11px] text-[#86868B] mt-0.5 leading-relaxed">
-                          {ocrModels.length ? '图片处理完后自动识别每页文字；审阅页也可对单页再识别。' : '尚未配置识别模型，可到右上角「模型配置」添加。'}
+                        <span className="flex items-center gap-2 text-sm font-semibold text-[#1D1D1F]">
+                          AI 识别文字
+                          <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-black/[0.06] text-[#6E6E73] font-semibold">下期开放</span>
+                        </span>
+                        <span className="block text-xs text-[#86868B] mt-1 leading-relaxed">
+                          图片处理完成后自动识别每页文字，并标出没把握的字。
                         </span>
                       </span>
-                    </label>
-                    {useAiRecognition ? (
-                      <div className="grid grid-cols-2 gap-3">
-                        <div>
-                          <label className="block text-[11px] font-semibold text-[#1D1D1F] mb-1">识别模型</label>
-                          <select
-                            value={selectedModelId ?? ''}
-                            onChange={(e) => setSelectedModelId(e.target.value ? Number(e.target.value) : null)}
-                            className="w-full px-3 py-2 text-xs bg-white border border-black/[0.08] rounded-xl"
-                          >
-                            {ocrModels.map((m) => (
-                              <option key={m.id} value={m.id}>{m.displayName}</option>
-                            ))}
-                          </select>
-                        </div>
-                        <div>
-                          <label className="block text-[11px] font-semibold text-[#1D1D1F] mb-1">识别费用</label>
-                          <div className="px-3 py-2 text-xs rounded-xl bg-[#F5F5F7] font-mono text-[#1D1D1F] min-h-[34px] flex items-center">
-                            {!pageCountPreview
-                              ? '选目录后估算'
-                              : ocrEst.priced && ocrEst.cost != null
-                                ? `约 ¥${ocrEst.cost.toFixed(2)}`
-                                : '模型未填单价'}
-                          </div>
-                        </div>
-                      </div>
-                    ) : null}
+                    </div>
                   </div>
                 </div>
               </div>
             </div>
 
             <div className="flex flex-wrap items-center justify-end gap-2.5 px-6 py-4 border-t border-black/[0.06] shrink-0">
-              <div className="mr-auto text-xs text-[#6E6E73]">
-                {pageCountPreview ? (
+              <div className="mr-auto text-[13px] text-[#6E6E73]">
+                {countingPages ? (
+                  '正在统计图片张数…'
+                ) : pageCountPreview ? (
                   <>
                     共 <b className="text-[#1D1D1F] tabular-nums">{pageCountPreview}</b> 张 · 预计费用{' '}
                     <b className="text-[#1D1D1F] tabular-nums">
-                      {!useAiClean && !useAiRecognition ? '¥0（算法免费）' : totalEstimate != null ? `约 ¥${totalEstimate.toFixed(2)}` : '模型未填单价'}
+                      {!useAiClean
+                        ? '¥0（算法免费）'
+                        : cleanEst.priced && cleanEst.cost != null
+                          ? moneyText(cleanEst)
+                          : '模型未填单价'}
                     </b>
                   </>
                 ) : (
-                  '填好左侧信息、选好处理方式后创建；创建后在列表里点「开始处理」'
+                  '填好谱书信息和文件夹，选好处理方式即可创建'
                 )}
               </div>
               <button
                 type="button"
                 onClick={() => setShowCreateModal(false)}
-                className="px-3.5 py-2 text-xs font-medium text-[#86868B] hover:text-[#1D1D1F] cursor-pointer"
+                className="h-10 px-4 text-sm font-medium text-[#86868B] hover:text-[#1D1D1F] cursor-pointer"
               >
                 取消
               </button>
               <button
                 type="button"
                 disabled={creating}
-                onClick={() => handleCreateSubmit()}
-                className="px-4 py-2 text-xs font-semibold bg-[#0071E3] hover:bg-[#0077ED] text-white rounded-xl shadow-[0_2px_8px_rgba(0,113,227,0.25)] cursor-pointer flex items-center gap-1.5 active:scale-[0.98] disabled:opacity-60"
+                onClick={() => handleCreateSubmit(false)}
+                className="h-10 px-4 text-sm font-semibold bg-white border border-black/[0.1] hover:bg-[#F5F5F7] text-[#1D1D1F] rounded-xl cursor-pointer disabled:opacity-60"
+              >
+                仅创建
+              </button>
+              <button
+                type="button"
+                disabled={creating}
+                onClick={() => handleCreateSubmit(true)}
+                className="h-10 px-5 text-sm font-semibold bg-[#0071E3] hover:bg-[#0077ED] text-white rounded-xl shadow-[0_2px_8px_rgba(0,113,227,0.25)] cursor-pointer flex items-center gap-1.5 active:scale-[0.98] disabled:opacity-60"
               >
                 <Play className="w-3.5 h-3.5 fill-current" />
-                <span>{creating ? '创建中…' : '创建任务'}</span>
+                <span>{creating ? '创建中…' : '创建并开始处理'}</span>
               </button>
             </div>
           </div>
@@ -1163,7 +1258,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
               <button
                 type="button"
                 onClick={() => setShowFolderPicker(false)}
-                className="h-9 px-4 text-xs font-semibold rounded-full bg-[#F5F5F7] hover:bg-[#EBEBED] text-[#1D1D1F] cursor-pointer"
+                className="h-10 px-5 text-sm font-semibold rounded-full bg-[#F5F5F7] hover:bg-[#EBEBED] text-[#1D1D1F] cursor-pointer"
               >
                 取消
               </button>
@@ -1171,7 +1266,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                 type="button"
                 disabled={!browseCurrent || browseLoading}
                 onClick={confirmFolderPick}
-                className="h-9 px-4 text-xs font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
+                className="h-10 px-5 text-sm font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
               >
                 <Folder className="w-3.5 h-3.5" />
                 选择此文件夹
@@ -1206,7 +1301,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                 type="button"
                 disabled={deleting}
                 onClick={() => setDeleteTarget(null)}
-                className="h-9 px-4 text-xs font-semibold rounded-full bg-[#F5F5F7] hover:bg-[#EBEBED] text-[#1D1D1F] transition-all cursor-pointer disabled:opacity-50"
+                className="h-10 px-5 text-sm font-semibold rounded-full bg-[#F5F5F7] hover:bg-[#EBEBED] text-[#1D1D1F] transition-all cursor-pointer disabled:opacity-50"
               >
                 取消
               </button>
@@ -1225,7 +1320,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                     setDeleting(false);
                   }
                 }}
-                className="h-9 px-4 text-xs font-semibold rounded-full bg-[#FF3B30] hover:bg-[#E0342B] text-white shadow-[0_2px_8px_rgba(255,59,48,0.28)] transition-all cursor-pointer disabled:opacity-60 flex items-center gap-1.5"
+                className="h-10 px-5 text-sm font-semibold rounded-full bg-[#FF3B30] hover:bg-[#E0342B] text-white shadow-[0_2px_8px_rgba(255,59,48,0.28)] transition-all cursor-pointer disabled:opacity-60 flex items-center gap-1.5"
               >
                 <Trash2 className="w-3.5 h-3.5" />
                 {deleting ? '删除中…' : '删除'}
@@ -1235,6 +1330,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
         </div>
       )}
 
+    </div>
     </div>
   );
 };

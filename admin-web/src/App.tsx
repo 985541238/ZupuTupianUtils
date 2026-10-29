@@ -136,6 +136,10 @@ export default function App() {
     [loadTaskDetail, goToTasks]
   );
 
+  /** 上一次轮询看到的任务状态，用来发现「处理完成 / 被暂停」 */
+  const statusRef = useRef<Map<string, string>>(new Map());
+  /** 处理完成的提示（右下角） */
+  const [doneNotice, setDoneNotice] = useState<{ taskId: string; name: string; pages: number; cost?: number } | null>(null);
   const processingTaskIdRef = useRef<string | null>(null);
   processingTaskIdRef.current = processingTaskId;
 
@@ -148,6 +152,17 @@ export default function App() {
         .then((list) => {
           const mapped = (list || []).map((t) => mapTask(t));
           setTasks((prev) => mergeTasksPreserveItems(prev, mapped));
+          // 发现状态变化：处理中 → 审阅中 = 完成提示；处理中 → 失败（被暂停）= 弹窗说明原因
+          for (const t of mapped) {
+            const prev = statusRef.current.get(t.id);
+            if (prev === 'processing' && t.nestStatus !== 'processing') {
+              if (t.nestStatus === 'failed' && t.errorMessage) showTaskProblem(t);
+              else if (t.nestStatus === 'reviewing' || t.nestStatus === 'completed') {
+                setDoneNotice({ taskId: t.id, name: t.name, pages: t.totalPages, cost: t.actualCost });
+              }
+            }
+            statusRef.current.set(t.id, t.nestStatus || '');
+          }
           const processing = mapped.find((t) => t.nestStatus === 'processing');
           if (processing) {
             setProcessingTaskId(processing.id);
@@ -217,64 +232,18 @@ export default function App() {
     pushTasksUrl();
   };
 
+  /**
+   * 开始处理：只负责提交，进度由任务列表轮询展示。
+   * 不再前台等待（之前最多等 6 分钟就报「超时」），处理完也不强制跳进审核页，而是弹出提示。
+   */
   const handleStartProcessing = async (taskId: string) => {
-    setProcessingTaskId(taskId);
-    setProcessingProgress(12);
-    setProcessingStatusText('正在检测版心框线与纸面印刷油墨分布...');
     try {
       await api.processTask(taskId);
-      setProcessingProgress(35);
-      setProcessingStatusText('正在执行局域自适应二值化与去褶皱消除...');
-
-      let finalTask: any = null;
-      await new Promise<void>((resolve, reject) => {
-        let tries = 0;
-        stopPoll();
-        pollRef.current = window.setInterval(async () => {
-          tries += 1;
-          try {
-            const t = await api.getTask(taskId);
-            const done = t.doneCount || 0;
-            const total = t.totalCount || 1;
-            const pct = Math.min(95, 35 + Math.round((done / total) * 60));
-            setProcessingProgress(pct);
-            setProcessingStatusText(
-              t.status === 'processing'
-                ? `正在裁切与净图还原… ${done}/${total}`
-                : '首批净图生成就绪，正在载入审阅工作台...'
-            );
-            if (t.status !== 'processing') {
-              finalTask = t;
-              stopPoll();
-              resolve();
-            } else if (tries > 240) {
-              stopPoll();
-              reject(new Error('处理超时'));
-            }
-          } catch (err) {
-            stopPoll();
-            reject(err);
-          }
-        }, 1500) as unknown as number;
-      });
-
-      // 处理被暂停（如大模型欠费、Key 无效）：留在列表并弹窗说明，不进入审核页
-      if (finalTask && finalTask.status === 'failed') {
-        setProcessingTaskId(null);
-        setProcessingProgress(0);
-        await loadTasks();
-        const mapped = mapTask(finalTask);
-        if (mapped.errorMessage) showTaskProblem(mapped);
-        else alert('处理失败，请稍后重试');
-        return;
-      }
-
-      setProcessingProgress(100);
-      await loadTaskDetail(taskId);
-      setActiveTaskId(taskId);
-      setProcessingTaskId(null);
-      setCurrentTab('workbench');
-      pushReviewUrl(taskId);
+      setProcessingTaskId(taskId);
+      setProcessingProgress(0);
+      setProcessingStatusText('已开始处理');
+      statusRef.current.set(taskId, 'processing');
+      await loadTasks();
     } catch (e: any) {
       console.error(e);
       setProcessingTaskId(null);
@@ -442,6 +411,40 @@ export default function App() {
           />
         )}
       </main>
+
+      {doneNotice ? (
+        <div className="fixed right-6 bottom-6 z-[80] w-[360px] bg-white rounded-2xl border border-black/[0.08] shadow-[0_16px_48px_rgba(0,0,0,0.16)] p-4 animate-apple-in">
+          <div className="flex items-start gap-3">
+            <div className="w-9 h-9 rounded-xl bg-[#34C759]/12 text-[#248A3D] flex items-center justify-center shrink-0 text-base">✓</div>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-semibold text-[#1D1D1F] truncate">《{doneNotice.name}》处理完成</div>
+              <div className="text-xs text-[#6E6E73] mt-0.5">
+                共 {doneNotice.pages} 页{doneNotice.cost ? ` · 花费约 ¥${doneNotice.cost.toFixed(2)}` : ''}，可以开始审阅了
+              </div>
+              <div className="flex gap-2 mt-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const id = doneNotice.taskId;
+                    setDoneNotice(null);
+                    void openReview(id, true);
+                  }}
+                  className="px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-[#0071E3] text-white cursor-pointer"
+                >
+                  进入审阅
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDoneNotice(null)}
+                  className="px-3 py-1.5 text-xs font-semibold rounded-lg text-[#6E6E73] hover:bg-[#F5F5F7] cursor-pointer"
+                >
+                  稍后
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <AiProblemDialog
         problem={aiProblem}

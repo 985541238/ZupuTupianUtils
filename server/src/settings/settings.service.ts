@@ -30,6 +30,8 @@ export interface GeneralConfig {
   concurrency: number;
   timeoutSec: number;
   publicBaseUrl: string;
+  /** 美元兑人民币汇率：美元计价的平台按此折算成人民币记账 */
+  usdRate: number;
 }
 
 type StoredPlatform = {
@@ -49,6 +51,40 @@ export class SettingsService implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
+    try {
+      await this.getGeneral(); // 载入汇率
+    } catch {}
+    try {
+      // 已有数据库：补上 DataEyes 的推荐模型（不改动已有默认，用户在引导配置或模型列表里切换）
+      if ((await this.models.count()) > 0 && (await this.models.count({ where: { platform: 'dataeyes' } })) === 0) {
+        await this.models.save([
+          this.models.create({
+            purpose: 'clean',
+            displayName: '图片处理-Seedream 5.0',
+            model: 'ByteDance-Seedream-5.0',
+            platform: 'dataeyes',
+            prompt: DEFAULT_CLEAN_PROMPT,
+            billing: 'image',
+            priceImage: '0.035',
+            isDefault: 0,
+            enabled: 1,
+          }),
+          this.models.create({
+            purpose: 'ocr',
+            displayName: '识别-通义千问 3.8 Max',
+            model: 'qwen3.8-max',
+            platform: 'dataeyes',
+            prompt: DEFAULT_OCR_PROMPT,
+            billing: 'token',
+            isDefault: 0,
+            enabled: 1,
+          }),
+        ]);
+        this.logger.log('已补充 DataEyes 推荐模型');
+      }
+    } catch (e) {
+      this.logger.error(`补充 DataEyes 模型失败: ${e}`);
+    }
     try {
       if ((await this.models.count()) === 0) {
         await this.models.save([
@@ -72,6 +108,7 @@ export class SettingsService implements OnModuleInit {
             platform: 'dataeyes',
             prompt: DEFAULT_CLEAN_PROMPT,
             billing: 'image',
+            priceImage: '0.035',
             isDefault: 1,
             enabled: 1,
           }),
@@ -173,6 +210,8 @@ export class SettingsService implements OnModuleInit {
       apiKeyMasked: maskSecret(plain),
       /** 回显用，前端默认密文显示 */
       apiKeyPlain: plain,
+      /** 单价币种（跟随平台） */
+      currency: getPlatformDef(platform)?.currency || 'CNY',
       /** 模型自己没填 Key，但所属平台已填 */
       platformKeySet: !!platform && !!keyedPlatforms?.has(platform),
     };
@@ -183,13 +222,30 @@ export class SettingsService implements OnModuleInit {
   async getGeneral(): Promise<GeneralConfig> {
     const legacy = await this.read<any>('aliyun', {});
     const raw = await this.read<any>('general', {});
-    return {
+    const g: GeneralConfig = {
       concurrency: clampInt(raw.concurrency ?? legacy.concurrency, 1, 16, 3),
       timeoutSec: clampInt(raw.timeoutSec ?? legacy.timeoutSec, 20, 900, 300),
       publicBaseUrl: String(raw.publicBaseUrl || process.env.PUBLIC_BASE_URL || '')
         .trim()
         .replace(/\/+$/, ''),
+      usdRate: clampRate(raw.usdRate),
     };
+    this.usdRate = g.usdRate;
+    return g;
+  }
+
+  /** 缓存的汇率（getGeneral / saveGeneral 时刷新），供同步计费使用 */
+  usdRate = 7.2;
+
+  /** 模型的计价币种（跟随所属平台） */
+  currencyOf(model?: AiModel | null): 'CNY' | 'USD' {
+    return getPlatformDef(this.platformOf(model))?.currency || 'CNY';
+  }
+
+  /** 平台币种金额 → 人民币（系统内费用一律按人民币记账） */
+  toCny(model: AiModel | null | undefined, amount: number | null): number | null {
+    if (amount == null) return null;
+    return this.currencyOf(model) === 'USD' ? amount * this.usdRate : amount;
   }
 
   async saveGeneral(body: Partial<GeneralConfig>) {
@@ -204,8 +260,10 @@ export class SettingsService implements OnModuleInit {
       concurrency: clampInt(body.concurrency ?? cur.concurrency, 1, 16, 3),
       timeoutSec: clampInt(body.timeoutSec ?? cur.timeoutSec, 20, 900, 300),
       publicBaseUrl,
+      usdRate: clampRate(body.usdRate ?? cur.usdRate),
     };
     await this.write('general', next);
+    this.usdRate = next.usdRate;
     return next;
   }
 
@@ -353,6 +411,12 @@ export class SettingsService implements OnModuleInit {
       where: { purpose: 'clean', enabled: 1 },
       order: { isDefault: 'DESC', id: 'ASC' },
     });
+    // 默认的排第一，其次聚合平台（推荐）的模型
+    rows.sort(
+      (a, b) =>
+        b.isDefault - a.isDefault ||
+        Number(!!getPlatformDef(this.platformOf(b))?.featured) - Number(!!getPlatformDef(this.platformOf(a))?.featured),
+    );
     const keyed = await this.platformsWithKey();
     return rows.map((m) => this.toPublicModel(m, keyed));
   }
@@ -477,7 +541,8 @@ export class SettingsService implements OnModuleInit {
     });
   }
 
-  estimateCost(model: AiModel | null, pageCount: number): number | null {
+  /** 原币种的预估（美元平台即美元） */
+  estimateRaw(model: AiModel | null, pageCount: number): number | null {
     if (!model || pageCount <= 0) return null;
     if (model.billing === 'image') {
       if (model.priceImage == null) return null;
@@ -488,6 +553,17 @@ export class SettingsService implements OnModuleInit {
       (model.avgTokensIn * Number(model.priceIn || 0) + model.avgTokensOut * Number(model.priceOut || 0)) / 1000;
     return per * pageCount;
   }
+
+  /** 预估费用（人民币） */
+  estimateCost(model: AiModel | null, pageCount: number): number | null {
+    return this.toCny(model, this.estimateRaw(model, pageCount));
+  }
+
+}
+
+function clampRate(v: any) {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0.1 && n <= 100 ? Math.round(n * 10000) / 10000 : 7.2;
 }
 
 function clampInt(v: any, lo: number, hi: number, dflt: number) {

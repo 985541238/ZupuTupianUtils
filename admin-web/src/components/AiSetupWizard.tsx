@@ -15,7 +15,8 @@ export type WizardPlatform = {
   modelsUrl: string;
   fields: { key: string; set: boolean; masked: string; value?: string; link?: string; howTo?: string }[];
   guide: { keyUrl: string; billingUrl: string; steps: string[]; modelTip?: string };
-  imageEdit: { supported: boolean; reason?: string; suggestedModels?: string[] };
+  currency?: 'CNY' | 'USD';
+  imageEdit: { supported: boolean; reason?: string; suggestedModels?: string[]; referencePrices?: Record<string, number> };
 };
 
 const inputCls =
@@ -202,6 +203,13 @@ export const AiSetupWizard: React.FC<{
       off = true;
     };
   }, [open, step, code]);
+
+  // 选中推荐模型时预填参考单价
+  useEffect(() => {
+    const plat = platforms.find((x) => x.code === code);
+    const ref = modelCode && modelCode !== '__custom' ? plat?.imageEdit.referencePrices?.[modelCode] : undefined;
+    setPrice(ref != null ? String(ref) : '');
+  }, [modelCode, code, platforms]);
 
   // 键盘：Enter 执行主按钮，Esc 关闭（输入框里的 Enter 也生效，多行文本框除外）
   useEffect(() => {
@@ -626,9 +634,21 @@ export const AiSetupWizard: React.FC<{
                 {keyState.state === 'ok' ? <Msg ok>{p.name}的 Key 已保存</Msg> : null}
                 {p.guide.modelTip ? <Msg ok={null}>{p.guide.modelTip}，否则处理时会提示「模型未开通」。</Msg> : null}
                 <div>
-                  <label className="block text-xs font-semibold mb-1">每张单价（元，可不填）</label>
-                  <input value={price} onChange={(e) => setPrice(e.target.value)} placeholder="例如 0.2" className={`${inputCls} font-mono`} />
-                  <p className="text-[11px] text-[#86868B] mt-1">只用于建任务时预估费用，以平台价格页为准</p>
+                  <label className="block text-xs font-semibold mb-1">
+                    每张单价（{p.currency === 'USD' ? '美元' : '元'}，可不填）
+                  </label>
+                  <input
+                    value={price}
+                    onChange={(e) => setPrice(e.target.value)}
+                    placeholder={p.currency === 'USD' ? '例如 0.035' : '例如 0.2'}
+                    className={`${inputCls} font-mono`}
+                  />
+                  <p className="text-[11px] text-[#86868B] mt-1">
+                    {modelCode !== '__custom' && p.imageEdit.referencePrices?.[modelCode] != null
+                      ? '已按平台价格预填参考单价，'
+                      : ''}
+                    只用于建任务时预估费用，以平台模型广场的价格为准
+                  </p>
                 </div>
                 <label className="flex items-center gap-2 text-xs cursor-pointer">
                   <input type="checkbox" checked={makeDefault} onChange={(e) => setMakeDefault(e.target.checked)} />

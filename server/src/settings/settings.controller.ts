@@ -195,11 +195,18 @@ export class SettingsController {
     }
     const cost = this.settings.estimateCost(model, pageCount);
     const perPage = this.settings.estimateCost(model, 1);
+    const currency = this.settings.currencyOf(model);
     return {
+      /** 人民币 */
       cost,
       priced: cost != null,
       pageCount,
       perPage,
+      /** 原币种金额（美元平台为美元） */
+      currency,
+      rawCost: this.settings.estimateRaw(model, pageCount),
+      rawPerPage: this.settings.estimateRaw(model, 1),
+      usdRate: this.settings.usdRate,
       model: { id: model.id, displayName: model.displayName, model: model.model, billing: model.billing },
     };
   }

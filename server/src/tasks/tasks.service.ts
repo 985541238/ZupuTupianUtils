@@ -476,7 +476,7 @@ export class TasksService implements OnModuleInit {
     if (!model) throw new BadRequestException('识别模型不存在');
     const target = imagePath && fs.existsSync(imagePath) ? imagePath : img.sourcePath;
     const { result, usage, raw } = await this.aliyun.ocr(target, model);
-    const cost = this.aliyun.cost(model, usage);
+    const cost = this.settings.toCny(model, this.aliyun.cost(model, usage));
     img.ocrModelId = Number(model.id);
     img.ocrJson = JSON.stringify({ result, raw: raw?.slice?.(0, 20000) });
     img.tokensIn = usage.tokensIn || 0;
@@ -543,7 +543,7 @@ export class TasksService implements OnModuleInit {
         ({ usage } = await this.aliyun.cleanImage(input, resultPath, model));
       }
       await this.processor.makeThumb(resultPath, thumbPath);
-      const cost = this.aliyun.cost(model, usage) ?? 0;
+      const cost = this.settings.toCny(model, this.aliyun.cost(model, usage)) ?? 0;
       img.cleanCost = String((Number(img.cleanCost || 0) || 0) + cost);
       task.actualCost = String((Number(task.actualCost || 0) || 0) + cost);
       img.aiResultPath = resultPath;
@@ -564,33 +564,90 @@ export class TasksService implements OnModuleInit {
     }
   }
 
-  /** 审核页「使用大模型处理」：只处理这一页，不改变整本任务的处理方式 */
-  async aiProcessImage(userId: number, taskId: number, imageId: number, body?: { modelId?: number }) {
+  /** 单页大模型处理的后台任务（按图片 id）；服务重启会丢失，前端轮询到 none 时提示重试 */
+  private readonly aiJobs = new Map<
+    number,
+    { state: 'running' | 'done' | 'failed'; startedAt: number; finishedAt?: number; error?: string; errorCode?: string; result?: any }
+  >();
+
+  /**
+   * 审核页「使用大模型处理」：放到后台执行，立即返回，前端轮询 getAiJob。
+   * 只处理这一页，不改变整本任务的处理方式。
+   */
+  async startAiProcess(userId: number, taskId: number, imageId: number, body?: { modelId?: number }) {
     const task = await this.get(userId, taskId);
     const img = await this.getImage(userId, taskId, imageId);
-    if (img.status === 'processing') throw new BadRequestException('这一页正在处理中，请稍后');
+    const cur = this.aiJobs.get(Number(img.id));
+    if (cur?.state === 'running') return { state: 'running', startedAt: cur.startedAt };
+    if (img.status === 'processing') throw new BadRequestException('这一页正在整本处理中，请稍后再试');
     const modelId = Number(body?.modelId || img.aiModelId || task.cleanModelId || 0);
     let model = modelId ? await this.settings.getModel(modelId) : null;
-    if (!model || !model.enabled || model.purpose !== 'clean') {
-      model = await this.settings.defaultModel('clean');
-    }
+    if (!model || !model.enabled || model.purpose !== 'clean') model = await this.settings.defaultModel('clean');
     if (!model) throw new BadRequestException('请先在「模型配置」添加并启用图片处理模型');
+    const creds = await this.settings.resolveCredentials(model);
+    if (!creds.apiKey && process.env.AI_MOCK !== '1') {
+      throw new BadRequestException({
+        message: `还没有填写${this.platformName(creds.platform)}的 API Key。请到「模型配置」点「引导配置」按步骤填写。`,
+        errorCode: 'auth:' + (creds.platform || ''),
+      });
+    }
+    const job: { state: 'running' | 'done' | 'failed'; startedAt: number; finishedAt?: number; error?: string; errorCode?: string; result?: any } = {
+      state: 'running',
+      startedAt: Date.now(),
+    };
+    this.aiJobs.set(Number(img.id), job);
+    const m = model;
+    setImmediate(() => {
+      this.runAiProcess(task, img, m)
+        .then((result) => {
+          job.state = 'done';
+          job.result = result;
+        })
+        .catch((e: any) => {
+          job.state = 'failed';
+          job.error = e?.message || '大模型处理失败';
+          if (e instanceof AiConfigError) job.errorCode = `${e.kind}:${e.platform || ''}`;
+          this.logger.warn(`单页大模型处理失败 image=${img.id}: ${job.error}`);
+        })
+        .finally(() => {
+          job.finishedAt = Date.now();
+          // 结果保留 10 分钟供前端取回
+          setTimeout(() => {
+            if (this.aiJobs.get(Number(img.id)) === job) this.aiJobs.delete(Number(img.id));
+          }, 10 * 60 * 1000);
+        });
+    });
+    return { state: 'running', startedAt: job.startedAt, model: { id: m.id, displayName: m.displayName } };
+  }
+
+  /** 查询单页大模型处理进度 */
+  async getAiJob(userId: number, taskId: number, imageId: number) {
+    await this.getImage(userId, taskId, imageId);
+    const job = this.aiJobs.get(Number(imageId));
+    if (!job) return { state: 'none' };
+    return {
+      state: job.state,
+      startedAt: job.startedAt,
+      elapsedMs: (job.finishedAt || Date.now()) - job.startedAt,
+      error: job.error,
+      errorCode: job.errorCode,
+      image: job.result,
+    };
+  }
+
+  private async runAiProcess(task: Task, img: TaskImage, model: AiModel) {
     // 当前是算法结果时先记下来，便于「恢复算法结果」
     if (img.processMode !== 'ai' && img.resultPath && fs.existsSync(img.resultPath) && !img.algoResultPath) {
       img.algoResultPath = img.resultPath;
     }
     const costBefore = Number(img.cleanCost || 0) || 0;
-    try {
-      await this.aiProcessOne(task, img, model, false);
-    } catch (e: any) {
-      throw new BadRequestException(e?.message || '大模型处理失败');
-    }
+    await this.aiProcessOne(task, img, model, false);
     await this.images.save(img);
     // 只累加费用，不整行保存 task，避免覆盖整本处理中的进度
     const delta = (Number(img.cleanCost || 0) || 0) - costBefore;
     if (delta > 0) await this.tasks.increment({ id: task.id }, 'actualCost', delta);
     await this.bumpTaskToReviewingIfNeeded(task);
-    await this.refreshConfirmed(taskId);
+    await this.refreshConfirmed(Number(task.id));
     return this.imageView(img, model);
   }
 
