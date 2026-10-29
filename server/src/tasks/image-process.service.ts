@@ -288,6 +288,8 @@ export class ImageProcessService {
     originalPath: string,
     aiRawPath: string,
     outPath: string,
+    /** 算法成品：给了就以它为底，只用模型结果删掉残留污渍（效果不会比算法差） */
+    basePath?: string,
   ): Promise<{ ok: boolean; recall?: number; coverage?: number; dropped?: number; error?: string }> {
     const bin = await this.detectPython();
     if (!bin) throw new Error('服务器缺少 Python OpenCV，无法对大模型结果做保真合成（不会改字的处理方式），请先安装 opencv-python');
@@ -298,7 +300,9 @@ export class ImageProcessService {
     const script = path.join(__dirname, '..', '..', 'scripts', 'ai_fuse.py');
     try {
       return await new Promise((resolve, reject) => {
-        const child = spawn(bin, [script, '--orig', tmpOrig, '--ai', aiRawPath, '--out', outPath], {
+        const args = [script, '--orig', tmpOrig, '--ai', aiRawPath, '--out', outPath];
+        if (basePath) args.push('--base', basePath);
+        const child = spawn(bin, args, {
           windowsHide: true,
           stdio: ['ignore', 'pipe', 'pipe'],
         });

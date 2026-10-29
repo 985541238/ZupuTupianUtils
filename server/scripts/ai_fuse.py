@@ -172,23 +172,74 @@ def align(o_ink_s: np.ndarray, a_ink_s: np.ndarray) -> list[np.ndarray]:
     return out
 
 
+def finish_on_base(out_path, base, o_ink, a_ink, warp, s, flags, bad, gy, gx, meta) -> int:
+    """以算法成品为底：按连通块判断——模型认为是字的整块保留（笔画不裁），模型认为是污渍的整块删除，
+    字和污渍粘在一起的块只留靠近模型笔画的部分。对不上的分块保持算法成品原样。"""
+    h, w = base.shape
+    full = warp.copy()
+    full[:, 2] /= s
+    a_full = cv2.warpAffine(a_ink.astype(np.uint8), full, (w, h), flags=flags, borderValue=0)
+    a_full = local_refine(o_ink, a_full)
+    sw_px = stroke_width(o_ink)
+    near = cv2.dilate(a_full, disk(max(2, round(sw_px * 0.6)))).astype(bool)
+    tight = cv2.dilate(a_full, disk(max(1, round(sw_px * 0.4)))).astype(bool)
+
+    n, lab, st, _ = cv2.connectedComponentsWithStats(o_ink.astype(np.uint8), 8)
+    area = np.maximum(st[:, cv2.CC_STAT_AREA].astype(np.float64), 1)
+    hit = np.bincount(lab.ravel(), near.ravel(), n) / area
+    # 几乎全部落在模型笔画附近才整块保留；有一截伸到模型认为是空白的地方，说明粘着污渍，只留笔画附近
+    whole = hit >= 0.92
+    mixed = (hit >= 0.2) & ~whole
+    whole[0] = mixed[0] = False
+    keep = whole[lab] | (mixed[lab] & tight)
+
+    # 对不上的分块：完全保持算法成品
+    for i in range(gy):
+        for j in range(gx):
+            if bad[i, j]:
+                ys, ye = h * i // gy, h * (i + 1) // gy
+                xs, xe = w * j // gx, w * (j + 1) // gx
+                keep[ys:ye, xs:xe] = o_ink[ys:ye, xs:xe]
+
+    # 保留算法成品的笔画边缘过渡
+    soft = cv2.dilate(keep.astype(np.uint8), disk(1)).astype(bool)
+    out = np.full((h, w), 255, np.uint8)
+    out[soft] = base[soft]
+    out[keep] = base[keep]
+    removed = int(np.count_nonzero(o_ink & ~keep))
+    ok, buf = cv2.imencode(".png", out)
+    if not ok:
+        raise ValueError("写出失败")
+    buf.tofile(out_path)
+    print(json.dumps({"ok": True, "mode": "base", "removed_px": removed, "dropped_parts": int((~whole & ~mixed)[1:].sum()), **meta}))
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--orig", required=True)
     p.add_argument("--ai", required=True)
     p.add_argument("--out", required=True)
+    # 以算法成品为底：只用模型结果删掉算法没去干净的污渍，字一笔不动（效果不会比算法差）
+    p.add_argument("--base", default="")
     a = p.parse_args()
 
-    o = read_gray(a.orig)
+    base = read_gray(a.base) if a.base else None
+    o = base if base is not None else read_gray(a.orig)
     h, w = o.shape
     ai = cv2.resize(read_gray(a.ai), (w, h), interpolation=cv2.INTER_AREA)
     if float(np.median(ai)) < 110:  # 模型出成了黑底白字：反相后再用
         ai = 255 - ai
 
-    n = normalize_bg(o)
-    t_o = otsu(n, 120, 225)
-    # 原图深色取得宽一些（淡笔画也要），污渍靠模型结果来排除
-    o_ink = n < min(235, t_o + 12)
+    if base is not None:
+        n = base
+        t_o = 148
+        o_ink = base < 160  # 算法成品已是白底黑字
+    else:
+        n = normalize_bg(o)
+        t_o = otsu(n, 120, 225)
+        # 原图深色取得宽一些（淡笔画也要），污渍靠模型结果来排除
+        o_ink = n < min(235, t_o + 12)
     a_ink = ai < otsu(ai, 90, 200)
 
     # ---- 小图上对齐 + 检查版面是否一致
@@ -245,6 +296,9 @@ def main() -> int:
     if int(np.count_nonzero(a_s2)) < sw * sh * 0.002 or text_tiles == 0 or nbad > text_tiles * 0.4 or recall < 0.7:
         print(json.dumps({"ok": False, "error": "mismatch", **meta}))
         return 2
+
+    if base is not None:
+        return finish_on_base(a.out, base, o_ink, a_ink, warp, s, flags, bad, gy, gx, meta)
 
     # ---- 原尺寸合成
     full = warp.copy()

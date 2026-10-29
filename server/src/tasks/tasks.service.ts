@@ -563,6 +563,13 @@ export class TasksService implements OnModuleInit {
       // 先做不花钱的检查：合成环境不全就不去调模型
       await this.processor.assertFusionReady();
 
+      // 先跑现有算法（不花钱）：算法成品作为合成的底图，大模型只负责删掉算法没去干净的污渍。
+      // 算法失败就不去调模型。算法成品同时作为本页的「算法结果」，可随时切换。
+      const algoOut = this.algoPath(task, img);
+      const pageParams = this.processor.parseParams(img.params, this.processor.parseParams(task.defaultParams));
+      await this.processor.processToFile(img.sourcePath, algoOut, pageParams, crop && crop.w > 0 && crop.h > 0 ? crop : null);
+      img.algoResultPath = algoOut;
+
       // 上次模型已出图（已付费）但后续步骤没做完：直接复用那张图，不再重复付费
       const key = this.aiInputKey(input, model);
       let reused = false;
@@ -605,13 +612,13 @@ export class TasksService implements OnModuleInit {
       if (process.env.AI_FUSE === '0') {
         fs.copyFileSync(rawPath, resultPath);
       } else {
-        const fuse = await this.processor.fuseAiResult(input, rawPath, resultPath);
+        const fuse = await this.processor.fuseAiResult(input, rawPath, resultPath, algoOut);
         this.logger.log(`AI 保真合成 image=${img.id} ${JSON.stringify(fuse)}`);
         if (!fuse.ok) {
           // 这张图对不上，下次要重新出图，不能复用
           this.writeAiMark(markPath, key, 'mismatch');
           throw new AiMismatchError(
-            `大模型这次画出的页面和原图大部分对不上（重画了版面或丢了内容），为保证不改字，没有采用它的结果` +
+            `大模型这次画出的页面和原图大部分对不上（重画了版面或丢了内容），没有采用它的结果，本页保留算法结果` +
               (cost ? `（本次已产生费用 ¥${cost.toFixed(2)}）` : '') +
               '。可以再试一次，或换一个图片处理模型。',
           );
@@ -728,6 +735,15 @@ export class TasksService implements OnModuleInit {
         if (spent > 0) {
           await this.images.update({ id: img.id }, { cleanCost: img.cleanCost });
           await this.tasks.increment({ id: task.id }, 'actualCost', spent);
+        }
+        // 这一页原来还没有任何结果图：用刚跑出的算法成品，至少有结果可审
+        if (e instanceof AiMismatchError && (!img.resultPath || !fs.existsSync(img.resultPath)) && img.algoResultPath && fs.existsSync(img.algoResultPath)) {
+          const thumbPath = this.thumbPath(task, img);
+          await this.processor.makeThumb(img.algoResultPath, thumbPath);
+          await this.images.update(
+            { id: img.id },
+            { resultPath: img.algoResultPath, algoResultPath: img.algoResultPath, processMode: 'algo', thumbPath, status: 'ready', updatedAt: new Date() } as any,
+          );
         }
       }
       throw e;
