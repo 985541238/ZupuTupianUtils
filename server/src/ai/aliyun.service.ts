@@ -440,7 +440,8 @@ export class AliyunService {
     const limits: Record<string, { min: number; max: number; side: number; mult: number }> = {
       // Seedream：官方范围按模型不同（5.0 pro 921600~4624220；5.0 lite 3686400~10404496；4.x ≤ 4096²），
       // 取 2048² 附近，所有 Seedream 模型都在范围内，又足够看清小字
-      ark: { min: 2048 * 2048, max: 2048 * 2048, side: 4096, mult: 16 },
+      // 原图（裁剪后）尺寸在这个像素范围内就原样要求；超出才等比缩放进范围，宽高比不变
+      ark: { min: 3686400, max: 4624220, side: 4096, mult: 1 },
       // qwen-image：总像素 [512x512, 2048x2048]，16 的倍数
       aliyun: { min: 512 * 512, max: 2048 * 2048, side: 3072, mult: 16 },
       // 混元生图 3.0：单边 ≤ 2048
@@ -448,6 +449,8 @@ export class AliyunService {
     };
     const L = limits[platform];
     if (!L || !w || !h) return null;
+    // 方舟：按原图尺寸出图，范围内不做任何改动
+    if (platform === 'ark' && w * h >= L.min && w * h <= L.max && Math.max(w, h) <= L.side) return `${w}${sep}${h}`;
     const area = Math.max(L.min, Math.min(L.max, w * h));
     let scale = Math.sqrt(area / (w * h));
     scale = Math.min(scale, L.side / Math.max(w, h));
