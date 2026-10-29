@@ -107,6 +107,8 @@ export interface OcrColumn {
   id: number;
   box: [number, number, number, number];
   chars: OcrChar[];
+  /** 按图估算的字数，和 chars.length 差得多说明模型漏字/并字 */
+  x?: number;
 }
 
 export type OcrStatus = 'pending' | 'processing' | 'reviewing' | 'completed' | 'failed';

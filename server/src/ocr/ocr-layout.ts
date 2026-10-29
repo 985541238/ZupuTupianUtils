@@ -26,6 +26,8 @@ export interface LayoutColumn {
   /** 整列的像素范围 */
   box: [number, number, number, number];
   chars: LayoutChar[];
+  /** 按图上墨迹估算这一列大约有多少个字（用于发现模型漏字/并字） */
+  x?: number;
 }
 
 export interface PageLayout {
@@ -89,11 +91,18 @@ export async function layoutPage(
     const chars = Array.from(c.text);
     const hint = hints[i] || evenHint(i);
     const colBox = fitColumn(ink, w, h, hint, !!hints[i]);
-    const cells = splitCells(ink, w, colBox, chars.length);
+    // 没有模型给的框时列宽是猜的，估算不可信，不做判断
+    const expect = hints[i] ? estimateCount(colBox) : 0;
+    // 模型这一列的字数远少于图上的字数（漏字/几个字并成一个）：
+    // 若还按字数平分整列，一个格子会盖住好几个字。改按估算的字距从上往下排，
+    // 前面的字至少落在各自的位置上，缺的部分留空，并在界面上提示这一列字数对不上。
+    const severeShort = expect >= 3 && chars.length <= expect * 0.6 && expect - chars.length >= 2;
+    const cells = severeShort ? pitchCells(colBox, chars.length, expect) : splitCells(ink, w, colBox, chars.length);
     const un = uncertain.filter((u) => u.col === i);
     out.push({
       id: i,
       box: scaleBox(colBox, 1 / s, W, H),
+      x: expect || undefined,
       chars: chars.map((ch, k) => {
         const hit = un.find((u) => u.index === k);
         const item: LayoutChar = { t: ch, b: scaleBox(cells[k], 1 / s, W, H) };
@@ -391,4 +400,24 @@ function splitCells(
     cells.push([x1, y1 + bounds[k], x2, y1 + Math.max(bounds[k] + 1, bounds[k + 1])]);
   }
   return cells;
+}
+
+/** 普通整列的字近似方形：列高 ÷ 列宽 ≈ 字数。双行小注的窄列会偏多，所以只作参考 */
+function estimateCount(col: [number, number, number, number]): number {
+  const cw = Math.max(1, col[2] - col[0]);
+  const ch = Math.max(1, col[3] - col[1]);
+  return Math.max(1, Math.round(ch / (cw * 1.08)));
+}
+
+function pitchCells(
+  col: [number, number, number, number],
+  n: number,
+  expect: number,
+): [number, number, number, number][] {
+  const pitch = (col[3] - col[1]) / Math.max(1, expect);
+  const out: [number, number, number, number][] = [];
+  for (let k = 0; k < Math.max(1, n); k++) {
+    out.push([col[0], col[1] + k * pitch, col[2], Math.min(col[3], col[1] + (k + 1) * pitch)]);
+  }
+  return out;
 }

@@ -381,7 +381,8 @@ export class OcrService implements OnModuleInit {
       layout = this.evenLayout(page.width || 1000, page.height || 1400, result.columns, result.uncertain);
     }
     this.fillPage(page, layout);
-    page.errorMessage = result.partial ? '模型输出不完整（可能被截断），后面的文字可能缺失，请对照图片核对，必要时重新识别。' : null;
+    const bad = layout.columns.filter((c) => c.x && c.x >= 3 && Math.abs(c.chars.length - c.x) >= 2 && Math.abs(c.chars.length - c.x) / c.x > 0.25).length;
+    page.errorMessage = result.partial ? '模型输出不完整（可能被截断），后面的文字可能缺失，请对照图片核对，必要时重新识别。' : bad ? `有 ${bad} 列的字数与图上对不上（可能漏字或并字），已用橙色标出，请逐列核对，或换个模型重新识别。` : null;
     page.status = 'ready';
     page.processingTimeMs = Date.now() - started;
     await this.pages.save(page);
@@ -512,7 +513,9 @@ export class OcrService implements OnModuleInit {
         if (typeof ch?.r === 'string' && ch.r) out.r = ch.r.slice(0, 60);
         return out;
       });
-      return { id: i, box: box(c?.box, [0, 0, 0, 0]), chars };
+      const col: LayoutColumn = { id: i, box: box(c?.box, [0, 0, 0, 0]), chars };
+      if (Number.isFinite(Number(c?.x)) && Number(c.x) > 0) col.x = Math.min(300, Math.round(Number(c.x)));
+      return col;
     });
   }
 

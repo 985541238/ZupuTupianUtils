@@ -911,6 +911,9 @@ interface CanvasProps {
   onRecognize: () => void;
 }
 
+/** 这一列的字数和图上对不上（模型漏字或几个字并成一个） */
+const colMismatch = (c: OcrColumn) => !!c.x && c.x >= 3 && Math.abs(c.chars.length - c.x) >= 2 && Math.abs(c.chars.length - c.x) / c.x > 0.25;
+
 const sameSel = (a: Sel, b: Sel) => !!a && !!b && a.col === b.col && a.idx === b.idx;
 
 const PageCanvas: React.FC<CanvasProps> = ({
@@ -1075,6 +1078,22 @@ const PageCanvas: React.FC<CanvasProps> = ({
             }}
           />
         )}
+
+        {/* 字数对不上的列：红色虚线框 + 角标，提示这一列可能漏字/并字 */}
+        {columns &&
+          columns.map((c, ci) =>
+            colMismatch(c) ? (
+              <div
+                key={'mm' + ci}
+                className="absolute border-2 border-dashed border-[#FF3B30]/70 rounded-sm pointer-events-none"
+                style={{ left: c.box[0] * scale - 4, top: c.box[1] * scale - 4, width: (c.box[2] - c.box[0]) * scale + 8, height: (c.box[3] - c.box[1]) * scale + 8 }}
+              >
+                <span className="absolute -top-5 left-0 whitespace-nowrap text-[10px] font-semibold text-white bg-[#FF3B30] rounded px-1.5 py-0.5">
+                  字数对不上：识别 {c.chars.length}，图上约 {c.x}
+                </span>
+              </div>
+            ) : null,
+          )}
 
         {/* 逐字格子。叠字模式：识别文字压在对应字上；对照模式：只在移上去/选中/待核对时描边高亮 */}
         {columns &&
@@ -1290,7 +1309,13 @@ const TextReader: React.FC<{
           <div className="mx-auto w-max flex flex-row-reverse gap-3 items-start" style={{ fontFamily: FONT }}>
             {columns.map((c, ci) => (
               <div key={ci} className="flex flex-col items-center pt-1">
-                <span className="block text-[10px] text-[#B0B0B6] tabular-nums select-none mb-1">{ci + 1}</span>
+                <span
+                  className={`block text-[10px] tabular-nums select-none mb-1 ${colMismatch(c) ? 'text-[#FF3B30] font-bold' : 'text-[#B0B0B6]'}`}
+                  title={colMismatch(c) ? `字数对不上：识别 ${c.chars.length}，图上约 ${c.x}` : undefined}
+                >
+                  {colMismatch(c) ? '!' : ''}
+                  {ci + 1}
+                </span>
                 {c.chars.map((ch, k) => {
                   const pending = isPending(ch);
                   const isSel = sameSel(sel, { col: ci, idx: k });
