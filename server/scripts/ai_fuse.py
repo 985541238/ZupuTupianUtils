@@ -156,6 +156,8 @@ def main() -> int:
     o = read_gray(a.orig)
     h, w = o.shape
     ai = cv2.resize(read_gray(a.ai), (w, h), interpolation=cv2.INTER_AREA)
+    if float(np.median(ai)) < 110:  # 模型出成了黑底白字：反相后再用
+        ai = 255 - ai
 
     n = normalize_bg(o)
     t_o = otsu(n, 120, 225)
