@@ -441,9 +441,9 @@ export default function App() {
   const showOcrProblemRef = useRef<((t: OcrTask) => void) | null>(null);
   showOcrProblemRef.current = showOcrProblem;
 
-  const handleStartOcr = async (taskId: string) => {
+  const handleStartOcr = async (taskId: string, modelId?: number | null) => {
     try {
-      await api.startOcrTask(taskId);
+      await api.startOcrTask(taskId, modelId);
       ocrStatusRef.current.set(taskId, 'processing');
       await loadOcrTasks();
     } catch (e: any) {

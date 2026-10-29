@@ -230,16 +230,23 @@ export class OcrService implements OnModuleInit {
 
   // ---------------- 开始识别 ----------------
 
-  async start(userId: number, id: number) {
+  async start(userId: number, id: number, body: { modelId?: number } = {}) {
     const task = await this.getTask(userId, id);
     const tid = Number(task.id);
     if (this.running.has(tid)) return { message: '正在识别中', task: await this.getView(userId, tid) };
     if (task.status === 'completed') throw new BadRequestException('任务已完成');
 
-    const model = task.ocrModelId ? await this.settings.getModel(task.ocrModelId) : null;
+    // 重试/继续时可以换模型：选了就改成任务当前使用的模型
+    let model = task.ocrModelId ? await this.settings.getModel(task.ocrModelId) : null;
+    if (body?.modelId) {
+      const chosen = await this.settings.getModel(Number(body.modelId));
+      if (!chosen || !chosen.enabled || chosen.purpose !== 'ocr') throw new BadRequestException('所选识别模型不可用，请重新选择');
+      model = chosen;
+      task.ocrModelId = Number(chosen.id);
+    }
     if (!model || !model.enabled || model.purpose !== 'ocr') {
       throw new BadRequestException({
-        message: '这个任务选用的识别模型已被删除或停用。请到「模型配置」重新添加。',
+        message: '这个任务选用的识别模型已被删除或停用。请换一个识别模型后重试。',
         errorCode: 'model:',
       });
     }
@@ -562,14 +569,19 @@ export class OcrService implements OnModuleInit {
   }
 
   /** 单页重新识别（再收一次费，覆盖人工修改） */
-  async recognizePage(userId: number, id: number, pageId: number) {
+  async recognizePage(userId: number, id: number, pageId: number, body: { modelId?: number } = {}) {
     const t = await this.getTask(userId, id);
     const p = await this.getPage(t.id, pageId);
     const tid = Number(t.id);
     if (this.running.has(tid)) throw new BadRequestException('整本正在识别中，请稍后再试');
     if (p.status === 'processing' || this.pageJobs.has(Number(p.id))) throw new BadRequestException('这一页正在识别，请稍后再试');
-    const model = t.ocrModelId ? await this.settings.getModel(t.ocrModelId) : null;
-    if (!model || !model.enabled) throw new BadRequestException({ message: '识别模型已被删除或停用，请到「模型配置」重新添加。', errorCode: 'model:' });
+    let model = t.ocrModelId ? await this.settings.getModel(t.ocrModelId) : null;
+    if (body?.modelId) {
+      const chosen = await this.settings.getModel(Number(body.modelId));
+      if (!chosen || !chosen.enabled || chosen.purpose !== 'ocr') throw new BadRequestException('所选识别模型不可用，请重新选择');
+      model = chosen;
+    }
+    if (!model || !model.enabled) throw new BadRequestException({ message: '识别模型已被删除或停用，请换一个识别模型后重试。', errorCode: 'model:' });
     try {
       await this.aliyun.assertReady(model);
     } catch (e: any) {
@@ -579,6 +591,10 @@ export class OcrService implements OnModuleInit {
       throw new BadRequestException(e?.message || String(e));
     }
     // 后台执行，接口马上返回；前端轮询页面状态（识别一页常要几十秒，不让请求一直挂着）
+    if (body?.modelId && Number(model.id) !== Number(t.ocrModelId)) {
+      t.ocrModelId = Number(model.id);
+      await this.tasks.save(t);
+    }
     const hadData = !!p.dataJson;
     p.status = 'processing';
     p.errorMessage = null;

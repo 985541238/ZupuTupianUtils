@@ -126,6 +126,7 @@ export interface OcrTask {
   actualCost: number;
   processingTimeMs?: number;
   ocrModelName?: string | null;
+  ocrModelId?: number | null;
   uncertainCount: number;
   charCount: number;
   /** 识别失败、可重试的页数 */

@@ -3,6 +3,7 @@ import { OcrTask, OcrSourceTask } from '../types';
 import { api, ocrExportUrl } from '../api/client';
 import { formatProcessingTime, mapOcrSource } from '../api/mappers';
 import { inferErrorCode } from './AiProblemDialog';
+import { OcrModelPicker, looksTextOnly } from './OcrModelPicker';
 import {
   Play,
   Plus,
@@ -24,7 +25,7 @@ interface Props {
   tasks: OcrTask[];
   loading?: boolean;
   onRefresh?: () => void;
-  onStart: (taskId: string) => void;
+  onStart: (taskId: string, modelId?: number | null) => void;
   onOpenReview: (taskId: string) => void;
   onCreate: (data: { name: string; sourceTaskId: string; ocrModelId: number | null }) => Promise<OcrTask>;
   onDelete: (taskId: string) => void | Promise<void>;
@@ -65,12 +66,6 @@ function elapsedText(ms: number) {
   return s < 60 ? `${s} 秒` : `${Math.floor(s / 60)} 分 ${String(s % 60).padStart(2, '0')} 秒`;
 }
 
-/** 明显不能看图的模型（纯文字模型）：识别会胡编或直接失败 */
-function looksTextOnly(m: any) {
-  const id = String(m?.model || '');
-  return (/deepseek/i.test(id) && !/ocr|vl/i.test(id)) || /coder|embedding|rerank|bge/i.test(id);
-}
-
 export const OcrTaskCenterView: React.FC<Props> = ({
   tasks,
   loading,
@@ -101,6 +96,8 @@ export const OcrTaskCenterView: React.FC<Props> = ({
   const [modelId, setModelId] = useState<number | null>(null);
   const [est, setEst] = useState<{ cost: number | null; priced: boolean }>({ cost: null, priced: false });
   const [creating, setCreating] = useState(false);
+  // 继续 / 重试前选模型
+  const [retryTask, setRetryTask] = useState<OcrTask | null>(null);
 
   const anyProcessing = tasks.some((t) => t.status === 'processing');
   const now = useNow(anyProcessing);
@@ -428,7 +425,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                     <div className="flex items-center justify-end gap-2 shrink-0 md:pl-2">
                       {(task.status === 'pending' || task.status === 'failed') && (
                         <button
-                          onClick={() => onStart(task.id)}
+                          onClick={() => (task.status === 'failed' || task.doneCount > 0 ? setRetryTask(task) : onStart(task.id))}
                           className="h-10 px-5 text-sm font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
                         >
                           <Play className="w-3 h-3 fill-current" />
@@ -451,9 +448,9 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                       )}
                       {!isProcessing && task.status === 'reviewing' && task.failedCount > 0 && (
                         <button
-                          onClick={() => onStart(task.id)}
+                          onClick={() => setRetryTask(task)}
                           className="h-10 px-4 text-sm font-semibold rounded-full bg-[#FF9500] hover:bg-[#F08C00] text-white shadow-[0_2px_8px_rgba(255,149,0,0.28)] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
-                          title="只重新识别失败的页，已识别的不会重复收费"
+                          title="只重新识别失败的页（可换模型），已识别的不会重复收费"
                         >
                           <RotateCcw className="w-3.5 h-3.5" />
                           <span>重试失败页（{task.failedCount}）</span>
@@ -708,6 +705,26 @@ export const OcrTaskCenterView: React.FC<Props> = ({
             </div>
           </div>
         )}
+
+        <OcrModelPicker
+          open={!!retryTask}
+          title={retryTask?.status === 'failed' ? '继续识别' : '重试失败的页'}
+          desc={
+            retryTask?.status === 'failed'
+              ? '只识别还没完成的页，已识别的页不会重复识别和收费。可以换一个模型。'
+              : `只重新识别失败的 ${retryTask?.failedCount || 0} 页，已识别的页不会重复收费。失败就是失败，不会自动重试，换个模型试试往往更好。`
+          }
+          confirmText="开始识别"
+          currentModelId={retryTask?.ocrModelId}
+          pageCount={retryTask ? Math.max(1, retryTask.status === 'failed' ? retryTask.totalCount - retryTask.doneCount : retryTask.failedCount) : 1}
+          onClose={() => setRetryTask(null)}
+          onOpenSetup={onOpenSetup}
+          onConfirm={(modelId) => {
+            const t = retryTask;
+            setRetryTask(null);
+            if (t) onStart(t.id, modelId);
+          }}
+        />
 
         {deleteTarget && (
           <div className="fixed inset-0 z-[80] flex items-center justify-center p-4">

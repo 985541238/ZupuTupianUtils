@@ -153,6 +153,7 @@ export function mapOcrTask(raw: any): OcrTask {
     actualCost: raw.actualCost != null ? Number(raw.actualCost) || 0 : 0,
     processingTimeMs: pt == null || !Number.isFinite(Number(pt)) ? undefined : Number(pt),
     ocrModelName: raw.ocrModelName || null,
+    ocrModelId: raw.ocrModelId != null ? Number(raw.ocrModelId) : null,
     uncertainCount: Number(raw.uncertainCount) || 0,
     charCount: Number(raw.charCount) || 0,
     failedCount: Number(raw.failedCount) || 0,

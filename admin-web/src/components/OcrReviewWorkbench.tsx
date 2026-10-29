@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { OcrTask, OcrPage, OcrColumn, OcrChar, OcrTextPage } from '../types';
 import { api, ocrExportUrl } from '../api/client';
 import { mapOcrPage, mapOcrTextPage } from '../api/mappers';
+import { OcrModelPicker } from './OcrModelPicker';
 import {
   CheckCircle2,
   ChevronLeft,
@@ -22,6 +23,10 @@ import {
   Plus,
   Check,
   X,
+  Columns,
+  Layers,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from 'lucide-react';
 
 interface Props {
@@ -33,6 +38,7 @@ interface Props {
 }
 
 type Sel = { col: number; idx: number } | null;
+type LayoutMode = 'overlay' | 'compare';
 type ViewMode = 'review' | 'overview';
 
 const FONT = "'Songti SC','Noto Serif SC','STSong','SimSun','Source Han Serif SC',serif";
@@ -52,6 +58,22 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
   const [sel, setSel] = useState<Sel>(null);
   const [showText, setShowText] = useState(true);
   const [onlyPending, setOnlyPending] = useState(false);
+  /** overlay = 文字叠在图上；compare = 左图右文对照，鼠标移到文字上图上对应区域高亮 */
+  const [layoutMode, setLayoutModeRaw] = useState<LayoutMode>(() => {
+    try {
+      return localStorage.getItem('ocr_layout') === 'overlay' ? 'overlay' : 'compare';
+    } catch {
+      return 'compare';
+    }
+  });
+  const setLayoutMode = (m: LayoutMode) => {
+    setLayoutModeRaw(m);
+    try {
+      localStorage.setItem('ocr_layout', m);
+    } catch {}
+  };
+  const [hover, setHover] = useState<Sel>(null);
+  const [showList, setShowList] = useState(true);
   const [zoom, setZoom] = useState(1);
   /** 图上识别文字的浓淡：调淡后能透过文字看到下面的原字，方便对照 */
   const [textOpacity, setTextOpacity] = useState(0.85);
@@ -378,14 +400,14 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
     }
   };
 
-  const recognizeAgain = async () => {
+  const recognizeAgain = async (modelId?: number | null) => {
     if (!cur) return;
     setRerunDlg(false);
     setBusy(true);
     try {
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
       dirty.current = null;
-      await api.recognizeOcrPage(task.id, cur.id);
+      await api.recognizeOcrPage(task.id, cur.id, modelId);
       // 后台识别：先把这页标成「识别中」，列表轮询会在完成后自动更新
       cache.current.delete(cur.id);
       setColumns(null);
@@ -426,7 +448,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
 
       <div className="flex-1 flex overflow-hidden relative">
         {/* 左：页面列表 */}
-        <aside className="apple-glass border-r border-black/[0.06] w-60 flex flex-col shrink-0 z-20">
+        <aside className={`apple-glass border-r border-black/[0.06] flex flex-col shrink-0 z-20 transition-all duration-300 overflow-hidden ${showList ? 'w-60' : 'w-0 border-r-0'}`}>
           <div className="p-3 border-b border-black/[0.06] space-y-2">
             <div>
               <div className="text-xs font-bold text-[#1D1D1F] truncate" title={task.name}>
@@ -518,6 +540,14 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
         <main className="flex-1 flex flex-col min-w-0 relative">
           {/* 顶部模式切换 */}
           <div className="h-12 px-4 flex items-center justify-between gap-3 border-b border-black/[0.06] bg-white/70 backdrop-blur shrink-0">
+            <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowList((v) => !v)}
+              className="w-8 h-8 rounded-lg flex items-center justify-center text-[#6E6E73] hover:text-[#1D1D1F] hover:bg-black/[0.05] cursor-pointer"
+              title={showList ? '收起页面列表，给图片留出更多空间' : '展开页面列表'}
+            >
+              {showList ? <PanelLeftClose className="w-4 h-4" /> : <PanelLeftOpen className="w-4 h-4" />}
+            </button>
             <div className="flex items-center p-0.5 bg-[#E5E5EA]/70 rounded-full">
               <button
                 onClick={() => void switchMode('review')}
@@ -537,6 +567,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                 <BookOpen className="w-3.5 h-3.5 text-[#0071E3]" />
                 全文总览
               </button>
+            </div>
             </div>
             <div className="flex items-center gap-3 text-xs text-[#86868B]">
               <span className="tabular-nums">
@@ -576,6 +607,10 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                 onlyPending={onlyPending}
                 textOpacity={textOpacity}
                 setTextOpacity={setTextOpacity}
+                layoutMode={layoutMode}
+                setLayoutMode={setLayoutMode}
+                hover={hover}
+                setHover={setHover}
                 zoom={zoom}
                 sel={sel}
                 setSel={setSel}
@@ -587,7 +622,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                 insertAfter={insertAfter}
                 stepSel={stepSel}
                 busy={busy}
-                onRecognize={() => (cur.status === 'ready' || cur.status === 'confirmed' ? setRerunDlg(true) : void recognizeAgain())}
+                onRecognize={() => setRerunDlg(true)}
               />
 
               {/* 右：本页文字与操作 */}
@@ -731,7 +766,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                   )}
                   <button
                     disabled={busy || cur.status === 'processing'}
-                    onClick={() => (columns ? setRerunDlg(true) : void recognizeAgain())}
+                    onClick={() => setRerunDlg(true)}
                     className="w-full h-9 text-[13px] font-semibold rounded-xl text-[#6E6E73] hover:text-[#1D1D1F] hover:bg-black/[0.04] cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5"
                   >
                     <RotateCcw className="w-3.5 h-3.5" />
@@ -774,29 +809,21 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
         </Modal>
       )}
 
-      {rerunDlg && (
-        <Modal onClose={() => setRerunDlg(false)}>
-          <div className="flex items-start gap-3 mb-4">
-            <div className="w-10 h-10 rounded-full bg-[#0071E3]/10 flex items-center justify-center shrink-0">
-              <Sparkles className="w-5 h-5 text-[#0071E3]" />
-            </div>
-            <div className="min-w-0 pt-0.5">
-              <h3 className="text-[15px] font-semibold text-[#1D1D1F]">重新识别第 {cur?.pageNumber} 页？</h3>
-              <p className="text-[13px] text-[#6E6E73] mt-1 leading-relaxed">
-                会再调用一次识别模型（产生费用），并覆盖这一页现有的文字和你做过的修改。
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center justify-end gap-2">
-            <button onClick={() => setRerunDlg(false)} className="h-10 px-5 text-sm font-semibold rounded-full bg-[#F5F5F7] hover:bg-[#EBEBED] cursor-pointer">
-              取消
-            </button>
-            <button onClick={() => void recognizeAgain()} className="h-10 px-5 text-sm font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white cursor-pointer">
-              重新识别
-            </button>
-          </div>
-        </Modal>
-      )}
+      <OcrModelPicker
+        open={rerunDlg}
+        title={columns ? `重新识别第 ${cur?.pageNumber} 页` : `识别第 ${cur?.pageNumber} 页`}
+        desc={
+          columns
+            ? '会再调用一次识别模型（产生费用），并覆盖这一页现有的文字和你做过的修改。可以换一个模型试试。'
+            : '失败就是失败，不会自动重试。可以换一个模型再识别这一页。'
+        }
+        confirmText="开始识别"
+        currentModelId={task.ocrModelId}
+        pageCount={1}
+        onClose={() => setRerunDlg(false)}
+        onOpenSetup={onOpenSetup}
+        onConfirm={(modelId) => recognizeAgain(modelId)}
+      />
 
       {finishDlg && (
         <Modal onClose={() => setFinishDlg(false)}>
@@ -866,6 +893,10 @@ interface CanvasProps {
   onlyPending: boolean;
   textOpacity: number;
   setTextOpacity: (v: number) => void;
+  layoutMode: LayoutMode;
+  setLayoutMode: (m: LayoutMode) => void;
+  hover: Sel;
+  setHover: (s: Sel) => void;
   zoom: number;
   sel: Sel;
   setSel: (s: Sel) => void;
@@ -880,6 +911,8 @@ interface CanvasProps {
   onRecognize: () => void;
 }
 
+const sameSel = (a: Sel, b: Sel) => !!a && !!b && a.col === b.col && a.idx === b.idx;
+
 const PageCanvas: React.FC<CanvasProps> = ({
   page,
   columns,
@@ -888,6 +921,10 @@ const PageCanvas: React.FC<CanvasProps> = ({
   onlyPending,
   textOpacity,
   setTextOpacity,
+  layoutMode,
+  setLayoutMode,
+  hover,
+  setHover,
   zoom,
   sel,
   setSel,
@@ -904,6 +941,9 @@ const PageCanvas: React.FC<CanvasProps> = ({
   const boxRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 800, h: 600 });
   const [natural, setNatural] = useState({ w: page.width || 0, h: page.height || 0 });
+  /** 高亮是从哪一侧触发的：从文字侧移上去时，图要自动滚到对应位置；从图上移时，文字侧滚到对应字 */
+  const hoverFrom = useRef<'img' | 'text'>('img');
+  const compare = layoutMode === 'compare';
 
   useEffect(() => {
     const el = boxRef.current;
@@ -913,69 +953,264 @@ const PageCanvas: React.FC<CanvasProps> = ({
     const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null;
     ro?.observe(el);
     return () => ro?.disconnect();
-  }, []);
+  }, [layoutMode]);
 
   const W = natural.w || page.width || 1000;
   const H = natural.h || page.height || 1400;
-  const fit = Math.min((size.w - 48) / W, (size.h - 48) / H);
+  // 对照模式下左边只放图，按宽度铺满更好认字
+  const fit = compare ? Math.min((size.w - 24) / W, (size.h - 24) / H * 1.6) : Math.min((size.w - 48) / W, (size.h - 48) / H);
   const scale = Math.max(0.05, fit) * zoom;
   const dw = Math.round(W * scale);
   const dh = Math.round(H * scale);
 
+  const active: Sel = hover || sel;
+  const activeChar = active && columns?.[active.col]?.chars[active.idx];
   const selChar = sel && columns?.[sel.col]?.chars[sel.idx];
 
-  // 选中字时让它出现在视野内
+  const scrollImgTo = useCallback(
+    (ch: OcrChar, smooth = true) => {
+      const el = boxRef.current;
+      const wrap = el?.firstElementChild as HTMLElement | null;
+      if (!el || !wrap) return;
+      const cx = ((ch.b[0] + ch.b[2]) / 2) * scale + wrap.offsetLeft;
+      const cy = ((ch.b[1] + ch.b[3]) / 2) * scale + wrap.offsetTop;
+      const m = 60;
+      if (cx < el.scrollLeft + m || cx > el.scrollLeft + el.clientWidth - m || cy < el.scrollTop + m || cy > el.scrollTop + el.clientHeight - m) {
+        el.scrollTo({ left: cx - el.clientWidth / 2, top: cy - el.clientHeight / 2, behavior: smooth ? 'smooth' : 'auto' });
+      }
+    },
+    [scale],
+  );
+
+  // 选中（点击/跳到下一个）时让它出现在视野内
   useEffect(() => {
-    if (!sel || !selChar || !boxRef.current) return;
-    const el = boxRef.current;
-    const wrap = el.firstElementChild as HTMLElement | null;
-    if (!wrap) return;
-    const cx = (selChar.b[0] + selChar.b[2]) / 2 * scale + wrap.offsetLeft;
-    const cy = (selChar.b[1] + selChar.b[3]) / 2 * scale + wrap.offsetTop;
-    if (cx < el.scrollLeft || cx > el.scrollLeft + el.clientWidth || cy < el.scrollTop || cy > el.scrollTop + el.clientHeight) {
-      el.scrollTo({ left: cx - el.clientWidth / 2, top: cy - el.clientHeight / 2, behavior: 'smooth' });
-    }
+    if (selChar) scrollImgTo(selChar);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sel?.col, sel?.idx]);
+
+  // 鼠标移到文字侧时，图自动滚到对应位置（稍作延迟，快速划过不抖动）
+  useEffect(() => {
+    if (!hover || hoverFrom.current !== 'text' || !activeChar) return;
+    const t = window.setTimeout(() => scrollImgTo(activeChar), 120);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hover?.col, hover?.idx]);
+
+  const onHoverImg = (s: Sel) => {
+    hoverFrom.current = 'img';
+    setHover(s);
+  };
+  const onHoverText = (s: Sel) => {
+    hoverFrom.current = 'text';
+    setHover(s);
+  };
+
+  const imagePane = (
+    <div ref={boxRef} className="flex-1 overflow-auto relative min-w-0">
+      <div
+        className="relative mx-auto bg-white shadow-[0_8px_40px_rgba(0,0,0,0.12)] rounded-sm"
+        style={{ width: dw, height: dh, marginTop: compare ? 56 : Math.max(56, (size.h - dh) / 2), marginBottom: 32 }}
+        onClick={() => setSel(null)}
+      >
+        <img
+          src={page.imageUrl}
+          alt={`第 ${page.pageNumber} 页`}
+          draggable={false}
+          onLoad={(e) => {
+            const im = e.currentTarget;
+            if (im.naturalWidth && (im.naturalWidth !== natural.w || im.naturalHeight !== natural.h)) {
+              setNatural({ w: im.naturalWidth, h: im.naturalHeight });
+            }
+          }}
+          className="absolute inset-0 w-full h-full object-fill pointer-events-none"
+        />
+
+        {loading && (
+          <div className="absolute inset-0 flex items-center justify-center bg-white/60 text-xs text-[#86868B]">
+            <Sparkles className="w-4 h-4 animate-spin text-[#0071E3] mr-2" />
+            加载识别结果…
+          </div>
+        )}
+
+        {!loading && !columns && page.status === 'processing' && (
+          <div className="absolute inset-0 flex items-center justify-center bg-white/55">
+            <div className="bg-white/95 border border-[#0071E3]/20 rounded-2xl px-6 py-5 text-center shadow-lg max-w-[280px]">
+              <Sparkles className="w-6 h-6 animate-spin text-[#0071E3] mx-auto mb-2" />
+              <p className="text-[13px] font-semibold text-[#1D1D1F] ocr-breathe">正在识别这一页…</p>
+              <p className="text-[11px] text-[#86868B] mt-1.5 leading-relaxed">通常要 20～90 秒，识别好会自动显示。可以先看别的页。</p>
+              <div className="w-full bg-[#E5E5EA] rounded-full h-1 overflow-hidden mt-3">
+                <div className="bg-[#0071E3] ocr-flowing h-full w-full rounded-full" />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {!loading && !columns && page.status !== 'processing' && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <div className="bg-white/90 border border-black/[0.08] rounded-2xl px-5 py-4 text-center shadow-lg">
+              <p className="text-[13px] font-semibold text-[#1D1D1F]">这一页还没有识别结果</p>
+              <button
+                disabled={busy}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRecognize();
+                }}
+                className="mt-3 h-9 px-4 text-xs font-semibold rounded-lg bg-[#0071E3] text-white cursor-pointer disabled:opacity-60"
+              >
+                {busy ? '提交中…' : '识别本页'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* 高亮的这一列：淡淡的虚线框，帮助看清是哪一竖行 */}
+        {columns && active && columns[active.col] && (
+          <div
+            className="absolute border border-dashed border-[#FF9500]/60 bg-[#FF9500]/[0.05] rounded-sm pointer-events-none"
+            style={{
+              left: columns[active.col].box[0] * scale - 3,
+              top: columns[active.col].box[1] * scale - 3,
+              width: (columns[active.col].box[2] - columns[active.col].box[0]) * scale + 6,
+              height: (columns[active.col].box[3] - columns[active.col].box[1]) * scale + 6,
+            }}
+          />
+        )}
+
+        {/* 逐字格子。叠字模式：识别文字压在对应字上；对照模式：只在移上去/选中/待核对时描边高亮 */}
+        {columns &&
+          columns.map((col, ci) =>
+            col.chars.map((ch, k) => {
+              const [x1, y1, x2, y2] = ch.b;
+              const w = Math.max(6, (x2 - x1) * scale);
+              const h = Math.max(6, (y2 - y1) * scale);
+              const pending = isPending(ch);
+              const isSel = sameSel(sel, { col: ci, idx: k });
+              const isHover = sameSel(hover, { col: ci, idx: k });
+              const textOn = !compare && showText;
+              const dim = onlyPending && !pending && !isSel && !isHover;
+              const tone = !textOn
+                ? pending
+                  ? ch.t === '□'
+                    ? 'border-[#FF3B30]/70 bg-[#FF3B30]/10'
+                    : 'border-[#FF9500]/80 bg-[#FF9500]/15'
+                  : 'border-transparent hover:border-[#0071E3]/40'
+                : ch.t === '□'
+                  ? 'bg-[#FF3B30]/20 border-[#FF3B30]/60 text-[#C62828]'
+                  : pending
+                    ? 'bg-[#FF9500]/25 border-[#FF9500]/70 text-[#B45309]'
+                    : ch.e === 1
+                      ? 'bg-[#34C759]/18 border-[#34C759]/55 text-[#166534]'
+                      : 'bg-[#0071E3]/12 border-[#0071E3]/35 text-[#0A4FA8]';
+              return (
+                <div
+                  key={ci + '-' + k}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSel({ col: ci, idx: k });
+                  }}
+                  onMouseEnter={() => onHoverImg({ col: ci, idx: k })}
+                  onMouseLeave={() => setHover(null)}
+                  className={`absolute border rounded-[3px] flex items-center justify-center cursor-pointer transition-colors ${tone} ${
+                    isSel ? 'ring-2 ring-[#0071E3] z-10 !bg-[#0071E3]/25' : ''
+                  } ${isHover ? '!bg-[#FFD60A]/45 !border-[#FF9500] ring-2 ring-[#FF9500] z-20' : ''} ${dim ? 'opacity-25' : ''}`}
+                  style={{ left: x1 * scale, top: y1 * scale, width: w, height: h }}
+                  title={pending ? ch.r || '待核对：点击修改' : '点击修改'}
+                >
+                  {textOn ? (
+                    <span style={{ fontFamily: FONT, fontSize: Math.max(8, Math.min(w, h) * 0.82), lineHeight: 1, fontWeight: 600, opacity: textOpacity }}>
+                      {ch.t}
+                    </span>
+                  ) : null}
+                </div>
+              );
+            }),
+          )}
+
+        {columns && sel && selChar && (
+          <CharEditor
+            key={`${sel.col}-${sel.idx}`}
+            ch={selChar}
+            pos={{ left: selChar.b[0] * scale, top: selChar.b[1] * scale, w: (selChar.b[2] - selChar.b[0]) * scale, h: (selChar.b[3] - selChar.b[1]) * scale }}
+            bounds={{ w: dw, h: dh }}
+            label={`第 ${sel.col + 1} 列第 ${sel.idx + 1} 字`}
+            onCommit={(t, next) => {
+              commitChar(sel.col, sel.idx, t);
+              if (next) setSel(stepSel(sel, 1));
+            }}
+            onMove={(dir) => setSel(stepSel(sel, dir))}
+            onRemove={() => removeChar(sel.col, sel.idx)}
+            onInsert={() => insertAfter(sel.col, sel.idx)}
+            onClose={() => setSel(null)}
+          />
+        )}
+      </div>
+    </div>
+  );
 
   return (
     <div className="flex-1 flex flex-col min-w-0 relative apple-studio-canvas">
       {/* 工具条 */}
-      <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1 p-1 apple-glass-heavy border border-black/[0.08] rounded-full shadow-[0_8px_24px_rgba(0,0,0,0.06)]">
-        <button
-          onClick={() => setShowText(!showText)}
-          className={`px-3 py-1 text-xs font-medium rounded-full transition-all flex items-center gap-1.5 cursor-pointer ${
-            showText ? 'bg-[#0071E3] text-white shadow-xs' : 'text-[#1D1D1F] hover:bg-black/[0.05]'
-          }`}
-          title="在图片上显示/隐藏识别出的文字"
-        >
-          {showText ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
-          识别文字
-        </button>
+      <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1 p-1 apple-glass-heavy border border-black/[0.08] rounded-full shadow-[0_8px_24px_rgba(0,0,0,0.06)]">
+        <div className="flex items-center p-0.5 bg-[#E5E5EA]/70 rounded-full">
+          <button
+            onClick={() => setLayoutMode('compare')}
+            className={`px-3 py-1 text-xs rounded-full transition-all flex items-center gap-1.5 cursor-pointer ${
+              compare ? 'bg-white text-[#1D1D1F] shadow-xs font-semibold' : 'text-[#6E6E73] hover:text-[#1D1D1F] font-medium'
+            }`}
+            title="左边是识别用的图，右边是识别文字；鼠标移到文字上，图里对应的字会高亮"
+          >
+            <Columns className="w-3 h-3 text-[#0071E3]" />
+            左图右文
+          </button>
+          <button
+            onClick={() => setLayoutMode('overlay')}
+            className={`px-3 py-1 text-xs rounded-full transition-all flex items-center gap-1.5 cursor-pointer ${
+              !compare ? 'bg-white text-[#1D1D1F] shadow-xs font-semibold' : 'text-[#6E6E73] hover:text-[#1D1D1F] font-medium'
+            }`}
+            title="识别文字直接叠在图上对应的字的位置"
+          >
+            <Layers className="w-3 h-3 text-[#0071E3]" />
+            叠在图上
+          </button>
+        </div>
+        {!compare ? (
+          <>
+            <button
+              onClick={() => setShowText(!showText)}
+              className={`px-3 py-1 text-xs font-medium rounded-full transition-all flex items-center gap-1.5 cursor-pointer ${
+                showText ? 'bg-[#0071E3] text-white shadow-xs' : 'text-[#1D1D1F] hover:bg-black/[0.05]'
+              }`}
+              title="在图片上显示/隐藏识别出的文字"
+            >
+              {showText ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
+              文字
+            </button>
+            {showText ? (
+              <label className="flex items-center gap-1.5 px-1.5 text-[11px] text-[#6E6E73]" title="调淡后可以透过识别文字看到原图的字">
+                浓淡
+                <input
+                  type="range"
+                  min={0.2}
+                  max={1}
+                  step={0.05}
+                  value={textOpacity}
+                  onChange={(e) => setTextOpacity(Number(e.target.value))}
+                  className="w-14 accent-[#0071E3] cursor-pointer"
+                />
+              </label>
+            ) : null}
+          </>
+        ) : null}
         <button
           onClick={() => setOnlyPending(!onlyPending)}
           className={`px-3 py-1 text-xs font-medium rounded-full transition-all flex items-center gap-1.5 cursor-pointer ${
             onlyPending ? 'bg-[#FF9500] text-white shadow-xs' : 'text-[#1D1D1F] hover:bg-black/[0.05]'
           }`}
-          title="只高亮待核对的字，便于快速过一遍"
+          title="只突出待核对的字，便于快速过一遍"
         >
           <AlertTriangle className="w-3 h-3" />
           只看待核对
         </button>
-        {showText ? (
-          <label className="flex items-center gap-1.5 px-1.5 text-[11px] text-[#6E6E73]" title="调淡后可以透过识别文字看到原图的字">
-            浓淡
-            <input
-              type="range"
-              min={0.2}
-              max={1}
-              step={0.05}
-              value={textOpacity}
-              onChange={(e) => setTextOpacity(Number(e.target.value))}
-              className="w-16 accent-[#0071E3] cursor-pointer"
-            />
-          </label>
-        ) : null}
         <div className="h-4 w-px bg-black/[0.08] mx-1" />
         <div className="flex items-center gap-0.5 text-[#1D1D1F]">
           <button onClick={() => setZoom((z) => Math.max(0.6, +(z - 0.2).toFixed(2)))} className="p-1 hover:bg-black/[0.05] rounded-full text-[#6E6E73] hover:text-[#1D1D1F] cursor-pointer">
@@ -991,121 +1226,155 @@ const PageCanvas: React.FC<CanvasProps> = ({
         </div>
       </div>
 
-      <div ref={boxRef} className="flex-1 overflow-auto relative">
-        <div
-          className="relative mx-auto bg-white shadow-[0_8px_40px_rgba(0,0,0,0.12)] rounded-sm"
-          style={{ width: dw, height: dh, marginTop: Math.max(56, (size.h - dh) / 2), marginBottom: 32 }}
-          onClick={() => setSel(null)}
-        >
-          <img
-            src={page.imageUrl}
-            alt={`第 ${page.pageNumber} 页`}
-            draggable={false}
-            onLoad={(e) => {
-              const im = e.currentTarget;
-              if (im.naturalWidth && (im.naturalWidth !== natural.w || im.naturalHeight !== natural.h)) {
-                setNatural({ w: im.naturalWidth, h: im.naturalHeight });
-              }
-            }}
-            className="absolute inset-0 w-full h-full object-fill pointer-events-none"
+      {compare ? (
+        <div className="flex-1 flex min-h-0">
+          {imagePane}
+          <TextReader
+            columns={columns}
+            hover={hover}
+            sel={sel}
+            onlyPending={onlyPending}
+            onHover={onHoverText}
+            onLeave={() => setHover(null)}
+            onPick={(s) => setSel(s)}
+            status={page.status}
           />
-
-          {loading && (
-            <div className="absolute inset-0 flex items-center justify-center bg-white/60 text-xs text-[#86868B]">
-              <Sparkles className="w-4 h-4 animate-spin text-[#0071E3] mr-2" />
-              加载识别结果…
-            </div>
-          )}
-
-          {!loading && !columns && page.status === 'processing' && (
-            <div className="absolute inset-0 flex items-center justify-center bg-white/55">
-              <div className="bg-white/95 border border-[#0071E3]/20 rounded-2xl px-6 py-5 text-center shadow-lg max-w-[280px]">
-                <Sparkles className="w-6 h-6 animate-spin text-[#0071E3] mx-auto mb-2" />
-                <p className="text-[13px] font-semibold text-[#1D1D1F] ocr-breathe">正在识别这一页…</p>
-                <p className="text-[11px] text-[#86868B] mt-1.5 leading-relaxed">通常要 20～90 秒，识别好会自动显示。可以先看别的页。</p>
-                <div className="w-full bg-[#E5E5EA] rounded-full h-1 overflow-hidden mt-3">
-                  <div className="bg-[#0071E3] ocr-flowing h-full w-full rounded-full" />
-                </div>
-              </div>
-            </div>
-          )}
-
-          {!loading && !columns && page.status !== 'processing' && (
-            <div className="absolute inset-0 flex items-center justify-center">
-              <div className="bg-white/90 border border-black/[0.08] rounded-2xl px-5 py-4 text-center shadow-lg">
-                <p className="text-[13px] font-semibold text-[#1D1D1F]">这一页还没有识别结果</p>
-                <button
-                  disabled={busy}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onRecognize();
-                  }}
-                  className="mt-3 h-9 px-4 text-xs font-semibold rounded-lg bg-[#0071E3] text-white cursor-pointer disabled:opacity-60"
-                >
-                  {busy ? '提交中…' : '识别本页'}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* 逐字悬浮层：每个字压在图上对应字的位置 */}
-          {columns && showText &&
-            columns.map((col, ci) =>
-              col.chars.map((ch, k) => {
-                const [x1, y1, x2, y2] = ch.b;
-                const w = Math.max(6, (x2 - x1) * scale);
-                const h = Math.max(6, (y2 - y1) * scale);
-                const pending = isPending(ch);
-                const isSel = !!sel && sel.col === ci && sel.idx === k;
-                const dim = onlyPending && !pending && !isSel;
-                const tone =
-                  ch.t === '□'
-                    ? 'bg-[#FF3B30]/20 border-[#FF3B30]/60 text-[#C62828]'
-                    : pending
-                      ? 'bg-[#FF9500]/25 border-[#FF9500]/70 text-[#B45309]'
-                      : ch.e === 1
-                        ? 'bg-[#34C759]/18 border-[#34C759]/55 text-[#166534]'
-                        : 'bg-[#0071E3]/12 border-[#0071E3]/35 text-[#0A4FA8]';
-                return (
-                  <div
-                    key={ci + '-' + k}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setSel({ col: ci, idx: k });
-                    }}
-                    className={`absolute border rounded-[3px] flex items-center justify-center cursor-pointer transition-colors hover:brightness-95 ${tone} ${
-                      isSel ? 'ring-2 ring-[#0071E3] z-10 !bg-[#0071E3]/25' : ''
-                    } ${dim ? 'opacity-25' : ''}`}
-                    style={{ left: x1 * scale, top: y1 * scale, width: w, height: h }}
-                    title={pending ? ch.r || '待核对：点击修改' : '点击修改'}
-                  >
-                    <span style={{ fontFamily: FONT, fontSize: Math.max(8, Math.min(w, h) * 0.82), lineHeight: 1, fontWeight: 600, opacity: textOpacity }}>{ch.t}</span>
-                  </div>
-                );
-              }),
-            )}
-
-          {columns && sel && selChar && (
-            <CharEditor
-              key={`${sel.col}-${sel.idx}`}
-              ch={selChar}
-              pos={{ left: selChar.b[0] * scale, top: selChar.b[1] * scale, w: (selChar.b[2] - selChar.b[0]) * scale, h: (selChar.b[3] - selChar.b[1]) * scale }}
-              bounds={{ w: dw, h: dh }}
-              label={`第 ${sel.col + 1} 列第 ${sel.idx + 1} 字`}
-              onCommit={(t, next) => {
-                commitChar(sel.col, sel.idx, t);
-                if (next) {
-                  const n = stepSel(sel, 1);
-                  setSel(n);
-                }
-              }}
-              onMove={(dir) => setSel(stepSel(sel, dir))}
-              onRemove={() => removeChar(sel.col, sel.idx)}
-              onInsert={() => insertAfter(sel.col, sel.idx)}
-              onClose={() => setSel(null)}
-            />
-          )}
         </div>
+      ) : (
+        imagePane
+      )}
+
+      {/* 放大镜：鼠标指着（或选中）某个字时，左下角把这个字在图上的样子放大，和识别结果并排 */}
+      {columns && active && activeChar ? <Loupe page={page} ch={activeChar} pos={`第 ${active.col + 1} 列 · 第 ${active.idx + 1} 字`} /> : null}
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// 右侧文字区（左图右文模式）：竖排、右到左，和书上的排法一致
+// ---------------------------------------------------------------------------
+
+const TextReader: React.FC<{
+  columns: OcrColumn[] | null;
+  hover: Sel;
+  sel: Sel;
+  onlyPending: boolean;
+  onHover: (s: Sel) => void;
+  onLeave: () => void;
+  onPick: (s: Sel) => void;
+  status: string;
+}> = ({ columns, hover, sel, onlyPending, onHover, onLeave, onPick, status }) => {
+  // 图上悬停某个字时，文字区滚到对应位置
+  const wrapRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!hover) return;
+    const el = document.getElementById(`tc-${hover.col}-${hover.idx}`);
+    const wrap = wrapRef.current;
+    if (!el || !wrap) return;
+    const a = el.getBoundingClientRect();
+    const b = wrap.getBoundingClientRect();
+    if (a.left < b.left + 20 || a.right > b.right - 20 || a.top < b.top + 50 || a.bottom > b.bottom - 20) {
+      el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+    }
+  }, [hover?.col, hover?.idx]);
+
+  return (
+    <div className="w-[42%] max-w-[560px] min-w-[300px] shrink-0 flex flex-col border-l border-black/[0.06] bg-[#FBFAF6]">
+      <div className="h-[52px] shrink-0" />
+      <div ref={wrapRef} className="flex-1 overflow-auto px-5 pb-8">
+        {!columns ? (
+          <div className="h-full flex items-center justify-center text-xs text-[#86868B]">
+            {status === 'processing' ? '识别完成后文字会显示在这里' : '这一页还没有识别结果'}
+          </div>
+        ) : (
+          <div className="mx-auto w-max flex flex-row-reverse gap-3 items-start" style={{ fontFamily: FONT }}>
+            {columns.map((c, ci) => (
+              <div key={ci} className="flex flex-col items-center pt-1">
+                <span className="block text-[10px] text-[#B0B0B6] tabular-nums select-none mb-1">{ci + 1}</span>
+                {c.chars.map((ch, k) => {
+                  const pending = isPending(ch);
+                  const isSel = sameSel(sel, { col: ci, idx: k });
+                  const isHover = sameSel(hover, { col: ci, idx: k });
+                  const dim = onlyPending && !pending && !isSel && !isHover;
+                  return (
+                    <span
+                      key={k}
+                      id={`tc-${ci}-${k}`}
+                      onMouseEnter={() => onHover({ col: ci, idx: k })}
+                      onMouseLeave={onLeave}
+                      onClick={() => onPick({ col: ci, idx: k })}
+                      className={`block text-[22px] leading-[1.2] w-[30px] text-center rounded-md cursor-pointer select-none transition-colors px-0.5 ${
+                        isHover
+                          ? 'bg-[#FFD60A]/60 text-[#1D1D1F] ring-2 ring-[#FF9500]'
+                          : isSel
+                            ? 'bg-[#0071E3] text-white'
+                            : ch.t === '□'
+                              ? 'bg-[#FF3B30]/15 text-[#C62828]'
+                              : pending
+                                ? 'bg-[#FF9500]/22 text-[#B45309]'
+                                : ch.e === 1
+                                  ? 'text-[#248A3D] hover:bg-black/[0.06]'
+                                  : 'text-[#1D1D1F] hover:bg-black/[0.06]'
+                      } ${dim ? 'opacity-30' : ''}`}
+                    >
+                      {ch.t}
+                    </span>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// 放大镜：图上这个字的放大图 ↔ 识别结果
+// ---------------------------------------------------------------------------
+
+const Loupe: React.FC<{ page: OcrPage; ch: OcrChar; pos: string }> = ({ page, ch, pos }) => {
+  const [x1, y1, x2, y2] = ch.b;
+  const cw = Math.max(4, x2 - x1);
+  const chh = Math.max(4, y2 - y1);
+  // 取字格外扩一圈，连同上下相邻的笔画一起放大，便于判断
+  const pad = Math.max(cw, chh) * 0.35;
+  const rx = x1 - pad;
+  const ry = y1 - pad;
+  const rw = cw + pad * 2;
+  const rh = chh + pad * 2;
+  const box = 120;
+  const k = box / Math.max(rw, rh);
+  const W = page.width || 1000;
+  const H = page.height || 1400;
+  return (
+    <div className="absolute left-4 bottom-4 z-30 flex items-stretch gap-3 bg-white/95 backdrop-blur border border-black/[0.1] rounded-2xl shadow-[0_12px_40px_rgba(0,0,0,0.2)] p-2.5 pointer-events-none">
+      <div className="flex flex-col items-center">
+        <div
+          className="rounded-lg border border-black/[0.1] bg-white"
+          style={{
+            width: rw * k,
+            height: rh * k,
+            backgroundImage: `url(${page.imageUrl})`,
+            backgroundRepeat: 'no-repeat',
+            backgroundSize: `${W * k}px ${H * k}px`,
+            backgroundPosition: `${-rx * k}px ${-ry * k}px`,
+          }}
+        />
+        <span className="text-[10px] text-[#86868B] mt-1">图上原字</span>
+      </div>
+      <div className="flex flex-col items-center justify-center min-w-[64px]">
+        <span
+          className={`w-[72px] h-[72px] rounded-xl flex items-center justify-center text-[44px] leading-none ${
+            ch.t === '□' ? 'bg-[#FF3B30]/12 text-[#C62828]' : isPending(ch) ? 'bg-[#FF9500]/20 text-[#B45309]' : 'bg-[#0071E3]/10 text-[#0A4FA8]'
+          }`}
+          style={{ fontFamily: FONT }}
+        >
+          {ch.t}
+        </span>
+        <span className="text-[10px] text-[#86868B] mt-1">识别为</span>
+        <span className="text-[10px] text-[#B0B0B6]">{pos}</span>
       </div>
     </div>
   );

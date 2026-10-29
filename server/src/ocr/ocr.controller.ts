@@ -35,8 +35,8 @@ export class OcrController {
   }
 
   @Post(':id/start')
-  start(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
-    return this.ocr.start(req.user.id, id);
+  start(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Body() body: any) {
+    return this.ocr.start(req.user.id, id, body || {});
   }
 
   @Get(':id/pages')
@@ -78,8 +78,13 @@ export class OcrController {
 
   /** 单页重新识别（会再次产生费用，覆盖人工修改） */
   @Post(':id/pages/:pageId/recognize')
-  recognize(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Param('pageId', ParseIntPipe) pageId: number) {
-    return this.ocr.recognizePage(req.user.id, id, pageId);
+  recognize(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('pageId', ParseIntPipe) pageId: number,
+    @Body() body: any,
+  ) {
+    return this.ocr.recognizePage(req.user.id, id, pageId, body || {});
   }
 
   @Post(':id/confirm')

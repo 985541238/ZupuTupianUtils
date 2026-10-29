@@ -175,7 +175,7 @@ export class AliyunService {
     if (this.mock) return this.mockOcr(imagePath);
     const cfg = await this.assertReady(model);
     const dataUri = await this.toDataUri(imagePath, 2048);
-    const build = (lean: boolean) => {
+    const build = () => {
       const body: any = {
         model: model.model,
         messages: [
@@ -190,52 +190,22 @@ export class AliyunService {
         stream: true,
         stream_options: { include_usage: true },
       };
-      // enable_thinking / thinking_budget 是阿里云百炼的扩展参数；硅基流动也支持 enable_thinking（识别不需要长思考，关掉快很多）
+      // enable_thinking / thinking_budget 是阿里云百炼的扩展参数，其他平台不传
       if (!cfg.platform || cfg.platform === 'aliyun') {
         body.enable_thinking = !!model.enableThinking;
         if (model.enableThinking) body.thinking_budget = 81920;
-      } else if (cfg.platform === 'siliconflow' && !lean && !model.enableThinking) {
-        body.enable_thinking = false;
       }
       return body;
     };
 
-    let lean = false;
-    let lastErr: any = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const { content, usage } = await this.streamChat(cfg, build(lean));
-        const u = { ...usage, images: 1 };
-        const result = parseOcr(content);
-        if (!result.columns.length) {
-          throw new OcrParseError('模型没有返回可用的识别结果（它可能不支持看图，请换成带视觉的模型，如 GLM-4.5V、Qwen-VL）。', u, content);
-        }
-        return { result, usage: u, raw: content };
-      } catch (e: any) {
-        lastErr = e;
-        if (e instanceof OcrParseError) throw e; // 已经出结果（已计费），不重复调用
-        if (e instanceof AiConfigError) {
-          // 不认识 enable_thinking 之类的参数：去掉再试一次（400 不计费）
-          if (e.kind === 'param' && !lean && cfg.platform === 'siliconflow') {
-            lean = true;
-            continue;
-          }
-          // 限流：等几秒再试，别让整页白白失败
-          if (e.kind === 'quota' && attempt < 2) {
-            await new Promise((r) => setTimeout(r, 4000 * (attempt + 1)));
-            continue;
-          }
-          throw e;
-        }
-        // 网络抖动 / 平台 5xx / 卡住被放弃：自动再试一次
-        if (attempt < 1 && /连不上|服务暂时出错|长时间没有返回|连接中断/.test(String(e?.message || ''))) {
-          await new Promise((r) => setTimeout(r, 1500));
-          continue;
-        }
-        throw e;
-      }
+    // 不自动重试：失败就是失败，由用户决定是否重新识别（可换模型），避免重复计费
+    const { content, usage } = await this.streamChat(cfg, build());
+    const u = { ...usage, images: 1 };
+    const result = parseOcr(content);
+    if (!result.columns.length) {
+      throw new OcrParseError('模型没有返回可用的识别结果（它可能不支持看图，请换成带视觉的模型，如 GLM-4.5V、Qwen-VL）。', u, content);
     }
-    throw lastErr || new Error('识别失败');
+    return { result, usage: u, raw: content };
   }
 
   /** 只发一句文字，验证 Key 和地址可用。不在此处走 AI_MOCK 假成功；由调用方先校验 Key / Mock。 */
