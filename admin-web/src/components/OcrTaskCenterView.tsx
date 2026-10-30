@@ -346,29 +346,6 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                             </>
                           ) : null}
                         </div>
-                        {(isProcessing || task.status === 'reviewing' || task.status === 'completed') && (
-                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] leading-relaxed">
-                            {isProcessing ? (
-                              <span className="text-[#0071E3] font-semibold tabular-nums">
-                                已识别 {task.doneCount}/{task.totalCount} 页 · {pct}%
-                              </span>
-                            ) : (
-                              <>
-                                <span className="text-[#1D1D1F] tabular-nums">
-                                  已确认 <b className="font-semibold">{task.confirmedCount}</b>/{task.totalCount} 页
-                                </span>
-                                {task.charCount ? <span className="text-[#6E6E73] tabular-nums">共 {task.charCount} 字</span> : null}
-                                {task.status === 'reviewing' && task.uncertainCount > 0 ? (
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#FF9500]/12 text-[#C93400]">
-                                    <AlertTriangle className="w-3 h-3" />
-                                    {task.uncertainCount} 处待核对
-                                  </span>
-                                ) : null}
-                              </>
-                            )}
-                          </div>
-                        )}
-
                         {isProcessing && (
                           <div className="pt-1 max-w-xl">
                             <div className="flex items-center justify-between mb-1 gap-3">
@@ -393,48 +370,55 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                           </div>
                         )}
 
-                        {!isProcessing && (task.errorMessage || task.staleCount) ? (
-                          <div
-                            className={`rounded-xl border px-3 py-2 text-[12.5px] leading-relaxed max-w-2xl space-y-1 ${
-                              task.status === 'failed'
-                                ? 'bg-[#FFF5F5] border-[#FF3B30]/20 text-[#C62828]'
-                                : 'bg-[#FFF8EC] border-[#FF9500]/25 text-[#9A5B00]'
-                            }`}
-                          >
-                            {task.errorMessage ? (
-                              <div className="flex items-start gap-1.5">
-                                <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                                <span className="flex-1 min-w-0">{task.errorMessage.split('\n详情：')[0]}</span>
-                                {onShowProblem && (task.errorCode || inferErrorCode(task.errorMessage)) ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => onShowProblem(task)}
-                                    className="shrink-0 px-2 py-0.5 rounded-full bg-white border border-current/30 font-semibold cursor-pointer hover:bg-white/70"
-                                  >
-                                    怎么处理？
-                                  </button>
-                                ) : null}
-                              </div>
+                        {!isProcessing && (task.status === 'reviewing' || task.status === 'completed') && task.totalCount > 0 && (
+                          <div className="flex items-center gap-3 pt-0.5 max-w-xl">
+                            <div className="w-44 sm:w-56 bg-[#E5E5EA] rounded-full h-1.5 overflow-hidden shrink-0">
+                              <div className="bg-[#34C759] h-full rounded-full transition-all duration-300" style={{ width: `${reviewPct}%` }} />
+                            </div>
+                            <span className="text-xs text-[#6E6E73] tabular-nums whitespace-nowrap">
+                              已确认 <b className="font-semibold text-[#1D1D1F]">{task.confirmedCount}</b>/{task.totalCount} 页
+                              {task.charCount ? ` · ${task.charCount} 字` : ''}
+                            </span>
+                          </div>
+                        )}
+
+                        {!isProcessing && (task.errorMessage || task.staleCount || task.failedCount || (task.status === 'reviewing' && task.uncertainCount > 0)) ? (
+                          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                            {task.failedCount || task.errorMessage ? (
+                              <span
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-[#FF3B30]/8 text-[#D70015]"
+                                title={task.errorMessage ? task.errorMessage.split('\n详情：')[0] : '可在审阅里对失败的页点「重新识别」'}
+                              >
+                                <span className="w-1.5 h-1.5 rounded-full bg-[#FF3B30]" />
+                                {task.failedCount ? `${task.failedCount} 页识别失败` : '识别出错'}
+                              </span>
                             ) : null}
                             {task.staleCount ? (
-                              <div
-                                className="flex items-start gap-1.5"
+                              <span
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-[#FF9500]/10 text-[#B25E00]"
                                 title="识别之后，图片处理里又重新调整保存过这些页的图片，进入审阅可按新图重新对位或重新识别"
                               >
-                                <RotateCcw className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                                <span>{task.staleCount} 页图片在图片处理中有更新，进入审阅后需重新对位</span>
-                              </div>
+                                <span className="w-1.5 h-1.5 rounded-full bg-[#FF9500]" />
+                                {task.staleCount} 页图片已更新
+                              </span>
+                            ) : null}
+                            {task.status === 'reviewing' && task.uncertainCount > 0 ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-[#0071E3]/8 text-[#0058B0]" title="识别把握不高的字，需要人工核对">
+                                <span className="w-1.5 h-1.5 rounded-full bg-[#0071E3]" />
+                                {task.uncertainCount} 处待核对
+                              </span>
+                            ) : null}
+                            {onShowProblem && task.errorMessage && (task.errorCode || inferErrorCode(task.errorMessage)) ? (
+                              <button
+                                type="button"
+                                onClick={() => onShowProblem(task)}
+                                className="px-2 py-1 text-xs font-semibold text-[#0071E3] hover:underline cursor-pointer"
+                              >
+                                怎么处理？
+                              </button>
                             ) : null}
                           </div>
                         ) : null}
-
-                        {!isProcessing && task.status === 'reviewing' && task.totalCount > 0 && (
-                          <div className="pt-1 max-w-xl">
-                            <div className="w-full bg-[#E5E5EA] rounded-full h-1 overflow-hidden">
-                              <div className="bg-[#0071E3] h-full rounded-full transition-all duration-300" style={{ width: `${reviewPct}%` }} />
-                            </div>
-                          </div>
-                        )}
                       </div>
                     </div>
 
