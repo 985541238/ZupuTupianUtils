@@ -1662,19 +1662,6 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                 <kbd className="ml-0.5 px-1 py-0.5 rounded bg-[#F5F5F7] border border-black/[0.06] text-[10px] font-mono text-[#86868B]">F</kbd>
               </button>
 
-              <button
-                onClick={() => void handleAiProcessPage()}
-                disabled={isProcessing || curAiBusy || !cleanModels.length}
-                className="px-3.5 py-2 bg-white hover:bg-[#AF52DE]/[0.06] active:scale-[0.98] text-[#8944AB] font-medium text-xs rounded-xl border border-[#AF52DE]/30 shadow-2xs transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
-                title={
-                  !cleanModels.length
-                    ? '还没有图片处理模型，请先到「模型配置」添加'
-                    : '用图生图大模型重新处理本页，算法结果会保留，可在右侧「大模型处理」里切回'
-                }
-              >
-                <Sparkles className={`w-4 h-4 ${curAiBusy ? 'animate-spin' : ''}`} />
-                <span>{curAiBusy ? '大模型处理中…' : '使用大模型处理'}</span>
-              </button>
 
               
               
