@@ -1,0 +1,70 @@
+# 本地/内网自测编排：MySQL 8 + 应用单容器
+#
+#   docker compose -f docker-compose.local.yml up -d --build
+#   访问 http://localhost:18080   （账号 admin / admin123）
+#
+# 冒烟通过后，用 deploy/docker/docker-compose.test.yml 上测试服务器
+# （那边用共享 MySQL，不再起 mysql 服务）。
+
+name: zupu-scan-local
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: zupu-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: zupu_scan
+      MYSQL_USER: zupu
+      MYSQL_PASSWORD: zupu123
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+    ports:
+      - "13306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 首次启动自动导入（原 sql/ 是 MySQL 5.6 语法，这份是 8.0 兼容版）
+      - ./deploy/docker/mysql/init-mysql8.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -proot123 --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zupu-scan:v1.0.0
+    container_name: zupu-app
+    restart: unless-stopped
+    platform: linux/amd64
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+      PORT: "8080"
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USER: zupu
+      DB_PASS: zupu123
+      DB_NAME: zupu_scan
+      JWT_SECRET: local-dev-only-change-me
+      JWT_EXPIRES: 7d
+      SETTINGS_SECRET: local-dev-only-change-me
+      # 本地联调不真实调用大模型（置空则走真实平台）
+      AI_MOCK: "1"
+    ports:
+      - "18080:8080"
+    volumes:
+      # 上传原图 / 处理结果，容器重建不丢
+      - app-data:/app/data
+
+volumes:
+  mysql-data:
+  app-data:

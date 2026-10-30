@@ -1,0 +1,46 @@
+# 依赖与产物（镜像内会重新安装/编译）
+**/node_modules/
+**/dist/
+**/build/
+**/.next/
+**/unpackage/
+
+# 版本库与 IDE
+.git/
+.gitignore
+.idea/
+.vscode/
+.workflow/
+
+# 本地产物与数据（绝不进镜像）
+data/
+logs/
+**/*.log
+*.tsbuildinfo
+coverage/
+.temp/
+.tmp/
+**/__pycache__/
+**/*.pyc
+.venv/
+venv/
+
+# 密钥 / 环境变量（值由部署侧注入）
+**/.env
+**/.env.*
+!**/.env.example
+server/src/config/prod.yml
+server/src/config/test.yml
+sql/credentials.txt
+
+# 大文件与样例
+image.png
+待处理的图片/
+待处理的图片 - 副本/
+_patches/
+docs/
+
+# 其他
+*.md
+!README.md
+LICENSE

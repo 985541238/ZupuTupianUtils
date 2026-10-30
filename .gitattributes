@@ -1,0 +1,8 @@
+# 构建/部署相关文件统一使用 LF
+# Windows 开发机 core.autocrlf=true 时检出会变 CRLF，
+# 而 Dockerfile、compose、Python 脚本在 Linux 上必须是 LF。
+# 只声明这些路径，不影响仓库内已有文件的检出状态。
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+docker-compose*.yml text eol=lf
+deploy/docker/** text eol=lf
