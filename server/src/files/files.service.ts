@@ -169,6 +169,7 @@ $owner.Close()
     const allowed = [
       this.projectRoot(),
       process.env.OUTPUT_ROOT || path.join(this.projectRoot(), 'data', 'output'),
+      this.uploadRoot(),
       this.defaultFolder(),
     ].map((p) => path.resolve(p).toLowerCase());
     const low = resolved.toLowerCase();
