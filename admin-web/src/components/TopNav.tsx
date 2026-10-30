@@ -14,6 +14,7 @@ interface TopNavProps {
   onBackToOcr?: () => void;
   user: User;
   onLogout: () => void;
+  onOpenAccount?: () => void;
   activeTaskName?: string;
   activeTaskProgress?: { reviewed: number; total: number };
 }
@@ -26,6 +27,7 @@ export const TopNav: React.FC<TopNavProps> = ({
   onBackToOcr,
   user,
   onLogout,
+  onOpenAccount,
   activeTaskName,
   activeTaskProgress,
 }) => {
@@ -93,7 +95,11 @@ export const TopNav: React.FC<TopNavProps> = ({
 
       {/* 右：用户（头像用姓名首字，不再依赖外网头像图片） */}
       <div className="flex items-center gap-3 shrink-0">
-        <div className="flex items-center gap-2">
+        <div
+          className={`flex items-center gap-2 ${onOpenAccount ? 'cursor-pointer rounded-xl px-1.5 py-1 -mx-1.5 hover:bg-black/[0.04]' : ''}`}
+          onClick={onOpenAccount}
+          title={onOpenAccount ? '修改账号 / 密码' : undefined}
+        >
           <div className="w-8 h-8 rounded-full bg-[#0071E3]/12 text-[#0071E3] flex items-center justify-center text-sm font-semibold">
             {name.slice(0, 1)}
           </div>

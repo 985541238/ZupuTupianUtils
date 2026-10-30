@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { User, Task, ScanItem, ProcessParams, OcrTask } from './types';
 import { LoginView } from './components/LoginView';
 import { TopNav, MainViewTab } from './components/TopNav';
+import { AccountDialog } from './components/AccountDialog';
 import { TaskCenterView } from './components/TaskCenterView';
 import { ReviewWorkbench } from './components/ReviewWorkbench';
 import { SettingsView } from './components/SettingsView';
@@ -47,6 +48,7 @@ export default function App() {
     return stored ? mapUser(stored) : null;
   });
 
+  const [accountOpen, setAccountOpen] = useState(false);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [currentTab, setCurrentTab] = useState<MainViewTab>('tasks');
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
@@ -507,6 +509,7 @@ export default function App() {
         onBackToOcr={goToOcr}
         user={currentUser}
         onLogout={handleLogout}
+        onOpenAccount={() => setAccountOpen(true)}
         activeTaskName={currentTab === 'ocrReview' ? activeOcr?.name : activeTask?.name}
         activeTaskProgress={
           currentTab === 'ocrReview'
@@ -671,6 +674,9 @@ export default function App() {
           void loadTasks();
         }}
       />
+      {accountOpen ? (
+        <AccountDialog user={currentUser} onClose={() => setAccountOpen(false)} onUpdated={(u) => setCurrentUser(mapUser(u))} />
+      ) : null}
     </div>
   );
 }

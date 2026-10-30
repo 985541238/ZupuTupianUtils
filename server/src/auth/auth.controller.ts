@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { JwtAuthGuard } from './jwt-auth.guard';
-import { IsString, MinLength } from 'class-validator';
+import { IsOptional, IsString, MinLength } from 'class-validator';
 
 class LoginDto {
   @IsString()
@@ -10,6 +10,23 @@ class LoginDto {
   @IsString()
   @MinLength(1)
   password: string;
+}
+
+class UpdateAccountDto {
+  @IsString()
+  currentPassword: string;
+
+  @IsOptional()
+  @IsString()
+  newUsername?: string;
+
+  @IsOptional()
+  @IsString()
+  newPassword?: string;
+
+  @IsOptional()
+  @IsString()
+  displayName?: string;
 }
 
 @Controller('auth')
@@ -25,5 +42,11 @@ export class AuthController {
   @Get('profile')
   profile(@Req() req: any) {
     return req.user;
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('account')
+  updateAccount(@Req() req: any, @Body() dto: UpdateAccountDto) {
+    return this.auth.updateAccount(Number(req.user.id), dto);
   }
 }

@@ -69,6 +69,9 @@ export const api = {
       body: JSON.stringify({ username, password }),
     }),
 
+  updateAccount: (data: { currentPassword: string; newUsername?: string; newPassword?: string; displayName?: string }) =>
+    request<{ token: string; user: any }>('/auth/account', { method: 'POST', body: JSON.stringify(data) }),
+
   getTasks: () => request<any[]>('/tasks'),
   createTask: (data: {
     name: string;
