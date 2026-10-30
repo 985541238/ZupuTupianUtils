@@ -315,10 +315,32 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     }
   };
 
+  const [nativePicking, setNativePicking] = useState(false);
+
   const openFolderPicker = async () => {
+    if (nativePicking) return;
+    // 先用系统自带窗口（只显示图片，选一张即取其所在文件夹）；不支持时退回网页内目录选择
+    setNativePicking(true);
+    try {
+      const r = await api.pickFolder(folderPath.trim() || undefined);
+      if (r?.path) {
+        setFolderPath(r.path);
+        try {
+          const data = await api.browseFolder(r.path);
+          setPageCountPreview(Number(data?.imageCount) || 0);
+        } catch {
+          setPageCountPreview(0);
+        }
+        return;
+      }
+      if (r?.cancelled) return;
+    } catch {
+      // 落到网页内选择
+    } finally {
+      setNativePicking(false);
+    }
     setShowFolderPicker(true);
     setBrowseError('');
-    // Start from typed path if any, else server default — do NOT write into main field until confirm.
     let start: string | undefined = folderPath.trim() || undefined;
     if (!start) {
       try {
@@ -981,7 +1003,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         className="px-3 py-2.5 text-xs font-semibold bg-[#E5E5EA] hover:bg-[#D1D1D6] text-[#1D1D1F] rounded-xl cursor-pointer whitespace-nowrap flex items-center gap-1.5"
                       >
                         <Folder className="w-3.5 h-3.5" />
-                        选择目录
+                        {nativePicking ? '请在弹出窗口中选择…' : '选择目录'}
                       </button>
                     </div>
                     <p className="text-[11px] text-[#86868B] mt-1">

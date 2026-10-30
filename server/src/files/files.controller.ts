@@ -1,4 +1,4 @@
-import { Controller, Get, Query, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Post, Query, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -20,6 +20,12 @@ export class FilesController {
   @Get('browse')
   browse(@Query('path') target?: string) {
     return this.files.browse(target);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('pick-folder')
+  pickFolder(@Body() body: { start?: string }) {
+    return this.files.pickFolder(body?.start);
   }
 
   @UseGuards(JwtAuthGuard)

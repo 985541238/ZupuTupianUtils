@@ -2,6 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { execFile } from 'child_process';
 
 const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp']);
 
@@ -16,6 +17,49 @@ export class FilesService {
 
   projectRoot() {
     return process.env.PROJECT_ROOT || path.resolve(process.cwd(), '..');
+  }
+
+  /**
+   * 弹出系统自带的选择窗口（服务就跑在用户这台电脑上）。
+   * 窗口只显示图片文件，选中任意一张图片即取它所在的文件夹。非 Windows 或失败时返回 unsupported，前端退回网页内目录选择。
+   */
+  pickFolder(start?: string): Promise<{ path?: string; cancelled?: boolean; unsupported?: boolean }> {
+    if (process.platform !== 'win32') return Promise.resolve({ unsupported: true });
+    let init = '';
+    try {
+      const cand = start ? path.resolve(start) : this.defaultFolder();
+      if (fs.existsSync(cand) && fs.statSync(cand).isDirectory()) init = cand;
+    } catch {
+      init = '';
+    }
+    const script = `
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Windows.Forms
+$owner = New-Object System.Windows.Forms.Form
+$owner.TopMost = $true; $owner.ShowInTaskbar = $false
+$owner.StartPosition = 'CenterScreen'; $owner.Size = New-Object System.Drawing.Size(0,0)
+$owner.Show(); $owner.Activate()
+$d = New-Object System.Windows.Forms.OpenFileDialog
+$d.Title = '选择图片所在文件夹（选中其中任意一张图片即可）'
+$d.Filter = '图片文件|*.jpg;*.jpeg;*.png;*.bmp;*.tif;*.tiff;*.webp'
+$d.Multiselect = $false
+if ($env:ZUPU_PICK_START) { $d.InitialDirectory = $env:ZUPU_PICK_START }
+if ($d.ShowDialog($owner) -eq 'OK') { [Console]::Out.Write([System.IO.Path]::GetDirectoryName($d.FileName)) }
+$owner.Close()
+`;
+    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    return new Promise((resolve) => {
+      execFile(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-STA', '-EncodedCommand', encoded],
+        { env: { ...process.env, ZUPU_PICK_START: init }, timeout: 10 * 60 * 1000, windowsHide: false, encoding: 'utf8' },
+        (err, stdout) => {
+          if (err) return resolve({ unsupported: true });
+          const out = String(stdout || '').trim();
+          resolve(out ? { path: out } : { cancelled: true });
+        },
+      );
+    });
   }
 
   browse(target?: string) {

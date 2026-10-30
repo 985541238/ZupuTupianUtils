@@ -122,6 +122,11 @@ export const api = {
     request(`/tasks/${taskId}/confirm`, { method: 'POST', body: '{}' }),
   browseFolder: (path?: string) =>
     request<any>('/files/browse' + (path != null ? '?path=' + encodeURIComponent(path) : '')),
+  pickFolder: (start?: string) =>
+    request<{ path?: string; cancelled?: boolean; unsupported?: boolean }>('/files/pick-folder', {
+      method: 'POST',
+      body: JSON.stringify({ start }),
+    }),
   getDefaultFolder: () => request<{ path: string }>('/files/default-folder'),
 
   // ---- OCR 识别任务 ----
