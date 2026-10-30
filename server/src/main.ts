@@ -20,7 +20,10 @@ import { AppModule } from './app.module';
 import * as express from 'express';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // 关闭 Nest 默认 body-parser（100KB 限制），改为自定义上限；上传走 octet-stream 流式不受影响
+  const app = await NestFactory.create(AppModule, { bodyParser: false });
+  app.use(express.json({ limit: '50mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
   app.enableCors({ origin: true, credentials: true });
   // 单进程部署：同端口提供管理端静态页，并兼容前端的 /dev-api 前缀（无需 Nginx）
   const adminDist = process.env.ADMIN_DIST || path.join(__dirname, '..', '..', 'admin-web', 'dist');
