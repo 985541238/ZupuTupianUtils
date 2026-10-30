@@ -603,7 +603,7 @@ export class SettingsService implements OnModuleInit {
   async baiduOcrEngine(): Promise<AiModel> {
     let row = await this.models.findOne({ where: { purpose: 'ocr', platform: 'baidu', model: 'baidu-ocr-accurate' } });
     if (!row) {
-      row = this.models.create({
+      const created = this.models.create({
         purpose: 'ocr',
         platform: 'baidu',
         model: 'baidu-ocr-accurate',
@@ -612,8 +612,8 @@ export class SettingsService implements OnModuleInit {
         priceImage: '0.01',
         enabled: 1,
         isDefault: 1,
-      } as any);
-      row = await this.models.save(row);
+      } as unknown) as AiModel;
+      row = await this.models.save(created);
     } else if (!row.enabled || row.billing !== 'image') {
       row.enabled = 1;
       row.billing = 'image';
