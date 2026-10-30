@@ -44,7 +44,7 @@ def map_overrides(threshold: float, denoise: float, contrast: float, stain: floa
     c_norm = (float(np.clip(contrast, 0.4, 3.6)) - 0.4) / 3.2
     s = 0.4 if stain is None else float(np.clip(stain, 0.0, 1.0))
     return InkParams(
-        sensitivity=through_mid(t_norm, 0.60, 0.95, 0.5, 0.2),
+        sensitivity=through_mid(t_norm, 0.60, 1.0, 0.5, 0.0),
         denoise=through_mid(d_norm, 0.55, 0.0, 0.5, 1.0),
         sharpen=through_mid(c_norm, 0.35, 0.0, 0.5, 1.0),
         stain=through_mid(s, 0.40, 0.0, 0.55, 1.0),

@@ -57,37 +57,49 @@
               0 24px 64px -12px rgba(0, 0, 0, 0.08);
 }
 
-/* Apple iOS Range Sliders */
+/* Range sliders：加粗轨道 + 蓝色已填充段 + 大号滑块，拖动位置一目了然（--pct 由组件按当前值写入） */
 input[type="range"] {
   -webkit-appearance: none;
   appearance: none;
-  background: #E5E5EA;
+  background: linear-gradient(to right, #0071E3 0, #0071E3 var(--pct, 0%), #D1D1D6 var(--pct, 0%), #D1D1D6 100%);
   border-radius: 9999px;
-  height: 6px;
+  height: 10px;
   outline: none;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.06);
 }
 
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 18px;
-  height: 18px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
   background: #FFFFFF;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18), 0 0 0 1px rgba(0, 0, 0, 0.04);
-  cursor: pointer;
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  border: 3px solid #0071E3;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  cursor: grab;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #FFFFFF;
+  border: 3px solid #0071E3;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  cursor: grab;
 }
 
 input[type="range"]::-webkit-slider-thumb:hover {
-  transform: scale(1.12);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(0, 0, 0, 0.08);
+  transform: scale(1.1);
 }
 
 input[type="range"]::-webkit-slider-thumb:active {
-  transform: scale(1.02);
-  background: #F8F8FA;
+  transform: scale(1.18);
+  cursor: grabbing;
+  box-shadow: 0 0 0 6px rgba(0, 113, 227, 0.18), 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 
 /* Apple Frosted Glass */

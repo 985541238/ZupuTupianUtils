@@ -1900,6 +1900,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                   handleParamChange('denoiseStrength', parseInt(e.target.value, 10))
                 }
                 className="w-full"
+                style={{ '--pct': `${localParams.denoiseStrength}%` } as React.CSSProperties}
               />
               <div className="flex justify-between text-[10px] text-[#86868B] font-mono">
                 <span>轻度</span>
@@ -1925,6 +1926,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                   handleParamChange('stainStrength', parseInt(e.target.value, 10))
                 }
                 className="w-full"
+                style={{ '--pct': `${(localParams.stainStrength ?? 40)}%` } as React.CSSProperties}
               />
               <div className="flex justify-between text-[10px] text-[#86868B] font-mono">
                 <span>关闭</span>
@@ -1950,6 +1952,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                   handleParamChange('contrastThreshold', parseInt(e.target.value, 10))
                 }
                 className="w-full"
+                style={{ '--pct': `${localParams.contrastThreshold}%` } as React.CSSProperties}
               />
               <div className="flex justify-between text-[10px] text-[#86868B] font-mono">
                 <span>淡墨细线</span>
@@ -1975,6 +1978,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                   handleParamChange('sharpenStrength', parseInt(e.target.value, 10))
                 }
                 className="w-full"
+                style={{ '--pct': `${localParams.sharpenStrength}%` } as React.CSSProperties}
               />
               <div className="flex justify-between text-[10px] text-[#86868B] font-mono">
                 <span>原迹平滑</span>

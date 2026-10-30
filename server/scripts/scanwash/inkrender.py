@@ -112,7 +112,7 @@ def hysteresis_mask(d: np.ndarray, p: InkParams, local_sw: float = 0.0) -> tuple
     t = _otsu01(cand)
     sens = float(np.clip(p.sensitivity, 0.0, 1.0))
     # 敏感度 0.5 → 强阈值 = Otsu；越敏感越低
-    t_high = float(np.clip(t * (1.35 - 0.7 * sens), 0.10, 0.85))
+    t_high = float(np.clip(t * (1.5 - 1.0 * sens), 0.08, 0.9))
     t_low = float(np.clip(t_high * (0.62 - 0.22 * sens), 0.05, t_high - 0.02))
     strong = (d >= t_high).astype(np.uint8)
     weak = (d >= t_low).astype(np.uint8)
