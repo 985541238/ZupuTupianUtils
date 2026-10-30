@@ -17,10 +17,30 @@ import * as path from 'path';
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module';
+import * as express from 'express';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableCors({ origin: true, credentials: true });
+  // 单进程部署：同端口提供管理端静态页，并兼容前端的 /dev-api 前缀（无需 Nginx）
+  const adminDist = process.env.ADMIN_DIST || path.join(__dirname, '..', '..', 'admin-web', 'dist');
+  if (fs.existsSync(path.join(adminDist, 'index.html'))) {
+    app.use((req: any, _res: any, next: any) => {
+      if (req.url === '/dev-api' || req.url.startsWith('/dev-api/') || req.url.startsWith('/dev-api?')) {
+        req.url = req.url.slice('/dev-api'.length) || '/';
+      }
+      next();
+    });
+    app.use(express.static(adminDist, { index: 'index.html', maxAge: '1h' }));
+    app.use((req: any, res: any, next: any) => {
+      const accepts = String(req.headers.accept || '');
+      if (req.method === 'GET' && accepts.includes('text/html') && !path.extname(req.path)) {
+        return res.sendFile(path.join(adminDist, 'index.html'));
+      }
+      next();
+    });
+    console.log(`管理端静态页：${adminDist}`);
+  }
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
   const outputRoot = process.env.OUTPUT_ROOT || path.join(process.cwd(), '..', 'data', 'output');
