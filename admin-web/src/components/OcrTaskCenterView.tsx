@@ -332,50 +332,42 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                           <span className="truncate max-w-[260px]" title={task.sourceTaskName}>来源：{task.sourceTaskName || '—'}</span>
                           <span className="text-black/15">·</span>
                           <span className="tabular-nums">共 {task.totalCount} 页</span>
-                          {task.staleCount ? (
-                            <>
-                              <span className="text-black/15">·</span>
-                              <span className="text-[#C93400] font-semibold" title="识别之后，图片处理里又重新调整保存过这些页的图片，进入审阅可按新图重新对位或重新识别">
-                                {task.staleCount} 页图片已在图片处理中更新
-                              </span>
-                            </>
-                          ) : null}
-
-                          {formatProcessingTime(task.processingTimeMs) ? (
-                            <>
-                              <span className="text-black/15">·</span>
-                              <span className="tabular-nums text-[#0071E3]">识别 {formatProcessingTime(task.processingTimeMs)}</span>
-                            </>
-                          ) : null}
-                          {task.actualCost ? (
-                            <>
-                              <span className="text-black/15">·</span>
-                              <span className="tabular-nums">{isProcessing ? '已花费' : '费用'} ¥{task.actualCost.toFixed(2)}</span>
-                            </>
-                          ) : null}
-                          {isProcessing ? (
-                            <>
-                              <span className="text-black/15">·</span>
-                              <span className="text-[#0071E3] font-semibold tabular-nums">
-                                已识别 {task.doneCount}/{task.totalCount} 页 · {pct}%
-                              </span>
-                            </>
-                          ) : task.status === 'reviewing' || task.status === 'completed' ? (
+                          {formatProcessingTime(task.processingTimeMs) || task.actualCost ? (
                             <>
                               <span className="text-black/15">·</span>
                               <span className="tabular-nums">
-                                已确认 {task.confirmedCount}/{task.totalCount}
-                                {task.charCount ? ` · 共 ${task.charCount} 字` : ''}
+                                {[
+                                  formatProcessingTime(task.processingTimeMs) ? `${isProcessing ? '已用' : '用时'} ${formatProcessingTime(task.processingTimeMs)}` : '',
+                                  task.actualCost ? `¥${task.actualCost.toFixed(2)}` : '',
+                                ]
+                                  .filter(Boolean)
+                                  .join(' · ')}
                               </span>
-                              {task.status === 'reviewing' && task.uncertainCount > 0 ? (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#FF9500]/12 text-[#C93400]">
-                                  <AlertTriangle className="w-3 h-3" />
-                                  {task.uncertainCount} 处待核对
-                                </span>
-                              ) : null}
                             </>
                           ) : null}
                         </div>
+                        {(isProcessing || task.status === 'reviewing' || task.status === 'completed') && (
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] leading-relaxed">
+                            {isProcessing ? (
+                              <span className="text-[#0071E3] font-semibold tabular-nums">
+                                已识别 {task.doneCount}/{task.totalCount} 页 · {pct}%
+                              </span>
+                            ) : (
+                              <>
+                                <span className="text-[#1D1D1F] tabular-nums">
+                                  已确认 <b className="font-semibold">{task.confirmedCount}</b>/{task.totalCount} 页
+                                </span>
+                                {task.charCount ? <span className="text-[#6E6E73] tabular-nums">共 {task.charCount} 字</span> : null}
+                                {task.status === 'reviewing' && task.uncertainCount > 0 ? (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#FF9500]/12 text-[#C93400]">
+                                    <AlertTriangle className="w-3 h-3" />
+                                    {task.uncertainCount} 处待核对
+                                  </span>
+                                ) : null}
+                              </>
+                            )}
+                          </div>
+                        )}
 
                         {isProcessing && (
                           <div className="pt-1 max-w-xl">
@@ -401,21 +393,37 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                           </div>
                         )}
 
-                        {!isProcessing && task.errorMessage ? (
+                        {!isProcessing && (task.errorMessage || task.staleCount) ? (
                           <div
-                            className={`flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] leading-relaxed max-w-3xl ${
-                              task.status === 'failed' ? 'text-[#C62828]' : 'text-[#C93400]'
+                            className={`rounded-xl border px-3 py-2 text-[12.5px] leading-relaxed max-w-2xl space-y-1 ${
+                              task.status === 'failed'
+                                ? 'bg-[#FFF5F5] border-[#FF3B30]/20 text-[#C62828]'
+                                : 'bg-[#FFF8EC] border-[#FF9500]/25 text-[#9A5B00]'
                             }`}
                           >
-                            <span>{task.errorMessage.split('\n详情：')[0]}</span>
-                            {onShowProblem && (task.errorCode || inferErrorCode(task.errorMessage)) ? (
-                              <button
-                                type="button"
-                                onClick={() => onShowProblem(task)}
-                                className="px-2 py-0.5 rounded-full bg-white border border-current/30 font-semibold cursor-pointer hover:bg-[#FFF2F2]"
+                            {task.errorMessage ? (
+                              <div className="flex items-start gap-1.5">
+                                <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                                <span className="flex-1 min-w-0">{task.errorMessage.split('\n详情：')[0]}</span>
+                                {onShowProblem && (task.errorCode || inferErrorCode(task.errorMessage)) ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => onShowProblem(task)}
+                                    className="shrink-0 px-2 py-0.5 rounded-full bg-white border border-current/30 font-semibold cursor-pointer hover:bg-white/70"
+                                  >
+                                    怎么处理？
+                                  </button>
+                                ) : null}
+                              </div>
+                            ) : null}
+                            {task.staleCount ? (
+                              <div
+                                className="flex items-start gap-1.5"
+                                title="识别之后，图片处理里又重新调整保存过这些页的图片，进入审阅可按新图重新对位或重新识别"
                               >
-                                怎么处理？
-                              </button>
+                                <RotateCcw className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                                <span>{task.staleCount} 页图片在图片处理中有更新，进入审阅后需重新对位</span>
+                              </div>
                             ) : null}
                           </div>
                         ) : null}
