@@ -316,12 +316,60 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   };
 
   const [nativePicking, setNativePicking] = useState(false);
+  const [uploadProg, setUploadProg] = useState<{ done: number; total: number } | null>(null);
+  const IMG_RE = /\.(jpe?g|png|bmp|tiff?|webp)$/i;
+
+  /** 浏览器选文件夹（showDirectoryPicker）→ 图片逐张上传到服务器 → 用服务器上的目录建任务 */
+  const pickByBrowser = async (): Promise<boolean> => {
+    const w = window as any;
+    if (typeof w.showDirectoryPicker !== 'function') return false;
+    let dir: any;
+    try {
+      dir = await w.showDirectoryPicker({ mode: 'read' });
+    } catch (e: any) {
+      if (e?.name === 'AbortError') return true; // 用户取消
+      return false;
+    }
+    const files: File[] = [];
+    for await (const entry of dir.values()) {
+      if (entry.kind === 'file' && IMG_RE.test(entry.name)) files.push(await entry.getFile());
+    }
+    files.sort((a, b) => a.name.localeCompare(b.name, 'zh', { numeric: true }));
+    if (!files.length) {
+      alert('这个文件夹里没有找到图片（支持 jpg / png / tif / bmp / webp，不含子文件夹）');
+      return true;
+    }
+    try {
+      const sess = await api.createUploadSession(dir.name);
+      setUploadProg({ done: 0, total: files.length });
+      let next = 0;
+      let done = 0;
+      const worker = async () => {
+        while (next < files.length) {
+          const f = files[next++];
+          await api.uploadImage(sess.id, f);
+          done += 1;
+          setUploadProg({ done, total: files.length });
+        }
+      };
+      await Promise.all([worker(), worker(), worker()]);
+      setFolderPath(sess.dir);
+      setPageCountPreview(files.length);
+      if (!taskName.trim() && dir.name) setTaskName(dir.name);
+    } catch (e: any) {
+      alert('上传图片失败：' + (e?.message || '请重试'));
+    } finally {
+      setUploadProg(null);
+    }
+    return true;
+  };
 
   const openFolderPicker = async () => {
-    if (nativePicking) return;
-    // 先用系统自带窗口（只显示图片，选一张即取其所在文件夹）；不支持时退回网页内目录选择
+    if (nativePicking || uploadProg) return;
     setNativePicking(true);
     try {
+      // 1) 浏览器自带的选择窗口（Chrome / Edge）；2) 服务端弹系统窗口；3) 网页内目录选择
+      if (await pickByBrowser()) return;
       const r = await api.pickFolder(folderPath.trim() || undefined);
       if (r?.path) {
         setFolderPath(r.path);
@@ -1003,7 +1051,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         className="px-3 py-2.5 text-xs font-semibold bg-[#E5E5EA] hover:bg-[#D1D1D6] text-[#1D1D1F] rounded-xl cursor-pointer whitespace-nowrap flex items-center gap-1.5"
                       >
                         <Folder className="w-3.5 h-3.5" />
-                        {nativePicking ? '请在弹出窗口中选择…' : '选择目录'}
+                        {uploadProg ? `上传中 ${uploadProg.done}/${uploadProg.total}` : nativePicking ? '请在弹出窗口中选择…' : '选择目录'}
                       </button>
                     </div>
                     <p className="text-[11px] text-[#86868B] mt-1">

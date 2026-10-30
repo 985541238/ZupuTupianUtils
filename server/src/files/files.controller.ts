@@ -1,5 +1,5 @@
-import { Body, Controller, Get, Post, Query, Res, UseGuards } from '@nestjs/common';
-import { Response } from 'express';
+import { BadRequestException, Body, Controller, Get, Param, Post, Put, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -26,6 +26,19 @@ export class FilesController {
   @Post('pick-folder')
   pickFolder(@Body() body: { start?: string }) {
     return this.files.pickFolder(body?.start);
+  }
+
+  /** 浏览器选文件夹后逐张上传：先开一个上传会话，拿到服务器上的目录 */
+  @UseGuards(JwtAuthGuard)
+  @Post('upload-session')
+  uploadSession(@Body() body: { label?: string }) {
+    return this.files.createUploadSession(body?.label);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Put('upload/:id')
+  async uploadOne(@Param('id') id: string, @Query('name') name: string, @Req() req: Request) {
+    return this.files.saveUpload(id, name, req);
   }
 
   @UseGuards(JwtAuthGuard)

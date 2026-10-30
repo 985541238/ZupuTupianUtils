@@ -62,6 +62,42 @@ $owner.Close()
     });
   }
 
+  uploadRoot() {
+    return process.env.UPLOAD_ROOT || path.join(process.cwd(), '..', 'data', 'uploads');
+  }
+
+  createUploadSession(label?: string) {
+    const safe = String(label || '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').trim().slice(0, 40);
+    const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+    const id = `${stamp}-${Math.random().toString(36).slice(2, 8)}`;
+    const dir = path.join(this.uploadRoot(), safe ? `${id}_${safe}` : id);
+    fs.mkdirSync(dir, { recursive: true });
+    return { id: path.basename(dir), dir };
+  }
+
+  /** 把请求体（原始二进制）写成会话目录下的一张图片；只收图片扩展名，文件名去掉路径 */
+  saveUpload(id: string, name: string, req: NodeJS.ReadableStream): Promise<{ ok: true; size: number }> {
+    if (!id || /[\\/]/.test(id) || id.includes('..')) throw new BadRequestException('会话无效');
+    const dir = path.join(this.uploadRoot(), id);
+    if (!fs.existsSync(dir)) throw new BadRequestException('上传会话不存在，请重新选择文件夹');
+    const base = path.basename(String(name || '').replace(/\\/g, '/'));
+    const ext = path.extname(base).toLowerCase();
+    if (!base || !IMAGE_EXT.has(ext)) throw new BadRequestException('只接受图片文件（jpg/png/tif/bmp/webp）');
+    const target = path.join(dir, base);
+    return new Promise((resolve, reject) => {
+      const ws = fs.createWriteStream(target);
+      let size = 0;
+      req.on('data', (c: Buffer) => (size += c.length));
+      req.pipe(ws);
+      ws.on('finish', () => resolve({ ok: true, size }));
+      ws.on('error', (e) => reject(new BadRequestException('写入失败：' + e.message)));
+      req.on('error', (e) => {
+        ws.destroy();
+        reject(new BadRequestException('上传中断：' + e.message));
+      });
+    });
+  }
+
   browse(target?: string) {
     let dir = target ? path.resolve(target) : this.defaultFolder();
     if (!fs.existsSync(dir)) {

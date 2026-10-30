@@ -125,6 +125,25 @@ export const api = {
     request(`/tasks/${taskId}/confirm`, { method: 'POST', body: '{}' }),
   browseFolder: (path?: string) =>
     request<any>('/files/browse' + (path != null ? '?path=' + encodeURIComponent(path) : '')),
+  createUploadSession: (label?: string) =>
+    request<{ id: string; dir: string }>('/files/upload-session', { method: 'POST', body: JSON.stringify({ label }) }),
+  uploadImage: async (sessionId: string, file: File, name?: string) => {
+    const res = await fetch(`${BASE}/files/upload/${encodeURIComponent(sessionId)}?name=${encodeURIComponent(name || file.name)}`, {
+      method: 'PUT',
+      headers: { Authorization: 'Bearer ' + getToken(), 'Content-Type': 'application/octet-stream' },
+      body: file,
+    });
+    if (!res.ok) {
+      let msg = `上传失败（${res.status}）`;
+      try {
+        const j = await res.json();
+        if (j?.message) msg = Array.isArray(j.message) ? j.message.join('；') : String(j.message);
+      } catch {
+        /* ignore */
+      }
+      throw new Error(msg);
+    }
+  },
   pickFolder: (start?: string) =>
     request<{ path?: string; cancelled?: boolean; unsupported?: boolean }>('/files/pick-folder', {
       method: 'POST',
