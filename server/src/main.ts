@@ -18,8 +18,12 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module';
 import * as express from 'express';
+import sharp from 'sharp';
 
 async function bootstrap() {
+  // 控制 sharp(libvips) 内存：缓存只留一点，线程数不随核数放大
+  sharp.cache({ memory: 64, files: 0, items: 50 });
+  sharp.concurrency(Math.min(2, require('os').cpus().length));
   // 关闭 Nest 默认 body-parser（100KB 限制），改为自定义上限；上传走 octet-stream 流式不受影响
   const app = await NestFactory.create(AppModule, { bodyParser: false });
   app.use(express.json({ limit: '50mb' }));

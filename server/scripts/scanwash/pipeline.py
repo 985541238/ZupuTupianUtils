@@ -1,5 +1,6 @@
 """把分档、拉正、墨迹提取和验收串成一页。"""
 
+import os
 import time
 from pathlib import Path
 
@@ -33,10 +34,21 @@ def imwrite_gray(path: Path, gray: np.ndarray) -> None:
 
 def process_page(source: np.ndarray, tier: str, params: InkParams, auto_crop: bool = False) -> tuple[np.ndarray, dict]:
     """拉正 → 墨迹提取（掩膜严格约束成品）→ 可选裁文字块 → 验收。"""
+    # 内存保护：超大图（默认 > 1200 万像素）按缩小的尺寸处理，结果再放回原尺寸。
+    # 笔画粗细由算法自适应，缩小后效果基本一致，但峰值内存与耗时大幅下降。
+    src_h0, src_w0 = source.shape[:2]
+    max_px = float(os.environ.get("ZW_MAX_PIXELS", "12000000"))
+    down = 1.0
+    if max_px > 0 and src_h0 * src_w0 > max_px:
+        down = (max_px / float(src_h0 * src_w0)) ** 0.5
+        source = cv2.resize(source, (max(1, int(round(src_w0 * down))), max(1, int(round(src_h0 * down)))), interpolation=cv2.INTER_AREA)
     geometry = correct(source, tier)
     work = geometry.bgr if geometry.bgr is not None else cv2.cvtColor(geometry.gray, cv2.COLOR_GRAY2BGR)
     result = extract(work, params)
     image, mask = result.image, result.mask
+    if down < 1.0 and not auto_crop and image.shape[:2] == source.shape[:2]:
+        image = cv2.resize(image, (src_w0, src_h0), interpolation=cv2.INTER_LINEAR)
+        mask = cv2.resize(mask.astype(np.uint8), (src_w0, src_h0), interpolation=cv2.INTER_NEAREST).astype(bool)
     warnings = list(geometry.warnings)
     if auto_crop:
         image, mask, loss = crop_text_block(image, mask, mask)

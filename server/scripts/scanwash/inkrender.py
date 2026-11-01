@@ -460,6 +460,29 @@ def local_norm_layer(mask: np.ndarray, d: np.ndarray, stroke_w: float, dirty: bo
     return np.where(keep_d, a, 0.0).astype(np.float32)
 
 
+def fill_ink_holes(mask: np.ndarray, d: np.ndarray, t_low: float, stroke_w: float) -> np.ndarray:
+    """粗笔画中心因背景估计偏高会被判成「洞」（空心字）。被墨完全包住、且本身仍明显比纸深的洞补成墨；
+    字的内空（日、口里面的白纸）墨色接近纸面，不补。"""
+    m = mask.astype(np.uint8)
+    h, w = m.shape
+    inv = (1 - m).astype(np.uint8)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(inv, connectivity=4)
+    if n <= 1:
+        return mask
+    out = mask.copy()
+    border = np.zeros(n, bool)
+    border[np.unique(np.concatenate([lab[0, :], lab[-1, :], lab[:, 0], lab[:, -1]]))] = True
+    sw = max(stroke_w, 1.5)
+    gate = max(0.5 * t_low, 0.08)
+    for i in range(1, n):
+        if border[i] or st[i, cv2.CC_STAT_AREA] > 400 * sw * sw:
+            continue
+        sel = lab == i
+        if float(np.median(d[sel])) >= gate:
+            out |= sel
+    return out
+
+
 def render(d: np.ndarray, mask: np.ndarray, t_low: float, stroke_w: float, p: InkParams, rescued: np.ndarray | None = None, soft: np.ndarray | None = None) -> np.ndarray:
     """掩膜外白纸；掩膜内连续墨色，边缘留抗锯齿。"""
     inside = d[mask]
@@ -491,7 +514,7 @@ def render(d: np.ndarray, mask: np.ndarray, t_low: float, stroke_w: float, p: In
     core = mask & (d >= d_ink)
     # 笔画内部（离掩膜边缘 ≥2px）一律实心：粗笔画中心因背景估计偏高会变浅，出现空心/描边圈
     dist = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 3)
-    core = core | (dist >= 2.0)
+    core = core | (dist >= 1.0)
     out[core] = np.minimum(out[core], 20.0)
     return np.clip(out, 0, 255).astype(np.uint8)
 
@@ -518,6 +541,7 @@ def extract(bgr: np.ndarray, p: InkParams) -> InkResult:
     mask = filter_components(mask, d, sw, t_high, p)
     mask, rescued, faint_info = rescue_faint(mask, d, t_low, sw, p)
     soft = None if os.environ.get('ZW_NORIDGE') else soft_faint_layer(mask, d, t_low, sw, bool(faint_info.get("faint_skipped_dirty")))
+    mask = fill_ink_holes(mask, d, t_low, sw)
     ln = local_norm_layer(mask, d, sw, bool(faint_info.get("faint_skipped_dirty")))
     if ln is not None:
         soft = ln if soft is None else np.maximum(soft, ln)

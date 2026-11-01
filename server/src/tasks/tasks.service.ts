@@ -365,7 +365,9 @@ export class TasksService implements OnModuleInit {
       // 大模型：按「同时处理页数」设置（受平台限流约束）；算法：按 CPU 核数并行（每页一个独立进程）
       const concurrency = cleanModel
         ? (await this.settings.getGeneral()).concurrency
-        : Math.max(2, Math.min(Number(process.env.ALGO_CONCURRENCY) || os.cpus().length, 8));
+        : Number(process.env.ALGO_CONCURRENCY) ||
+          // 每页处理峰值约 1GB（图越大越高）：按内存算并发，最多 4 路，至少 1 路
+          Math.max(1, Math.min(os.cpus().length, 4, Math.floor((os.totalmem() / 1073741824) * 0.5)));
       let stopReason: AiConfigError | null = null;
 
       const finishOne = async () => {

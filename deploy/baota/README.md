@@ -46,6 +46,17 @@ cd /www/wwwroot/zupu/server && pm2 start dist/main.js --name zupu && pm2 save &&
 ```
 检查：`curl -I http://127.0.0.1:8081/` 应返回 200。
 
+## 6.1 内存控制（小内存服务器必看）
+- 每页图片处理峰值约 **1GB**（超过 1200 万像素的大图会自动缩小处理、结果仍放回原尺寸）。服务端并发已按内存自动算：约「内存的一半 ÷ 1GB」，最多 4 路。
+- 想手动指定：`.env` 里加 `ALGO_CONCURRENCY=1`（2GB 内存建议 1，4GB 建议 2，8GB 以上默认即可）。
+- 想更省：`.env` 里 `ZW_MAX_PIXELS=8000000`（八百万像素，越小越省内存、越快，细节略少）；设 `0` 表示不缩小。
+- 给 Node 加上限，超了自动重启而不是拖垮整台机器：
+  ```bash
+  pm2 start dist/main.js --name zupu --node-args="--max-old-space-size=1024" --max-memory-restart 1500M
+  ```
+- 加 2~4GB 的 swap 兜底：`fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile`。
+- 建议一次别开太多页同时「大模型处理」，设置页里的并发数调小。
+
 ## 7. 网站与反向代理（含 https）
 宝塔「网站 → 添加站点」填域名（纯 IP 访问也可）→ 「设置 → 反向代理 → 添加」：目标 URL `http://127.0.0.1:8081`。
 再在「配置文件」的该站点 `server { }` 里加：
