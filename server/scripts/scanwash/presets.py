@@ -1,4 +1,8 @@
-"""三档参数。比例和阈值与清洗方案一致。"""
+"""三档参数。比例和阈值与清洗方案一致。
+
+denoise / stain 是审阅页滑块的覆盖位（0~1），有默认值，三档字面量不写也行；
+zupu_clean.py 会用滑块值 dataclasses.replace 掉对应字段。
+"""
 
 from dataclasses import asdict, dataclass
 
@@ -15,8 +19,9 @@ class Preset:
     deskew: bool
     crop_text_block: bool
     keep_gutter: bool
-    # 0~1: mid-scale destain / color blot / round-blob filter. Mild default.
-    stain_strength: float = 0.4
+    # 审阅页滑块覆盖位：去污渍力度（连通域剔除）、去渍力度（彩色黄褐斑抑制）
+    denoise: float = 0.5
+    stain: float = 0.4
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -34,7 +39,6 @@ PRESETS: dict[str, Preset] = {
         deskew=True,
         crop_text_block=False,
         keep_gutter=True,
-        stain_strength=0.35,
     ),
     "aged": Preset(
         name="aged",
@@ -47,7 +51,6 @@ PRESETS: dict[str, Preset] = {
         deskew=True,
         crop_text_block=False,
         keep_gutter=True,
-        stain_strength=0.45,
     ),
     "damaged": Preset(
         name="damaged",
@@ -60,7 +63,6 @@ PRESETS: dict[str, Preset] = {
         deskew=False,
         crop_text_block=True,
         keep_gutter=False,
-        stain_strength=0.42,
     ),
 }
 

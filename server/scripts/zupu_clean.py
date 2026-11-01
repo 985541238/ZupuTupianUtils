@@ -15,39 +15,50 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cv2
 import numpy as np
 
+import dataclasses
+
 from scanwash.classify import classify
-from scanwash.inkrender import InkParams
 from scanwash.pipeline import imread, imwrite_gray, process_page
-from scanwash.presets import PRESETS
+from scanwash.presets import PRESETS, Preset
 
 
-def map_overrides(threshold: float, denoise: float, contrast: float, stain: float | None = None) -> InkParams:
-    """审阅页滑块 → 墨迹提取参数。推荐档（threshold 60% / denoise 55% / sharpen 35% / stain 40%）
-    落在各参数的中点 0.5 附近，两端拉开，拖动时差异明显。
+def _through_mid(x: float, x_mid: float, y0: float, y_mid: float, y1: float) -> float:
+    """分段线性：x=0→y0, x=x_mid→y_mid, x=1→y1。默认滑块值落在 x_mid。"""
+    x = float(np.clip(x, 0.0, 1.0))
+    if x <= x_mid:
+        t = (x / x_mid) if x_mid > 0 else 0.0
+        return y0 + t * (y_mid - y0)
+    t = ((x - x_mid) / (1.0 - x_mid)) if x_mid < 1.0 else 1.0
+    return y_mid + t * (y1 - y_mid)
 
-    - 油墨阈值：越往左越敏感（多留淡墨细笔），越往右越干净（只留浓墨）
-    - 去噪：最小连通域与淡污渍块剔除力度
-    - 锐度：墨色映射陡峭程度
-    - 去渍：彩色（黄/褐/霉）污渍抑制比例
+
+def map_overrides(tier: str, threshold: float, denoise: float, contrast: float, stain: float | None = None) -> Preset:
+    """审阅页滑块 → 覆盖该档内置预设的几项（算法 demo 版）。
+    推荐档（threshold 60% / denoise 55% / sharpen 35% / stain 40%）落在各参数中点，默认即内置值附近。
+
+    - 油墨黑白阈值：越往左越敏感（keep_dark_pct 高、黑帽分位低，多留淡墨细笔），越往右越干净
+    - 去污渍：连通域最小面积（denoise 0~1，越大剔除越大的孤立小块）
+    - 锐度：合成时的锐化强度
+    - 去渍：黄/褐斑抑制比例（stain 0~1）
     """
+    base = PRESETS.get(tier, PRESETS["clean"])
 
-    def through_mid(x: float, x_mid: float, y0: float, y_mid: float, y1: float) -> float:
-        x = float(np.clip(x, 0.0, 1.0))
-        if x <= x_mid:
-            t = (x / x_mid) if x_mid > 0 else 0.0
-            return y0 + t * (y_mid - y0)
-        t = ((x - x_mid) / (1.0 - x_mid)) if x_mid < 1.0 else 1.0
-        return y_mid + t * (y1 - y_mid)
-
-    t_norm = (float(np.clip(threshold, 60, 240)) - 60.0) / 180.0
-    d_norm = float(np.clip(denoise, 0, 16)) / 16.0
-    c_norm = (float(np.clip(contrast, 0.4, 3.6)) - 0.4) / 3.2
+    t = (float(np.clip(threshold, 60, 240)) - 60.0) / 180.0  # 默认 0.60
+    d = float(np.clip(denoise, 0, 16)) / 16.0                 # 默认 0.55
+    c = (float(np.clip(contrast, 0.4, 3.6)) - 0.4) / 3.2      # 默认 0.35
     s = 0.4 if stain is None else float(np.clip(stain, 0.0, 1.0))
-    return InkParams(
-        sensitivity=through_mid(t_norm, 0.60, 1.0, 0.5, 0.0),
-        denoise=through_mid(d_norm, 0.55, 0.0, 0.5, 1.0),
-        sharpen=through_mid(c_norm, 0.35, 0.0, 0.5, 1.0),
-        stain=through_mid(s, 0.40, 0.0, 0.55, 1.0),
+
+    keep_dark = float(np.clip(_through_mid(t, 0.60, base.keep_dark_pct + 16, base.keep_dark_pct, base.keep_dark_pct - 16), 35.0, 85.0))
+    bh = float(np.clip(_through_mid(t, 0.60, max(92.0, base.bh_percentile - 3), base.bh_percentile, min(99.3, base.bh_percentile + 2)), 90.0, 99.5))
+    sharpen = float(np.clip(_through_mid(c, 0.35, 0.15, base.sharpen, base.sharpen + 0.7), 0.05, 1.6))
+
+    return dataclasses.replace(
+        base,
+        keep_dark_pct=keep_dark,
+        bh_percentile=bh,
+        sharpen=sharpen,
+        denoise=float(np.clip(d, 0.0, 1.0)),
+        stain=s,
     )
 
 
@@ -72,8 +83,8 @@ def run_page_overridden(
     else:
         raise ValueError(f"未知预设: {preset_name}")
 
-    params = map_overrides(threshold, denoise, contrast, stain=stain)
-    png, page_meta = process_page(source, tier, params, auto_crop)
+    preset = map_overrides(tier, threshold, denoise, contrast, stain=stain)
+    png, page_meta = process_page(source, tier, preset, auto_crop)
     out_h, out_w = png.shape
     meta = {
         "tier": tier,
