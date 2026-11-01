@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 工具/会话数据
+.workbuddy/
+.idea/
+.vscode/
+
+# 运行产物
+out/
+_smoke/
+_inktry/
+
+# 扫描素材与对比图（体积大，不入库；放在本地或对象存储）
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+*.bmp
+对比图/
+
+# 系统
+Thumbs.db
+.DS_Store

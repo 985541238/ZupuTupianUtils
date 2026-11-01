@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>族谱页清洗</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #1c1b19;
+      --muted: #5c5852;
+      --line: #d9d3c7;
+      --paper: #f4f1ea;
+      --panel: #fff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--paper);
+    }
+    main {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 28px 20px 48px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+      font-weight: 600;
+    }
+    .lead {
+      margin: 0 0 20px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+    form {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 18px;
+    }
+    label { color: var(--muted); font-size: 14px; }
+    select, button {
+      font: inherit;
+      height: 38px;
+      border-radius: 6px;
+    }
+    select {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      padding: 0 10px;
+    }
+    button {
+      border: 0;
+      background: var(--ink);
+      color: white;
+      padding: 0 16px;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.45; cursor: default; }
+    .drop {
+      flex: 1 1 280px;
+      min-height: 38px;
+      display: flex;
+      align-items: center;
+      padding: 8px 12px;
+      border: 1px dashed #b7b0a4;
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--muted);
+    }
+    .drop.over { border-color: var(--ink); color: var(--ink); }
+    input[type="file"] { display: none; }
+    .drop button.ghost {
+      height: 30px;
+      margin-right: 10px;
+      background: transparent;
+      color: var(--ink);
+      border: 1px solid var(--line);
+    }
+    .status {
+      min-height: 24px;
+      margin: 0 0 14px;
+      color: var(--muted);
+    }
+    .status.warn { color: #8a4b12; }
+    .view {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    figure {
+      margin: 0;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    figcaption {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      font-size: 14px;
+    }
+    img {
+      display: block;
+      width: 100%;
+      height: auto;
+      background: #eeeae3;
+    }
+    .empty {
+      height: 280px;
+      display: grid;
+      place-items: center;
+      color: #8a847a;
+    }
+    .actions { margin-top: 14px; }
+    a.download {
+      color: var(--ink);
+    }
+    @media (max-width: 800px) {
+      .view { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>族谱页清洗</h1>
+    <p class="lead">上传一页扫描图。左边是原图，右边是修复结果。只去纸色和污渍，不重画字形。</p>
+    <form id="form">
+      <label for="preset">分档</label>
+      <select id="preset">
+        <option value="auto">自动</option>
+        <option value="clean">干净</option>
+        <option value="aged">老化</option>
+        <option value="damaged">残页</option>
+      </select>
+      <div class="drop" id="drop">
+        <button type="button" class="ghost" id="pick">选择图片</button>
+        <span id="filename">或把图片拖到这里</span>
+      </div>
+      <input id="file" type="file" accept="image/*">
+      <button type="submit" id="go" disabled>开始处理</button>
+    </form>
+    <p class="status" id="status"></p>
+    <section class="view">
+      <figure>
+        <figcaption>原图</figcaption>
+        <img id="original" alt="" hidden>
+        <div class="empty" id="original-empty">尚未选择</div>
+      </figure>
+      <figure>
+        <figcaption>修复后</figcaption>
+        <img id="result" alt="" hidden>
+        <div class="empty" id="result-empty">处理完成后显示</div>
+      </figure>
+    </section>
+    <p class="actions"><a class="download" id="download" hidden>下载修复图</a></p>
+  </main>
+  <script>
+    const fileInput = document.querySelector("#file");
+    const pick = document.querySelector("#pick");
+    const drop = document.querySelector("#drop");
+    const filename = document.querySelector("#filename");
+    const go = document.querySelector("#go");
+    const form = document.querySelector("#form");
+    const status = document.querySelector("#status");
+    const original = document.querySelector("#original");
+    const originalEmpty = document.querySelector("#original-empty");
+    const result = document.querySelector("#result");
+    const resultEmpty = document.querySelector("#result-empty");
+    const download = document.querySelector("#download");
+    const preset = document.querySelector("#preset");
+
+    const tierName = { clean: "干净", aged: "老化", damaged: "残页" };
+    const warningName = {
+      text_loss_risk: "裁切边可能切到笔画",
+      damaged_page: "残页，建议人工看一眼",
+      sparse_text: "检出的字很少",
+      mask_exploded: "污渍被当成了字",
+      ink_light: "字不够黑",
+      paper_dark: "纸色不够白",
+      geometry_skipped: "页面没能拉正"
+    };
+
+    let currentFile = null;
+    let originalUrl = "";
+
+    pick.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", () => take(fileInput.files[0]));
+    drop.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      drop.classList.add("over");
+    });
+    drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+    drop.addEventListener("drop", (event) => {
+      event.preventDefault();
+      drop.classList.remove("over");
+      take(event.dataTransfer.files[0]);
+    });
+
+    function take(file) {
+      if (!file) return;
+      currentFile = file;
+      filename.textContent = file.name;
+      go.disabled = false;
+      if (originalUrl) URL.revokeObjectURL(originalUrl);
+      originalUrl = URL.createObjectURL(file);
+      original.src = originalUrl;
+      original.hidden = false;
+      originalEmpty.hidden = true;
+      result.hidden = true;
+      result.removeAttribute("src");
+      resultEmpty.hidden = false;
+      download.hidden = true;
+      status.textContent = "";
+      status.className = "status";
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!currentFile || go.disabled) return;
+      go.disabled = true;
+      status.className = "status";
+      status.textContent = "正在处理…";
+      try {
+        const response = await fetch("/api/process?preset=" + encodeURIComponent(preset.value), {
+          method: "POST",
+          headers: { "Content-Type": currentFile.type || "application/octet-stream" },
+          body: currentFile
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "处理失败");
+        const url = "data:image/jpeg;base64," + data.image;
+        result.src = url;
+        result.hidden = false;
+        resultEmpty.hidden = true;
+        download.href = url;
+        download.download = currentFile.name.replace(/\.[^.]+$/, "") + "_修复.jpg";
+        download.hidden = false;
+        const warnings = (data.warnings || []).map((item) => warningName[item] || item);
+        const tier = tierName[data.tier] || data.tier;
+        status.textContent = "分档 " + tier + " · " + data.ms + " 毫秒 · 墨色 " + data.ink_p50 + " · 纸色 " + data.paper_p50
+          + (warnings.length ? " · " + warnings.join("，") : "");
+        if (warnings.length) status.className = "status warn";
+      } catch (error) {
+        status.textContent = error.message;
+        status.className = "status warn";
+      } finally {
+        go.disabled = !currentFile;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.workbuddy/
+out/
+对比图/
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+*.bmp
+Dockerfile
+.dockerignore
+requirements.txt
+*.md
