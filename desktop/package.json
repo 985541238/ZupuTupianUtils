@@ -1,0 +1,24 @@
+{
+  "name": "zupu-workbench-desktop",
+  "version": "1.0.0",
+  "description": "族谱清晰化工作台 桌面客户端（访问已部署的服务器）",
+  "main": "main.js",
+  "author": "ZupuTupianUtils",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win portable --x64"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.zupu.workbench",
+    "productName": "族谱清晰化工作台",
+    "files": ["main.js", "setup.html", "error.html"],
+    "directories": { "output": "dist" },
+    "win": { "target": [{ "target": "portable", "arch": ["x64"] }], "artifactName": "族谱清晰化工作台.exe" },
+    "portable": { "artifactName": "ZupuWorkbench.exe" }
+  }
+}
