@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { OcrTask, OcrSourceTask } from '../types';
-import { api, ocrExportUrl } from '../api/client';
+import { api } from '../api/client';
 import { formatProcessingTime, mapOcrSource } from '../api/mappers';
 import { inferErrorCode } from './AiProblemDialog';
 import { OcrModelPicker } from './OcrModelPicker';
@@ -245,12 +245,6 @@ export const OcrTaskCenterView: React.FC<Props> = ({
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            {task.doneCount > 0 && (
-              <button onClick={() => window.open(ocrExportUrl(task.id, 'columns'), '_blank')} className="h-10 px-4 text-sm font-semibold rounded-full bg-white border border-black/[0.1] text-[#1D1D1F] hover:bg-[#F5F5F7] cursor-pointer flex items-center gap-1.5" title="下载整个项目已识别页的文字（txt）；单卷导出在各卷右边">
-                <Download className="w-3.5 h-3.5" />
-                导出整个项目
-              </button>
-            )}
           </div>
         </div>
 
@@ -301,16 +295,6 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                           className="h-10 px-4 text-sm font-semibold rounded-full bg-white border border-[#0071E3]/30 text-[#0071E3] hover:bg-[#0071E3]/[0.05] cursor-pointer"
                         >
                           {isProcessing ? `先去审阅（${rec} 页）` : conf >= inTask ? '查看' : '进入审阅'}
-                        </button>
-                      ) : null}
-                      {inTask > 0 && rec > 0 && !isProcessing ? (
-                        <button
-                          onClick={() => window.open(ocrExportUrl(task.id, 'columns', v.id), '_blank')}
-                          className="h-10 px-4 text-sm font-semibold rounded-full bg-[#F5F5F7] hover:bg-[#EBEBED] text-[#1D1D1F] cursor-pointer flex items-center gap-1.5"
-                          title="下载这一卷已识别页的文字（txt）"
-                        >
-                          <Download className="w-3.5 h-3.5" />
-                          导出文字
                         </button>
                       ) : null}
                       {isProcessing && inTask > 0 ? (
