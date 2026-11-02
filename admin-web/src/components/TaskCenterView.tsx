@@ -642,87 +642,128 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
         {/* 第一层：项目总览 */}
         {projectFilter === 'all' && (() => {
           const orphan = tasks.filter((t) => t.projectId == null);
+          const newProject = () => {
+            setNewProjectName('');
+            setShowProjectModal(true);
+          };
           return (
-            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-              {projects.map((p) => (
-                <div
-                  key={p.id}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => setProjectFilter(p.id)}
-                  onKeyDown={(e) => e.key === 'Enter' && setProjectFilter(p.id)}
-                  className="group relative text-left bg-white rounded-[20px] border border-black/[0.05] shadow-[0_1px_2px_rgba(0,0,0,0.03)] hover:shadow-[0_8px_24px_rgba(0,0,0,0.08)] hover:border-[#0071E3]/30 p-5 transition-all cursor-pointer"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-11 h-11 rounded-2xl bg-[#0071E3]/10 text-[#0071E3] flex items-center justify-center shrink-0">
-                      <FolderOpen className="w-5 h-5" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="text-lg font-bold text-[#1D1D1F] truncate">{p.name}</div>
-                      <div className="text-[13px] text-[#86868B]">
-                        {p.volumeCount} 卷 · 共 {p.totalPages} 页
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setProjectDeleteTarget(p);
-                      }}
-                      className="p-1.5 rounded-lg text-[#86868B] opacity-0 group-hover:opacity-100 hover:bg-[#FF3B30]/10 hover:text-[#FF3B30] transition-all cursor-pointer"
-                      title="删除项目"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+            <div>
+              {projects.length === 0 ? (
+                <div className="bg-white rounded-3xl border border-black/[0.05] shadow-[0_1px_2px_rgba(0,0,0,0.03)] px-6 py-14 text-center">
+                  <div className="w-14 h-14 mx-auto rounded-2xl bg-gradient-to-br from-[#4DA3FF] to-[#0071E3] text-white flex items-center justify-center shadow-[0_8px_20px_rgba(0,113,227,0.25)]">
+                    <FolderOpen className="w-7 h-7" />
                   </div>
-                  <div className="flex flex-wrap items-center gap-1.5 mt-4 min-h-[22px]">
-                    {p.volumeCount === 0 ? (
-                      <span className="text-xs text-[#86868B]">还没有卷，点进去新建第一卷</span>
-                    ) : (
-                      <>
-                        {p.processing > 0 && (
-                          <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#0071E3]/10 text-[#0071E3]">
-                            处理中 {p.processing}
-                          </span>
-                        )}
-                        {p.reviewing > 0 && (
-                          <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#FF9500]/12 text-[#FF9500]">
-                            待审阅 {p.reviewing}
-                          </span>
-                        )}
-                        {p.completed > 0 && (
-                          <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#34C759]/12 text-[#248A3D]">
-                            已完成 {p.completed}
-                          </span>
-                        )}
-                      </>
-                    )}
-                  </div>
-                  <ArrowRight className="w-4 h-4 text-[#C7C7CC] group-hover:text-[#0071E3] absolute right-5 bottom-5 transition-colors" />
+                  <h3 className="mt-4 text-lg font-bold text-[#1D1D1F]">还没有项目</h3>
+                  <p className="mt-1 text-sm text-[#86868B]">项目 = 一个家族或一部谱书，例如「李氏」。建好后，把每一卷的图片逐个加进去。</p>
+                  <button
+                    onClick={newProject}
+                    className="mt-5 inline-flex items-center gap-1.5 h-10 px-6 bg-[#0071E3] hover:bg-[#0077ED] text-white text-sm font-semibold rounded-xl cursor-pointer shadow-[0_2px_8px_rgba(0,113,227,0.25)]"
+                  >
+                    <Plus className="w-4 h-4 stroke-[2.5]" />
+                    新建第一个项目
+                  </button>
                 </div>
-              ))}
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+                  {projects.map((p) => {
+                    const vols = Math.max(1, p.volumeCount);
+                    const segs = [
+                      { n: p.completed, c: '#34C759' },
+                      { n: p.reviewing, c: '#FF9500' },
+                      { n: p.processing, c: '#0071E3' },
+                    ];
+                    return (
+                      <div
+                        key={p.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => setProjectFilter(p.id)}
+                        onKeyDown={(e) => e.key === 'Enter' && setProjectFilter(p.id)}
+                        className="group relative bg-white rounded-3xl border border-black/[0.05] shadow-[0_2px_10px_rgba(0,0,0,0.04)] hover:shadow-[0_14px_36px_rgba(0,0,0,0.10)] hover:-translate-y-0.5 hover:border-[#0071E3]/30 p-6 transition-all duration-200 cursor-pointer"
+                      >
+                        <div className="flex items-center gap-3.5">
+                          <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-[#4DA3FF] to-[#0071E3] text-white text-xl font-bold flex items-center justify-center shadow-[0_6px_14px_rgba(0,113,227,0.25)] shrink-0">
+                            {p.name.slice(0, 1)}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="text-lg font-bold text-[#1D1D1F] tracking-tight truncate">{p.name}</div>
+                            <div className="text-xs text-[#86868B] mt-0.5">
+                              {p.volumeCount === 0 ? '还没有卷' : `${p.volumeCount} 卷 · 共 ${p.totalPages} 页`}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setProjectDeleteTarget(p);
+                            }}
+                            className="p-1.5 rounded-lg text-[#86868B] opacity-0 group-hover:opacity-100 hover:bg-[#FF3B30]/10 hover:text-[#FF3B30] transition-all cursor-pointer"
+                            title="删除项目"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
 
-              <button
-                type="button"
-                onClick={() => {
-                  setNewProjectName('');
-                  setShowProjectModal(true);
-                }}
-                className="min-h-[132px] rounded-[20px] border-2 border-dashed border-black/[0.12] hover:border-[#0071E3] hover:bg-[#0071E3]/[0.03] text-[#6E6E73] hover:text-[#0071E3] flex flex-col items-center justify-center gap-1.5 transition-all cursor-pointer"
-              >
-                <Plus className="w-6 h-6" />
-                <span className="text-sm font-semibold">新建项目</span>
-                <span className="text-xs opacity-80">例如：李氏</span>
-              </button>
+                        <div className="mt-5">
+                          {p.volumeCount === 0 ? (
+                            <div className="h-2 rounded-full bg-[#F2F2F7]" />
+                          ) : (
+                            <div className="flex h-2 rounded-full overflow-hidden bg-[#F2F2F7]">
+                              {segs.map((g, i) =>
+                                g.n > 0 ? <div key={i} style={{ width: `${(g.n / vols) * 100}%`, background: g.c }} /> : null,
+                              )}
+                            </div>
+                          )}
+                          <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1 mt-2.5 text-xs text-[#6E6E73] min-h-[18px]">
+                            {p.volumeCount === 0 ? (
+                              <span>点击进入，新建第一卷</span>
+                            ) : (
+                              <>
+                                {p.processing > 0 && (
+                                  <span className="inline-flex items-center gap-1"><i className="w-1.5 h-1.5 rounded-full bg-[#0071E3]" />处理中 {p.processing}</span>
+                                )}
+                                {p.reviewing > 0 && (
+                                  <span className="inline-flex items-center gap-1"><i className="w-1.5 h-1.5 rounded-full bg-[#FF9500]" />待审阅 {p.reviewing}</span>
+                                )}
+                                {p.completed > 0 && (
+                                  <span className="inline-flex items-center gap-1"><i className="w-1.5 h-1.5 rounded-full bg-[#34C759]" />已完成 {p.completed}</span>
+                                )}
+                                {p.volumeCount - p.processing - p.reviewing - p.completed > 0 && (
+                                  <span className="inline-flex items-center gap-1"><i className="w-1.5 h-1.5 rounded-full bg-[#C7C7CC]" />待处理 {p.volumeCount - p.processing - p.reviewing - p.completed}</span>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="mt-4 pt-3.5 border-t border-black/[0.05] flex items-center justify-between text-[13px] font-semibold text-[#0071E3]">
+                          <span>进入项目</span>
+                          <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-1" />
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  <button
+                    type="button"
+                    onClick={newProject}
+                    className="min-h-[190px] rounded-3xl border-2 border-dashed border-black/[0.12] hover:border-[#0071E3] hover:bg-[#0071E3]/[0.03] text-[#86868B] hover:text-[#0071E3] flex flex-col items-center justify-center gap-2 transition-all cursor-pointer"
+                  >
+                    <span className="w-10 h-10 rounded-full bg-[#F2F2F7] group-hover:bg-white flex items-center justify-center">
+                      <Plus className="w-5 h-5" />
+                    </span>
+                    <span className="text-sm font-semibold">新建项目</span>
+                  </button>
+                </div>
+              )}
 
               {orphan.length > 0 && (
                 <button
                   type="button"
                   onClick={() => setProjectFilter('none')}
-                  className="text-left bg-[#F5F5F7] rounded-[20px] border border-black/[0.05] hover:border-black/[0.12] p-5 transition-all cursor-pointer"
+                  className="mt-6 text-[13px] text-[#86868B] hover:text-[#0071E3] cursor-pointer"
                 >
-                  <div className="text-base font-semibold text-[#6E6E73]">未归类的卷</div>
-                  <div className="text-[13px] text-[#86868B] mt-1">{orphan.length} 卷 · 项目功能上线前创建的</div>
+                  另有 {orphan.length} 卷未归类（项目功能上线前创建） · 查看 →
                 </button>
               )}
             </div>
