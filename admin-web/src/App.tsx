@@ -502,16 +502,16 @@ export default function App() {
       ? undefined
       : tasks.find((t) => t.status === 'reviewing') || tasks[0]);
 
-  if (!currentUser) {
-    return <LoginView onLogin={handleLogin} />;
-  }
-
   const backToOcrProject = useCallback(() => {
     setOcrReturnId(activeOcrId);
     setCurrentTab('ocr');
     pushOcrUrl();
     void loadOcrTasks();
   }, [activeOcrId, loadOcrTasks]);
+
+  if (!currentUser) {
+    return <LoginView onLogin={handleLogin} />;
+  }
 
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden bg-[#F5F5F7] font-sans">
