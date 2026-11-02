@@ -61,3 +61,13 @@ mysql -uroot zupu_scan < sql/migrate_clean_model.sql
 mysql -uroot zupu_scan < sql/migrate_image_ai.sql   # 平台账号 + 图生图大模型处理
 mysql -uroot zupu_scan < sql/migrate_ocr.sql        # OCR 识别任务（ocr_tasks / ocr_pages）
 ```
+
+## 线上建库账号（密码与 server/.env.production 一致）
+```sql
+CREATE DATABASE IF NOT EXISTS `zupu_scan` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS 'zupu'@'localhost' IDENTIFIED BY 'Zupu@2026Db';
+ALTER USER 'zupu'@'localhost' IDENTIFIED BY 'Zupu@2026Db';
+GRANT ALL PRIVILEGES ON `zupu_scan`.* TO 'zupu'@'localhost';
+FLUSH PRIVILEGES;
+```
+本地开发仍用 init.sql 的默认账号（zupu / zupu123）。

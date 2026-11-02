@@ -1,11 +1,17 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-// load server/.env
+// 加载环境变量。优先级：系统环境变量 > server/.env > server/.env.production（仅线上）> 代码默认值
+// 本地开发（npm run start:dev）不带 --prod，走本地默认库；
+// 打包部署用 start:prod / deploy/windows/start.cmd（带 --prod），自动使用线上这套 .env.production
 (() => {
-  const envPath = path.join(__dirname, '..', '.env');
-  if (fs.existsSync(envPath)) {
-    const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+  const isProd = process.argv.includes('--prod') || process.env.APP_ENV === 'prod';
+  const files = ['.env'];
+  if (isProd) files.push('.env.production');
+  for (const f of files) {
+    const envPath = path.join(__dirname, '..', f);
+    if (!fs.existsSync(envPath)) continue;
+    const lines = fs.readFileSync(envPath, 'utf8').replace(/^\uFEFF/, '').split(/\r?\n/);
     for (const line of lines) {
       const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
       if (!m) continue;
