@@ -175,8 +175,11 @@ export const api = {
     request<any>('/ocr-tasks', { method: 'POST', body: JSON.stringify(data) }),
   getOcrTask: (id: string | number) => request<any>('/ocr-tasks/' + id),
   deleteOcrTask: (id: string | number) => request<any>('/ocr-tasks/' + id, { method: 'DELETE' }),
-  startOcrTask: (id: string | number, modelId?: number | null) =>
-    request<any>('/ocr-tasks/' + id + '/start', { method: 'POST', body: JSON.stringify(modelId ? { modelId } : {}) }),
+  startOcrTask: (id: string | number, modelId?: number | null, volumeId?: number | null) =>
+    request<any>('/ocr-tasks/' + id + '/start', {
+      method: 'POST',
+      body: JSON.stringify({ ...(modelId ? { modelId } : {}), ...(volumeId ? { volumeId } : {}) }),
+    }),
   getOcrPages: (id: string | number) => request<any[]>('/ocr-tasks/' + id + '/pages'),
   getOcrPage: (id: string | number, pageId: string | number) => request<any>(`/ocr-tasks/${id}/pages/${pageId}`),
   saveOcrPage: (id: string | number, pageId: string | number, columns: any[]) =>

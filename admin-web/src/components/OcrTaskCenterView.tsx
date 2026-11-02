@@ -19,13 +19,14 @@ import {
   AlertTriangle,
   ScanText,
   RotateCcw,
+  ChevronLeft,
 } from 'lucide-react';
 
 interface Props {
   tasks: OcrTask[];
   loading?: boolean;
   onRefresh?: () => void;
-  onStart: (taskId: string, modelId?: number | null) => void;
+  onStart: (taskId: string, modelId?: number | null, volumeId?: number | null) => void;
   onOpenReview: (taskId: string) => void;
   onCreate: (data: { name: string; projectId: string; ocrModelId: number | null }) => Promise<OcrTask>;
   onDelete: (taskId: string) => void | Promise<void>;
@@ -92,7 +93,10 @@ export const OcrTaskCenterView: React.FC<Props> = ({
   const [sources, setSources] = useState<OcrSourceTask[]>([]);
   const [sourcesLoading, setSourcesLoading] = useState(false);
   const [sourceId, setSourceId] = useState('');
-  const [syncingId, setSyncingId] = useState<string | null>(null);
+  /** 点进某个 OCR 项目看各卷 */
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [detailSrc, setDetailSrc] = useState<OcrSourceTask | null>(null);
+  const syncedRef = React.useRef<Set<string>>(new Set());
   const [taskName, setTaskName] = useState('');
   const [nameTouched, setNameTouched] = useState(false);
   const [models, setModels] = useState<any[]>([]);
@@ -102,6 +106,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
   const [creating, setCreating] = useState(false);
   // 继续 / 重试前选模型
   const [retryTask, setRetryTask] = useState<OcrTask | null>(null);
+  const [retryVolume, setRetryVolume] = useState<number | null>(null);
 
   const anyProcessing = tasks.some((t) => t.status === 'processing');
   const now = useNow(anyProcessing);
@@ -170,18 +175,36 @@ export const OcrTaskCenterView: React.FC<Props> = ({
     };
   }, [modelId, selectedSource]);
 
-  const syncTask = async (t: OcrTask) => {
-    setSyncingId(t.id);
-    try {
-      const r = await api.syncOcrTask(t.id);
-      onRefresh?.();
-      if (r.added) alert(`已把 ${r.added} 页新通过的页面加入任务，识别时会一并处理`);
-    } catch (e: any) {
-      alert(e?.message || '同步失败');
-    } finally {
-      setSyncingId(null);
+  /** 项目里有新完成的卷/新通过的页：自动并入识别任务，不用手点 */
+  useEffect(() => {
+    for (const t of tasks) {
+      if (!t.newPageCount || t.status === 'processing') continue;
+      const key = `${t.id}:${t.newPageCount}`;
+      if (syncedRef.current.has(key)) continue;
+      syncedRef.current.add(key);
+      void api
+        .syncOcrTask(t.id)
+        .then(() => onRefresh?.())
+        .catch(() => {});
     }
-  };
+  }, [tasks, onRefresh]);
+
+  const loadDetail = React.useCallback(async (task: OcrTask) => {
+    try {
+      const src = (await api.getOcrSources()).map(mapOcrSource).find((x) => x.id === String(task.projectId));
+      setDetailSrc(src || null);
+    } catch {
+      setDetailSrc(null);
+    }
+  }, []);
+  const openTask = openId ? tasks.find((t) => t.id === openId) || null : null;
+  useEffect(() => {
+    if (!openTask) {
+      setDetailSrc(null);
+      return;
+    }
+    void loadDetail(openTask);
+  }, [openId, openTask?.totalCount, openTask?.doneCount, openTask?.confirmedCount, loadDetail]);
 
   const submit = async (startAfter: boolean) => {
     if (!sourceId) return alert('请先选择一个项目');
@@ -197,15 +220,130 @@ export const OcrTaskCenterView: React.FC<Props> = ({
     }
   };
 
+  const renderDetail = (task: OcrTask) => {
+    const isProcessing = task.status === 'processing';
+    const vols = detailSrc?.volumes || [];
+    return (
+      <div>
+        <div className="flex items-start justify-between gap-4 mb-5 pb-3.5 border-b border-black/[0.06]">
+          <div className="min-w-0">
+            <button type="button" onClick={() => setOpenId(null)} className="inline-flex items-center gap-1 text-[13px] font-medium text-[#0071E3] hover:underline cursor-pointer mb-1">
+              <ChevronLeft className="w-4 h-4" />
+              全部项目
+            </button>
+            <div className="flex items-center gap-2.5">
+              <h1 className="text-2xl font-bold text-[#1D1D1F] tracking-tight truncate">{task.projectName || task.name}</h1>
+              <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#0071E3]/10 text-[#0071E3]">{OCR_STATUS_TEXT[task.status] || task.status}</span>
+            </div>
+            <p className="text-sm text-[#86868B] mt-1 font-medium">
+              已并入 {task.totalCount} 页 · 已识别 {task.doneCount} · 已确认 {task.confirmedCount}
+              {task.charCount ? ` · ${task.charCount} 字` : ''}。哪一卷已完成，就在下面点「开始 OCR」识别那一卷。
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {isProcessing && task.doneCount > 0 && (
+              <button onClick={() => onOpenReview(task.id)} className="h-10 px-4 text-sm font-semibold rounded-full bg-white border border-[#0071E3]/30 text-[#0071E3] cursor-pointer">
+                先去审阅（{task.doneCount} 页）
+              </button>
+            )}
+            {!isProcessing && task.doneCount > 0 && (
+              <button onClick={() => onOpenReview(task.id)} className="h-10 px-5 text-sm font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white cursor-pointer flex items-center gap-1.5">
+                {task.status === 'completed' ? '查看' : '进入审阅'}
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            )}
+            {!isProcessing && task.doneCount > 0 && (
+              <button onClick={() => window.open(ocrExportUrl(task.id, 'columns'), '_blank')} className="h-10 px-4 text-sm font-semibold rounded-full bg-[#34C759] text-white cursor-pointer flex items-center gap-1.5" title="下载已识别页的文字（txt）">
+                <Download className="w-3.5 h-3.5" />
+                导出文字
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="text-sm font-semibold text-[#1D1D1F] mb-3">项目里的卷</div>
+        {vols.length === 0 ? (
+          <div className="bg-white rounded-3xl border border-black/[0.06] p-10 text-center text-sm text-[#86868B]">加载中…</div>
+        ) : (
+          <div className="space-y-3">
+            {vols.map((v: any) => {
+              const inTask = Number(v.inTask) || 0;
+              const rec = Number(v.recognized) || 0;
+              const conf = Number(v.confirmed) || 0;
+              const allDone = inTask > 0 && rec >= inTask;
+              const startVol = () => {
+                if (task.modelUsable === false) {
+                  setRetryVolume(v.id);
+                  setRetryTask(task);
+                } else {
+                  onStart(task.id, null, v.id);
+                }
+              };
+              return (
+                <div key={v.id} className="bg-white rounded-[20px] border border-black/[0.05] shadow-[0_1px_2px_rgba(0,0,0,0.03)] px-5 py-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-base font-semibold text-[#1D1D1F] truncate">{v.name}</h3>
+                      {v.completed ? (
+                        <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#34C759]/12 text-[#248A3D]">图片处理已完成</span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#FF9500]/12 text-[#B25E00]">{v.status === 'processing' ? '图片处理中' : v.status === 'reviewing' ? '图片审阅中' : '待处理'}</span>
+                      )}
+                    </div>
+                    <p className="text-[13px] text-[#86868B] mt-1">
+                      {v.completed
+                        ? `通过 ${v.usable} / ${v.total} 页${inTask ? ` · 已识别 ${rec}/${inTask} · 已确认 ${conf}` : ' · 正在并入…'}`
+                        : `图片处理还没完成（已通过 ${v.passed} / ${v.total} 页），完成后才能做 OCR`}
+                    </p>
+                  </div>
+                  {v.completed ? (
+                    <div className="flex items-center gap-2 shrink-0">
+                      {allDone ? (
+                        <span className="inline-flex items-center gap-1 text-[13px] font-semibold text-[#248A3D]">
+                          <CheckCircle2 className="w-4 h-4" />
+                          已识别
+                        </span>
+                      ) : null}
+                      {isProcessing ? (
+                        <button disabled className="h-10 px-5 text-sm font-semibold rounded-full bg-[#E8F1FC] text-[#0071E3] cursor-not-allowed flex items-center gap-1.5">
+                          <Sparkles className="w-3.5 h-3.5 animate-spin" />
+                          识别中
+                        </button>
+                      ) : inTask > 0 && !allDone ? (
+                        <button
+                          onClick={startVol}
+                          className="h-10 px-5 text-sm font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] cursor-pointer flex items-center gap-1.5 active:scale-[0.98]"
+                        >
+                          <Play className="w-3 h-3 fill-current" />
+                          {rec > 0 ? '继续 OCR' : '开始 OCR'}
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {onGoImageTasks ? (
+          <button type="button" onClick={onGoImageTasks} className="mt-4 text-[13px] text-[#0071E3] hover:underline cursor-pointer">
+            去图片处理继续上传 / 审阅卷 →
+          </button>
+        ) : null}
+      </div>
+    );
+  };
+
   return (
     <div className="flex-1 overflow-y-auto bg-[#F5F5F7]">
       <div className="px-6 py-6 lg:px-10 lg:py-8 max-w-[1440px] mx-auto w-full min-h-full flex flex-col justify-between">
         <div>
+          {openTask ? renderDetail(openTask) : (<>
           <div className="flex items-center justify-between gap-4 mb-5 pb-3.5 border-b border-black/[0.06]">
             <div>
-              <h1 className="text-2xl font-bold text-[#1D1D1F] tracking-tight">OCR 识别任务</h1>
+              <h1 className="text-2xl font-bold text-[#1D1D1F] tracking-tight">OCR 识别 · 项目</h1>
               <p className="text-sm text-[#86868B] mt-1 font-medium">
-                一个项目一个识别任务：自动汇总项目下各卷「通过」的页，按卷、按页顺序识别；审阅时可在图片上逐字核对、修改
+                先新建项目（选一个图片处理的项目），点进去能看到它的各卷；卷在图片处理里审阅完成后会自动并入，按卷、按页顺序识别
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -222,7 +360,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                 className="flex items-center gap-1.5 h-10 px-5 bg-[#0071E3] hover:bg-[#0077ED] active:scale-[0.98] text-white text-sm font-semibold rounded-xl shadow-[0_2px_8px_rgba(0,113,227,0.25)] transition-all cursor-pointer whitespace-nowrap shrink-0"
               >
                 <Plus className="w-4 h-4 stroke-[2.5]" />
-                <span>新建 OCR 任务</span>
+                <span>新建项目</span>
               </button>
             </div>
           </div>
@@ -271,11 +409,11 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                   <ScanText className="w-6 h-6" />
                 </div>
                 <p className="text-sm font-semibold text-[#1D1D1F] mb-1">
-                  {tasks.length === 0 ? '还没有 OCR 任务' : '未找到符合条件的任务'}
+                  {tasks.length === 0 ? '还没有 OCR 项目' : '未找到符合条件的任务'}
                 </p>
                 <p className="text-xs text-[#86868B] mb-4">
                   {tasks.length === 0
-                    ? '先在「图片处理」里把项目下各卷审阅并标记通过，然后在这里新建识别任务'
+                    ? '先在「图片处理」里把项目下的卷审阅完成，然后在这里新建 OCR 项目'
                     : '换个筛选条件试试'}
                 </p>
                 {tasks.length === 0 ? (
@@ -283,7 +421,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                     onClick={() => void openCreate()}
                     className="px-4 py-2 bg-[#0071E3] hover:bg-[#0077ED] text-white text-xs font-semibold rounded-xl cursor-pointer"
                   >
-                    新建 OCR 任务
+                    新建项目
                   </button>
                 ) : (
                   <button
@@ -318,7 +456,13 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                       </div>
                       <div className="min-w-0 flex-1 space-y-1.5">
                         <div className="flex items-center gap-2 min-w-0">
-                          <h3 className="text-base font-semibold text-[#1D1D1F] tracking-tight truncate leading-snug">{task.name}</h3>
+                          <h3
+                            onClick={() => setOpenId(task.id)}
+                            className="text-base font-semibold text-[#1D1D1F] tracking-tight truncate leading-snug cursor-pointer hover:text-[#0071E3]"
+                            title="点击查看项目里的各卷"
+                          >
+                            {task.name}
+                          </h3>
                           {isProcessing ? (
                             <span className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#0071E3]/10 text-[#0071E3]">
                               <Sparkles className="w-3 h-3 animate-spin" />
@@ -396,7 +540,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                           </div>
                         )}
 
-                        {!isProcessing && (task.errorMessage || task.newPageCount || task.staleCount || task.failedCount || (task.status === 'reviewing' && task.uncertainCount > 0)) ? (
+                        {!isProcessing && (task.errorMessage || task.staleCount || task.failedCount || (task.status === 'reviewing' && task.uncertainCount > 0)) ? (
                           <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
                             {task.failedCount || task.errorMessage ? (
                               <span
@@ -405,19 +549,6 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                               >
                                 <span className="w-1.5 h-1.5 rounded-full bg-[#FF3B30]" />
                                 {task.failedCount ? `${task.failedCount} 页识别失败` : '识别出错'}
-                              </span>
-                            ) : null}
-                            {task.newPageCount ? (
-                              <span className="inline-flex items-center gap-1.5 pl-2.5 pr-1 py-0.5 rounded-full text-xs font-medium bg-[#34C759]/12 text-[#248A3D]" title="项目里又有页面审阅通过了，还没加进这个识别任务">
-                                新增 {task.newPageCount} 页待加入
-                                <button
-                                  type="button"
-                                  disabled={syncingId === task.id}
-                                  onClick={() => void syncTask(task)}
-                                  className="px-2 py-0.5 rounded-full bg-[#34C759] text-white text-[11px] font-semibold hover:bg-[#2FB350] disabled:opacity-60 cursor-pointer"
-                                >
-                                  {syncingId === task.id ? '加入中…' : '加入任务'}
-                                </button>
                               </span>
                             ) : null}
                             {task.staleCount ? (
@@ -521,6 +652,12 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                         </>
                       )}
                       <button
+                        onClick={() => setOpenId(task.id)}
+                        className="h-10 px-4 text-sm font-semibold rounded-full bg-white border border-black/[0.1] text-[#1D1D1F] hover:bg-[#F5F5F7] transition-all cursor-pointer"
+                      >
+                        各卷
+                      </button>
+                      <button
                         onClick={() => setDeleteTarget(task)}
                         disabled={isProcessing}
                         className="w-10 h-10 rounded-full flex items-center justify-center text-[#86868B] hover:text-[#FF3B30] hover:bg-[#FF3B30]/8 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
@@ -534,9 +671,10 @@ export const OcrTaskCenterView: React.FC<Props> = ({
               })
             )}
           </div>
+          </>)}
         </div>
 
-        {filtered.length > pageSize && (
+        {!openTask && filtered.length > pageSize && (
           <div className="flex items-center justify-center gap-2 mt-6 text-[13px] text-[#6E6E73]">
             <button
               disabled={currentPage <= 1}
@@ -558,14 +696,14 @@ export const OcrTaskCenterView: React.FC<Props> = ({
           </div>
         )}
 
-        {/* 新建 OCR 任务 */}
+        {/* 新建项目 */}
         {showCreate && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm animate-fade-in">
             <div className="bg-white rounded-3xl border border-black/[0.08] shadow-[0_24px_64px_rgba(0,0,0,0.18)] max-w-[680px] w-full max-h-[calc(100vh-32px)] flex flex-col animate-apple-in">
               <div className="flex items-start justify-between px-6 pt-5 pb-4 border-b border-black/[0.06] shrink-0">
                 <div>
-                  <h3 className="text-base font-bold text-[#1D1D1F]">新建 OCR 识别任务</h3>
-                  <p className="text-xs text-[#86868B] mt-0.5">选择一个项目，汇总它下面各卷「通过」的页面，按卷、按页顺序识别文字</p>
+                  <h3 className="text-base font-bold text-[#1D1D1F]">新建 OCR 项目</h3>
+                  <p className="text-xs text-[#86868B] mt-0.5">选一个图片处理的项目。它下面「已完成」的卷会自动并入，之后完成的卷也会自动加进来</p>
                 </div>
                 <button onClick={() => setShowCreate(false)} className="text-[#86868B] hover:text-[#1D1D1F] text-xl font-light p-1 cursor-pointer leading-none" aria-label="关闭">
                   ×
@@ -576,14 +714,14 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                 <div>
                   <div className="flex items-center gap-2 mb-2.5">
                     <span className="w-5 h-5 rounded-full bg-[#0071E3] text-white text-[10px] font-bold flex items-center justify-center">1</span>
-                    <span className="text-sm font-semibold text-[#1D1D1F]">选择项目</span>
+                    <span className="text-sm font-semibold text-[#1D1D1F]">选择图片处理的项目</span>
                   </div>
                   {sourcesLoading ? (
                     <p className="text-xs text-[#86868B] px-1">加载中…</p>
                   ) : sources.length === 0 ? (
                     <div className="rounded-2xl border border-dashed border-black/[0.12] bg-[#F5F5F7] p-5 text-center">
                       <p className="text-[13px] text-[#1D1D1F] font-semibold">还没有项目</p>
-                      <p className="text-xs text-[#86868B] mt-1 leading-relaxed">先在「图片处理」里新建项目、上传各卷并审阅，把处理好的页标记为「通过」，再来识别。</p>
+                      <p className="text-xs text-[#86868B] mt-1 leading-relaxed">先在「图片处理」里新建项目、上传各卷并审阅完成，再来这里新建 OCR 项目。</p>
                       {onGoImageTasks ? (
                         <button
                           type="button"
@@ -623,19 +761,19 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                               </span>
                             </div>
                             {s.ocrTaskId ? (
-                              <p className="text-xs text-[#C93400] mt-1.5">已有 OCR 任务「{s.ocrTaskName}」，新通过的页请在任务里点「加入任务」，不用重复建</p>
+                              <p className="text-xs text-[#C93400] mt-1.5">已建过 OCR 项目「{s.ocrTaskName}」，后面完成的卷会自动并入，不用重复建</p>
                             ) : s.usableCount === 0 ? (
-                              <p className="text-xs text-[#86868B] mt-1.5">还没有「通过」的页面，先去图片处理审阅</p>
+                              <p className="text-xs text-[#86868B] mt-1.5">还没有「已完成」的卷，先去图片处理把卷审阅完</p>
                             ) : (
                               <div className="flex flex-wrap gap-1.5 mt-2">
                                 {s.volumes.map((v) => (
                                   <span
                                     key={v.id}
                                     className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${
-                                      v.usable >= v.total && v.total > 0 ? 'bg-[#34C759]/12 text-[#248A3D]' : 'bg-white text-[#6E6E73] border border-black/[0.06]'
+                                      v.completed ? 'bg-[#34C759]/12 text-[#248A3D]' : 'bg-white text-[#86868B] border border-black/[0.06]'
                                     }`}
                                   >
-                                    {v.name} {v.usable}/{v.total}
+                                    {v.completed ? `✓ ${v.name} · ${v.usable} 页` : `${v.name} · 未完成`}
                                   </span>
                                 ))}
                               </div>
@@ -643,7 +781,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                           </button>
                         );
                       })}
-                      <p className="text-[11px] text-[#86868B] px-1 leading-relaxed">只识别「通过」的页；还在审阅的卷，后面通过的页可随时加入这个任务。</p>
+                      <p className="text-[11px] text-[#86868B] px-1 leading-relaxed">只识别「已完成」的卷里通过的页；还没完成的卷，完成后会自动并入这个项目。</p>
                     </div>
                   )}
                 </div>
@@ -743,12 +881,17 @@ export const OcrTaskCenterView: React.FC<Props> = ({
           confirmText="开始识别"
           currentModelId={retryTask?.ocrModelId}
           pageCount={retryTask ? Math.max(1, retryTask.status === 'failed' ? retryTask.totalCount - retryTask.doneCount : retryTask.failedCount) : 1}
-          onClose={() => setRetryTask(null)}
+          onClose={() => {
+            setRetryTask(null);
+            setRetryVolume(null);
+          }}
           onOpenSetup={onOpenSetup}
           onConfirm={(modelId) => {
             const t = retryTask;
             setRetryTask(null);
-            if (t) onStart(t.id, modelId);
+            const vid = retryVolume;
+            setRetryVolume(null);
+            if (t) onStart(t.id, modelId, vid);
           }}
         />
 

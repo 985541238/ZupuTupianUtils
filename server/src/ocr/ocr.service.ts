@@ -173,12 +173,14 @@ export class OcrService implements OnModuleInit {
   private async projectUsable(userId: number, projectId: number) {
     const vols = await this.srcTasks.find({ where: { userId, projectId }, order: { id: 'ASC' } });
     const out: { img: TaskImage; vol: Task }[] = [];
-    const volStat: { id: number; name: string; usable: number; total: number; status: string }[] = [];
+    const volStat: { id: number; name: string; usable: number; passed: number; total: number; status: string; completed: boolean }[] = [];
     for (const v of vols) {
       const imgs = await this.srcImages.find({ where: { taskId: v.id }, order: { sortOrder: 'ASC', id: 'ASC' } });
       const ok = imgs.filter((i) => i.status === 'confirmed' && i.resultPath && fs.existsSync(i.resultPath));
-      for (const img of ok) out.push({ img, vol: v });
-      volStat.push({ id: Number(v.id), name: v.name, usable: ok.length, total: imgs.length, status: v.status });
+      // 只收「已完成」的卷（整卷都审阅完）；没完成的卷列出来，完成后自动并入
+      const done = v.status === 'completed';
+      if (done) for (const img of ok) out.push({ img, vol: v });
+      volStat.push({ id: Number(v.id), name: v.name, usable: done ? ok.length : 0, passed: ok.length, total: imgs.length, status: v.status, completed: done });
     }
     return { vols, items: out, volStat };
   }
@@ -191,6 +193,19 @@ export class OcrService implements OnModuleInit {
     for (const p of projs) {
       const { items, volStat } = await this.projectUsable(userId, Number(p.id));
       const ocr = existing.find((t) => Number(t.projectId) === Number(p.id));
+      let volumes: any[] = volStat;
+      if (ocr) {
+        const pg = await this.pages.find({ where: { ocrTaskId: ocr.id }, select: ['id', 'volumeId', 'status'] });
+        volumes = volStat.map((v) => {
+          const mine = pg.filter((x) => Number(x.volumeId) === v.id);
+          return {
+            ...v,
+            inTask: mine.length,
+            recognized: mine.filter((x) => x.status === 'ready' || x.status === 'confirmed').length,
+            confirmed: mine.filter((x) => x.status === 'confirmed').length,
+          };
+        });
+      }
       out.push({
         id: Number(p.id),
         name: p.name,
@@ -198,7 +213,7 @@ export class OcrService implements OnModuleInit {
         volumeCount: volStat.length,
         totalCount: volStat.reduce((a, v) => a + v.total, 0),
         usableCount: items.length,
-        volumes: volStat,
+        volumes,
         ocrTaskId: ocr ? Number(ocr.id) : null,
         ocrTaskName: ocr ? ocr.name : null,
         updatedAt: p.updatedAt,
@@ -251,7 +266,7 @@ export class OcrService implements OnModuleInit {
     if (dup) throw new BadRequestException(`「${proj.name}」已经有 OCR 任务了，新通过的页面请在任务里点「同步新页面」`);
     const { items, vols } = await this.projectUsable(userId, pid);
     if (!vols.length) throw new BadRequestException('这个项目里还没有卷，请先在图片处理里新建卷');
-    if (!items.length) throw new BadRequestException('这个项目里还没有「通过」的页面，请先在图片处理里审阅并标记通过');
+    if (!items.length) throw new BadRequestException('这个项目里还没有「通过」的页面，请先在图片处理里把卷审阅完成');
 
     const model = await this.settings.baiduOcrEngine();
     const name = String(body.name || '').trim() || `${proj.name} · OCR`;
@@ -316,7 +331,7 @@ export class OcrService implements OnModuleInit {
 
   // ---------------- 开始识别 ----------------
 
-  async start(userId: number, id: number, body: { modelId?: number } = {}) {
+  async start(userId: number, id: number, body: { modelId?: number; volumeId?: number } = {}) {
     const task = await this.getTask(userId, id);
     const tid = Number(task.id);
     if (this.running.has(tid)) return { message: '正在识别中', task: await this.getView(userId, tid) };
@@ -334,8 +349,12 @@ export class OcrService implements OnModuleInit {
       throw new BadRequestException(e?.message || String(e));
     }
 
-    const todo = await this.pages.count({ where: { ocrTaskId: tid, status: In(['pending', 'failed', 'processing']) } });
-    if (!todo) throw new BadRequestException('所有页面都已识别，可直接进入审阅');
+    // 只识别某一卷（项目里点某卷的「开始 OCR」）；不传则识别任务里所有没识别的页
+    const volumeId = Number(body.volumeId) || 0;
+    const scope: any = { ocrTaskId: tid, status: In(['pending', 'failed', 'processing']) };
+    if (volumeId) scope.volumeId = volumeId;
+    const todo = await this.pages.count({ where: scope });
+    if (!todo) throw new BadRequestException(volumeId ? '这一卷的页面都已识别，可直接进入审阅' : '所有页面都已识别，可直接进入审阅');
 
     task.status = 'processing';
     task.errorMessage = null;
@@ -344,18 +363,18 @@ export class OcrService implements OnModuleInit {
     await this.tasks.save(task);
     this.cancelled.delete(tid);
     this.running.add(tid);
-    void this.runTask(tid).catch((e) => this.logger.error(`OCR task ${tid} crashed: ${e}`));
+    void this.runTask(tid, volumeId || undefined).catch((e) => this.logger.error(`OCR task ${tid} crashed: ${e}`));
     return { message: '已开始识别', task: await this.getView(userId, tid) };
   }
 
-  private async runTask(tid: number) {
+  private async runTask(tid: number, volumeId?: number) {
     const started = Date.now();
     try {
       const task = await this.tasks.findOne({ where: { id: tid } });
       if (!task) return;
       const model = await this.settings.baiduOcrEngine();
       const queue = await this.pages.find({
-        where: { ocrTaskId: tid, status: In(['pending', 'failed', 'processing']) },
+        where: { ocrTaskId: tid, status: In(['pending', 'failed', 'processing']), ...(volumeId ? { volumeId } : {}) },
         order: { sortOrder: 'ASC' },
       });
       const general = await this.settings.getGeneral();
