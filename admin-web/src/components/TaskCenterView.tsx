@@ -40,6 +40,9 @@ interface TaskCenterViewProps {
   onOpenSetup?: (platform?: string | null, step?: 1 | 2 | 3, onDone?: () => void) => void;
 }
 
+/** 任务卡上的「已通过 / 未通过」下载按钮，暂时隐藏 */
+const SHOW_TASK_DOWNLOAD = false;
+
 type TimeFilterType = 'all' | 'today' | 'week' | 'month' | 'custom';
 
 /** 列表里的阶段：只分三类。未处理、处理中、暂停（失败）都算「待处理」，卡片上的状态标签仍会显示具体情况 */
@@ -1143,6 +1146,9 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                           <Sliders className="w-3.5 h-3.5 text-[#0071E3]" />
                           <span>查看</span>
                         </button>
+                        {/* 下载净图 ZIP：暂时隐藏，把 SHOW_TASK_DOWNLOAD 改成 true 即可恢复 */}
+                        {SHOW_TASK_DOWNLOAD && (
+                          <>
                         <button
                           onClick={() => handleDownloadTaskZip(task, 'passed')}
                           className="h-10 px-4 text-sm font-semibold rounded-full bg-[#34C759] hover:bg-[#2EB84E] text-white shadow-[0_2px_8px_rgba(52,199,89,0.25)] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
@@ -1159,6 +1165,8 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                           <Download className="w-3.5 h-3.5" />
                           <span>未通过</span>
                         </button>
+                          </>
+                        )}
                       </>
                     )}
                     {onDeleteTask && (
