@@ -8,7 +8,6 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as fs from 'fs';
-import { peekViewProxy } from '../common/view-proxy';
 import * as os from 'os';
 import * as crypto from 'crypto';
 import * as path from 'path';
@@ -1270,8 +1269,8 @@ export class TasksService implements OnModuleInit {
     }
     await this.restoreOriginalSource(task, img);
     try {
-      const src = peekViewProxy(img.sourcePath) || img.sourcePath;
-      const r = await this.processor.detectMode(src);
+      // 必须用原图做脏污/彩页/标准判断：压缩工作图(JPEG)会改变颜色分布，导致误判
+      const r = await this.processor.detectMode(img.sourcePath);
       if (key) {
         if (this.detectCache.size > 2000) this.detectCache.clear();
         this.detectCache.set(key, r);
