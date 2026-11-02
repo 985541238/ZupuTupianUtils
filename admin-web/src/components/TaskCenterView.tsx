@@ -155,7 +155,8 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
 
   // Filtered Tasks
   const filteredTasks = useMemo(() => {
-    return tasks.filter((task) => {
+    // 项目里的卷：先新建的排在最上面（卷1、卷2…）
+    return [...tasks].sort((x, y) => Number(x.id) - Number(y.id)).filter((task) => {
       // 1. Status Filter
       if (statusFilter !== 'all' && stageOf(task) !== statusFilter) return false;
 
