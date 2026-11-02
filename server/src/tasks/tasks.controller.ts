@@ -1,3 +1,4 @@
+import sharp from 'sharp';
 import {
   Body,
   Controller,
@@ -82,6 +83,20 @@ class ProjectDto {
   description?: string;
 }
 
+/** 审阅页预览图：长边最多 2200px 的 PNG（线稿类图片压缩率高），原尺寸成品仍在磁盘上 */
+async function shrinkForView(buf: Buffer): Promise<Buffer> {
+  try {
+    const meta = await sharp(buf).metadata();
+    if (Math.max(meta.width || 0, meta.height || 0) <= 2200) return buf;
+    return await sharp(buf)
+      .resize({ width: 2200, height: 2200, fit: 'inside', withoutEnlargement: true })
+      .png({ compressionLevel: 6 })
+      .toBuffer();
+  } catch {
+    return buf;
+  }
+}
+
 @Controller('tasks')
 @UseGuards(JwtAuthGuard)
 export class TasksController {
@@ -161,7 +176,8 @@ export class TasksController {
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('X-Result-Mode', r.mode);
     res.setHeader('Access-Control-Expose-Headers', 'X-Result-Mode');
-    res.send(r.buf);
+    // 成品已落盘（全分辨率）；这里只返回给审阅页看的缩小版，避免一次传十几 MB 的 PNG
+    res.send(await shrinkForView(r.buf));
   }
 
   /** 快速预览：拖动滑块时的即时反馈，降分辨率、不落盘（成品仍由 /preview 完整生成） */
@@ -175,7 +191,7 @@ export class TasksController {
   ) {
     const buf = await this.tasks.previewImageFast(req.user.id, id, imageId, body || {});
     res.setHeader('Content-Type', 'image/png');
-    res.send(buf);
+    res.send(await shrinkForView(buf));
   }
 
   /** 自动检测这页更像脏污 / 字迹不清 / 标准（本地，不花钱） */

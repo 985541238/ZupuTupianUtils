@@ -1,5 +1,5 @@
 import { ScanItem, Task, User } from '../types';
-import { authImageUrl } from './client';
+import { authImageUrl, viewImageUrl } from './client';
 import type { OcrTask, OcrPage, OcrSourceTask, OcrTextPage } from '../types';
 import { DEFAULT_UI_PARAMS, nestToUiParams } from './params';
 
@@ -66,10 +66,10 @@ export function mapImage(raw: any, taskId: string | number, pageNumber: number):
     pageNumber,
     fileName: raw.fileName || raw.name || `page_${pageNumber}.jpg`,
     // 原图永远是真正的原图：做过透视修正也不变，只有结果图变；裁剪要在拉正后的图上框选，用 correctedUrl
-    originalUrl: authImageUrl(raw.perspectiveApplied && raw.trueOriginalUrl ? raw.trueOriginalUrl : raw.sourceUrl),
-    correctedUrl: authImageUrl(raw.sourceUrl),
-    processedUrl: raw.resultUrl ? authImageUrl(raw.resultUrl) : undefined,
-    thumbnailUrl: authImageUrl(raw.thumbUrl || raw.sourceUrl),
+    originalUrl: viewImageUrl(raw.perspectiveApplied && raw.trueOriginalUrl ? raw.trueOriginalUrl : raw.sourceUrl),
+    correctedUrl: viewImageUrl(raw.sourceUrl),
+    processedUrl: raw.resultUrl ? viewImageUrl(raw.resultUrl) : undefined,
+    thumbnailUrl: raw.thumbUrl ? authImageUrl(raw.thumbUrl) : viewImageUrl(raw.sourceUrl, 600),
     trueOriginalUrl: authImageUrl(raw.trueOriginalUrl || raw.sourceUrl),
     perspectiveApplied: !!raw.perspectiveApplied,
     perspectiveQuads: raw.perspectiveQuads || null,

@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import * as os from 'os';
+import { cpuGate } from '../common/cpu-gate';
 
 export type ProcessParams = {
   threshold: number; // 80-220, maps to adaptive C bias around 168
@@ -172,8 +173,15 @@ export class ImageProcessService {
     if (!bin) throw new Error('服务器缺少 Python OpenCV（opencv-python），无法做透视修正');
     const script = path.join(__dirname, '..', '..', 'scripts', 'perspective.py');
     if (!fs.existsSync(script)) throw new Error('缺少脚本 scripts/perspective.py，请重新部署');
-    return new Promise((resolve, reject) => {
-      const child = spawn(bin, [script, ...args], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const release = await cpuGate.acquire('interactive');
+    return new Promise((resolve0, reject0) => {
+      const resolve = (v: any) => { release(); resolve0(v); };
+      const reject = (e: any) => { release(); reject0(e); };
+      const child = spawn(bin, [script, ...args], {
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, OMP_NUM_THREADS: '1', OPENBLAS_NUM_THREADS: '1', MKL_NUM_THREADS: '1' },
+      });
       let out = '';
       let err = '';
       const timer = setTimeout(() => {
@@ -263,13 +271,14 @@ export class ImageProcessService {
     return null;
   }
 
-  private runPython(
+  private async runPython(
     bin: string,
     sourcePath: string,
     outPath: string,
     params: ProcessParams,
     crop?: CropBox | null,
     fast = false,
+    interactive = false,
   ): Promise<{ width: number; height: number }> {
     const args = [
       this.scriptPath(),
@@ -302,11 +311,21 @@ export class ImageProcessService {
     }
     const timeoutMs = Number(process.env.PROCESS_IMAGE_TIMEOUT_MS || 180000);
     // 快速预览：降分辨率处理、跳过细笔收边（只用于拖动滑块时的即时反馈；落盘成品走完整流程）
+    // 每个 Python 进程只用 1 个计算线程：并发数由 cpuGate 统一控制，避免单进程吃满所有核
+    const threadEnv = { OMP_NUM_THREADS: '1', OPENBLAS_NUM_THREADS: '1', MKL_NUM_THREADS: '1', NUMEXPR_NUM_THREADS: '1' };
     const childEnv = fast
-      ? { ...process.env, ZW_MAX_PIXELS: '1300000', ZW_SKIP_REFINE: '1' }
-      : process.env;
-    return new Promise((resolve, reject) => {
+      ? { ...process.env, ...threadEnv, ZW_MAX_PIXELS: '1300000', ZW_SKIP_REFINE: '1' }
+      : { ...process.env, ...threadEnv };
+    // 排队等名额：预览优先于批量；批量最多占 总并发-1 路
+    const release = await cpuGate.acquire(interactive ? 'interactive' : 'batch');
+    return new Promise<{ width: number; height: number }>((resolve0, reject0) => {
+      const resolve = (v: any) => { release(); resolve0(v); };
+      const reject = (e: any) => { release(); reject0(e); };
       const child = spawn(bin, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: childEnv });
+      // 批量处理降为低优先级，别和同机其它服务抢 CPU
+      if (!interactive && child.pid) {
+        try { os.setPriority(child.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); } catch { /* ignore */ }
+      }
       let stdout = '';
       let stderr = '';
       let settled = false;
@@ -418,6 +437,7 @@ export class ImageProcessService {
     params: ProcessParams,
     crop?: CropBox | null,
     fast = false,
+    interactive = false,
   ): Promise<{ width: number; height: number }> {
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
     const resolved = await this.resolveCropAgainstSource(sourcePath, crop);
@@ -449,7 +469,7 @@ export class ImageProcessService {
       if (py && fs.existsSync(this.scriptPath())) {
         try {
           // Crop already applied to workPath; do not pass --crop again.
-          return await this.runPython(py, workPath, outPath, paramsForRun, null, fast);
+          return await this.runPython(py, workPath, outPath, paramsForRun, null, fast, interactive);
         } catch (e) {
           if (wantedCrop) {
             // Never silently return a full-page clean when user asked for a crop.
@@ -702,7 +722,7 @@ export class ImageProcessService {
       '_preview',
       `${Date.now()}-${Math.random().toString(16).slice(2)}.png`,
     );
-    await this.processToFile(sourcePath, tmp, params, crop, fast);
+    await this.processToFile(sourcePath, tmp, params, crop, fast, true);
     const buf = fs.readFileSync(tmp);
     try {
       fs.unlinkSync(tmp);

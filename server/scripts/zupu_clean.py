@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cv2
+cv2.setNumThreads(1)  # 并发由服务端统一控制，单进程不再自己开多线程
 import numpy as np
 
 import dataclasses

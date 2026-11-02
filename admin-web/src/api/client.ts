@@ -277,6 +277,13 @@ export function authImageUrl(url?: string | null): string {
   return full + sep + 'access_token=' + encodeURIComponent(getToken());
 }
 
+/** 审阅页展示用的"工作图"：服务端按长边缩小并缓存，大图不再整张传输；原图/成品文件不变 */
+export function viewImageUrl(url?: string | null, maxSide = 2400): string {
+  const u = authImageUrl(url);
+  if (!u || u.startsWith('blob:') || u.startsWith('data:') || !u.includes('/files/local')) return u;
+  return u + '&w=' + maxSide;
+}
+
 export function downloadUrl(
   taskId: string | number,
   filter: 'all' | 'passed' | 'failed' = 'all',

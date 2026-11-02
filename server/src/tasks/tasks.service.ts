@@ -1326,6 +1326,8 @@ export class TasksService implements OnModuleInit {
       resultPath,
       params,
       processCrop,
+      false,
+      true,
     );
     await this.processor.makeThumb(resultPath, thumbPath);
     img.processingTimeMs = Date.now() - imgStartedAt;
@@ -1406,6 +1408,8 @@ export class TasksService implements OnModuleInit {
       resultPath,
       params,
       processCrop,
+      false,
+      true,
     );
     await this.processor.makeThumb(resultPath, thumbPath);
     img.processingTimeMs = Date.now() - imgStartedAt;
