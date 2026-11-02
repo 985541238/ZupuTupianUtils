@@ -114,6 +114,7 @@ export function mapTask(raw: any, images?: any[]): Task {
     description: raw.description || undefined,
     genealogyNote: raw.genealogyNote || raw.surname || undefined,
     surname: raw.surname || raw.genealogyNote || undefined,
+    projectId: raw.projectId != null ? Number(raw.projectId) : null,
     useAi: !!raw.ocrModelId,
     ocrModelId: raw.ocrModelId != null ? Number(raw.ocrModelId) : null,
     useAiClean: !!raw.cleanModelId,

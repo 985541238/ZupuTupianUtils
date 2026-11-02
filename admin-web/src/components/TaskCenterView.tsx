@@ -99,6 +99,10 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   const [dateTo, setDateTo] = useState('');
   const [timeFilter, setTimeFilter] = useState<TimeFilterType>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  /** 项目（家族）列表与当前筛选、创建弹窗里输入的项目名 */
+  const [projects, setProjects] = useState<Array<{ id: number; name: string; volumeCount: number }>>([]);
+  const [projectFilter, setProjectFilter] = useState<'all' | 'none' | number>('all');
+  const [projectInput, setProjectInput] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<Task | null>(null);
   const [deleting, setDeleting] = useState(false);
 
@@ -170,14 +174,33 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
         if (!task.name.toLowerCase().includes(query)) return false;
       }
 
+      // 4. Project Filter
+      if (projectFilter === 'none') {
+        if (task.projectId != null) return false;
+      } else if (projectFilter !== 'all') {
+        if (Number(task.projectId) !== projectFilter) return false;
+      }
+
       return true;
     });
-  }, [tasks, statusFilter, timeFilter, searchQuery, dateFrom, dateTo]);
+  }, [tasks, statusFilter, timeFilter, searchQuery, dateFrom, dateTo, projectFilter]);
 
   // Reset page when filter changes
   React.useEffect(() => {
     setCurrentPage(1);
-  }, [statusFilter, timeFilter, searchQuery, dateFrom, dateTo]);
+  }, [statusFilter, timeFilter, searchQuery, dateFrom, dateTo, projectFilter]);
+
+  const loadProjects = React.useCallback(async () => {
+    try {
+      const list = await api.listProjects();
+      setProjects(Array.isArray(list) ? list.map((p) => ({ id: p.id, name: p.name, volumeCount: p.volumeCount })) : []);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  React.useEffect(() => {
+    void loadProjects();
+  }, [loadProjects, tasks.length]);
 
   // Paginated Slicing
   const totalItems = filteredTasks.length;
@@ -443,6 +466,23 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     }
     setCreating(true);
     try {
+      // 解析项目：填了项目名就找现有的，没有就新建一个，卷归入该项目
+      let projectId: number | null = null;
+      const pname = projectInput.trim();
+      if (pname) {
+        const existing = projects.find((p) => p.name === pname);
+        if (existing) {
+          projectId = existing.id;
+        } else {
+          try {
+            const np = await api.createProject({ name: pname, surname: genealogyNote.trim() });
+            projectId = np.id;
+            await loadProjects();
+          } catch {
+            projectId = null;
+          }
+        }
+      }
       const created = await onCreateTask(
         {
           name: taskName.trim(),
@@ -450,6 +490,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
           description: taskDescription.trim() || '旧族谱复印页图片处理（去污去褶皱、白底黑字），供后续 OCR 识别与数据化',
           genealogyNote: genealogyNote.trim(),
           surname: genealogyNote.trim(),
+          projectId,
           useAi: useAiRecognition,
           ocrModelId: useAiRecognition ? selectedModelId : null,
           useAiClean: useAiClean,
@@ -466,9 +507,11 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
       );
       setShowCreateModal(false);
       if (startAfter && created?.id != null) onStartProcessing(String(created.id));
+      void loadProjects();
       setTaskName('');
       setGenealogyNote('');
       setFolderPath('');
+      setProjectInput('');
       setUseAiRecognition(false);
       setUseAiClean(false);
     } catch (e: any) {
@@ -653,6 +696,45 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
           </div>
         )}
 
+        {/* 项目筛选：按家族/项目归类，点一个只看该项目下的卷 */}
+        {projects.length > 0 && (
+          <div className="flex items-center gap-1.5 flex-wrap mb-3">
+            <span className="text-[11px] font-medium text-[#86868B] mr-0.5">项目</span>
+            <button
+              type="button"
+              onClick={() => setProjectFilter('all')}
+              className={`px-2.5 py-1 text-xs font-medium rounded-full transition-all cursor-pointer ${
+                projectFilter === 'all' ? 'bg-[#0071E3] text-white shadow-xs' : 'bg-[#F5F5F7] text-[#6E6E73] hover:text-[#1D1D1F]'
+              }`}
+            >
+              全部
+            </button>
+            {projects.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => setProjectFilter(p.id)}
+                className={`px-2.5 py-1 text-xs font-medium rounded-full transition-all cursor-pointer ${
+                  projectFilter === p.id ? 'bg-[#0071E3] text-white shadow-xs' : 'bg-[#F5F5F7] text-[#6E6E73] hover:text-[#1D1D1F]'
+                }`}
+                title={`${p.name}：${p.volumeCount} 卷`}
+              >
+                {p.name}
+                <span className="ml-1 tabular-nums opacity-70">{p.volumeCount}</span>
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={() => setProjectFilter('none')}
+              className={`px-2.5 py-1 text-xs font-medium rounded-full transition-all cursor-pointer ${
+                projectFilter === 'none' ? 'bg-[#0071E3] text-white shadow-xs' : 'bg-[#F5F5F7] text-[#6E6E73] hover:text-[#1D1D1F]'
+              }`}
+            >
+              未归类
+            </button>
+          </div>
+        )}
+
         {/* Task Cards List (NO PATH DISPLAYED, UNIFORM BUTTON WIDTHS) */}
         <div className="space-y-3">
           {paginatedTasks.length === 0 ? (
@@ -718,6 +800,11 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         <h3 className="text-base font-semibold text-[#1D1D1F] tracking-tight truncate leading-snug">
                           {task.name}
                         </h3>
+                        {task.projectId != null && projects.find((p) => p.id === task.projectId) ? (
+                          <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-medium bg-[#AF52DE]/10 text-[#8944AB]">
+                            {projects.find((p) => p.id === task.projectId)?.name}
+                          </span>
+                        ) : null}
                         {isProcessing ? (
                           <span className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#0071E3]/10 text-[#0071E3]">
                             <Sparkles className="w-3 h-3 animate-spin" />
@@ -1032,6 +1119,24 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
                       />
                     </div>
+                  </div>
+                  <div>
+                    <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">
+                      项目 / 家族 <span className="text-[11px] font-normal text-[#86868B]">（选填，用于归类，如 李氏；填已有项目名归入，填新名自动新建）</span>
+                    </label>
+                    <input
+                      type="text"
+                      list="zupu-project-list"
+                      value={projectInput}
+                      onChange={(e) => setProjectInput(e.target.value)}
+                      placeholder="例如：李氏（该项目下可放 卷1、卷2…）"
+                      className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
+                    />
+                    <datalist id="zupu-project-list">
+                      {projects.map((p) => (
+                        <option key={p.id} value={p.name} />
+                      ))}
+                    </datalist>
                   </div>
                   <div>
                     <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">

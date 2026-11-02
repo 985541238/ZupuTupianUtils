@@ -84,7 +84,19 @@ export const api = {
     useAiClean?: boolean;
     cleanModelId?: number | null;
     estimatedCost?: number | null;
+    projectId?: number | null;
   }) => request<any>('/tasks', { method: 'POST', body: JSON.stringify(data) }),
+  listProjects: () =>
+    request<Array<{ id: number; name: string; surname?: string; volumeCount: number; totalPages: number; processing: number; reviewing: number; completed: number }>>(
+      '/tasks/projects',
+    ),
+  createProject: (data: { name: string; surname?: string }) =>
+    request<{ id: number; name: string; surname?: string }>('/tasks/projects', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  deleteProject: (pid: number) =>
+    request<{ ok: boolean; deletedVolumes: number }>('/tasks/projects/' + pid, { method: 'DELETE' }),
   getTask: (id: string | number) => request<any>('/tasks/' + id),
   processTask: (id: string | number) =>
     request<any>('/tasks/' + id + '/process', { method: 'POST', body: '{}' }),

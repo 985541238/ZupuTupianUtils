@@ -70,6 +70,8 @@ export interface Task {
   genealogyNote?: string;
   /** 姓氏 */
   surname?: string;
+  /** 所属项目（家族/姓氏），null/undefined = 未归类 */
+  projectId?: number | null;
   /** 建任务时是否选用 AI 识别 */
   useAi?: boolean;
   useAiClean?: boolean;

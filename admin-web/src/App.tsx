@@ -363,6 +363,7 @@ export default function App() {
       useAiClean: !!newTaskPartial.useAiClean,
       cleanModelId: newTaskPartial.cleanModelId ?? null,
       estimatedCost: newTaskPartial.estimatedCost ?? null,
+      projectId: newTaskPartial.projectId ?? null,
     });
     await loadTasks();
     goToTasks();
