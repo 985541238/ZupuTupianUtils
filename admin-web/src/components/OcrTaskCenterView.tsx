@@ -27,7 +27,7 @@ interface Props {
   loading?: boolean;
   onRefresh?: () => void;
   onStart: (taskId: string, modelId?: number | null, volumeId?: number | null) => void;
-  onOpenReview: (taskId: string) => void;
+  onOpenReview: (taskId: string, volumeId?: number | null) => void;
   onCreate: (data: { name: string; projectId: string; ocrModelId: number | null }) => Promise<OcrTask>;
   onDelete: (taskId: string) => void | Promise<void>;
   onShowProblem?: (task: OcrTask) => void;
@@ -243,12 +243,6 @@ export const OcrTaskCenterView: React.FC<Props> = ({
           </div>
           <div className="flex items-center gap-2 shrink-0">
             {!isProcessing && task.doneCount > 0 && (
-              <button onClick={() => onOpenReview(task.id)} className="h-10 px-5 text-sm font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white cursor-pointer flex items-center gap-1.5">
-                {task.status === 'completed' ? '查看' : '进入审阅'}
-                <ArrowRight className="w-3.5 h-3.5" />
-              </button>
-            )}
-            {!isProcessing && task.doneCount > 0 && (
               <button onClick={() => window.open(ocrExportUrl(task.id, 'columns'), '_blank')} className="h-10 px-4 text-sm font-semibold rounded-full bg-[#34C759] text-white cursor-pointer flex items-center gap-1.5" title="下载已识别页的文字（txt）">
                 <Download className="w-3.5 h-3.5" />
                 导出文字
@@ -300,12 +294,12 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                           已识别
                         </span>
                       ) : null}
-                      {isProcessing && rec > 0 ? (
+                      {rec > 0 ? (
                         <button
-                          onClick={() => onOpenReview(task.id)}
+                          onClick={() => onOpenReview(task.id, v.id)}
                           className="h-10 px-4 text-sm font-semibold rounded-full bg-white border border-[#0071E3]/30 text-[#0071E3] hover:bg-[#0071E3]/[0.05] cursor-pointer"
                         >
-                          先去审阅（{rec} 页）
+                          {isProcessing ? `先去审阅（${rec} 页）` : conf >= inTask ? '查看' : '进入审阅'}
                         </button>
                       ) : null}
                       {isProcessing ? (

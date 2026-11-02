@@ -59,6 +59,8 @@ export default function App() {
   const [ocrTasks, setOcrTasks] = useState<OcrTask[]>([]);
   const [ocrLoading, setOcrLoading] = useState(false);
   const [activeOcrId, setActiveOcrId] = useState<string | null>(null);
+  /** 从项目里某一卷进入审阅时，只审阅这一卷的页 */
+  const [activeOcrVolumeId, setActiveOcrVolumeId] = useState<number | null>(null);
   const ocrStatusRef = useRef<Map<string, string>>(new Map());
   const [ocrDoneNotice, setOcrDoneNotice] = useState<{ taskId: string; name: string; pages: number; cost?: number } | null>(null);
   // 大模型出错时的说明弹窗 / 引导配置弹窗
@@ -431,8 +433,9 @@ export default function App() {
     void loadOcrTasks();
   }, [loadOcrTasks]);
 
-  const openOcrReview = useCallback((id: string) => {
+  const openOcrReview = useCallback((id: string, volumeId?: number | null) => {
     setActiveOcrId(id);
+    setActiveOcrVolumeId(volumeId ?? null);
     setCurrentTab('ocrReview');
     pushOcrUrl(id);
   }, []);
@@ -560,8 +563,9 @@ export default function App() {
 
         {currentTab === 'ocrReview' && activeOcr && (
           <OcrReviewWorkbench
-            key={activeOcr.id}
+            key={`${activeOcr.id}:${activeOcrVolumeId ?? 'all'}`}
             task={activeOcr}
+            volumeId={activeOcrVolumeId}
             onFinishTask={handleFinishOcr}
             onTaskChanged={() => void loadOcrTasks()}
             onOpenSetup={openOcrSetup}

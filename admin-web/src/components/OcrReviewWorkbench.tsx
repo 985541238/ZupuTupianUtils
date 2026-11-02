@@ -35,6 +35,8 @@ interface Props {
   /** 页面确认/修改后让列表和头部进度刷新 */
   onTaskChanged?: () => void;
   onOpenSetup?: (platform?: string | null, step?: 1 | 2 | 3, onDone?: () => void) => void;
+  /** 只审阅项目里的某一卷 */
+  volumeId?: number | null;
 }
 
 type Sel = { col: number; idx: number } | null;
@@ -48,7 +50,8 @@ const countPending = (cols?: OcrColumn[]) => (cols || []).reduce((a, c) => a + c
 const countPlaceholder = (cols?: OcrColumn[]) => (cols || []).reduce((a, c) => a + c.chars.filter((x) => x.t === '□').length, 0);
 const countChars = (cols?: OcrColumn[]) => (cols || []).reduce((a, c) => a + c.chars.length, 0);
 
-export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTaskChanged, onOpenSetup }) => {
+export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTaskChanged, onOpenSetup, volumeId }) => {
+  const inVolume = (r: any) => !volumeId || Number(r?.volumeId) === Number(volumeId);
   const [mode, setMode] = useState<ViewMode>('review');
   const [pages, setPages] = useState<OcrPage[]>([]);
   const [loadingList, setLoadingList] = useState(true);
@@ -102,7 +105,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
   const loadList = useCallback(
     async (keepCur = true) => {
       const raw = await api.getOcrPages(task.id);
-      const list = (raw || []).map((r, i) => mapOcrPage(r, task.id, i + 1));
+      const list = (raw || []).filter(inVolume).map((r, i) => mapOcrPage(r, task.id, i + 1));
       setPages(list);
       return list;
     },
@@ -135,7 +138,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
       api
         .getOcrPages(task.id)
         .then((raw) => {
-          const fresh = (raw || []).map((r, i) => mapOcrPage(r, task.id, i + 1));
+          const fresh = (raw || []).filter(inVolume).map((r, i) => mapOcrPage(r, task.id, i + 1));
           setPages((prev) =>
             fresh.map((f) => {
               const old = prev.find((p) => p.id === f.id);
@@ -647,6 +650,9 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
             )}
           </div>
 
+          {volumeId ? (
+            <div className="p-3 border-t border-black/[0.06] text-[12px] text-[#86868B] text-center">只审阅这一卷 · 返回项目可看其他卷</div>
+          ) : (
           <div className="p-3 border-t border-black/[0.06]">
             <button
               disabled={!allConfirmed}
@@ -657,6 +663,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
               {task.status === 'completed' ? '任务已完成' : '完成整本任务'}
             </button>
           </div>
+          )}
         </aside>
 
         {/* 中 + 右 */}

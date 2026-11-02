@@ -196,6 +196,7 @@ export function mapOcrPage(raw: any, taskId: string | number, pageNumber: number
     prevModelName: raw.prevModelName || null,
     imageRejected: !!raw.imageRejected,
     volumeName: raw.volumeName || null,
+    volumeId: raw.volumeId != null ? Number(raw.volumeId) : null,
     columns: raw.data?.columns,
   };
 }

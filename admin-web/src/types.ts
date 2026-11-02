@@ -185,6 +185,7 @@ export interface OcrPage {
   imageRejected?: boolean;
   /** 这一页来自项目下哪一卷 */
   volumeName?: string | null;
+  volumeId?: number | null;
   /** 只有单页详情接口才带 */
   columns?: OcrColumn[];
 }
