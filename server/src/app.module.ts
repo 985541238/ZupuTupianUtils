@@ -8,6 +8,7 @@ import { SettingsModule } from './settings/settings.module';
 import { User } from './users/user.entity';
 import { Task } from './tasks/task.entity';
 import { TaskImage } from './tasks/task-image.entity';
+import { Project } from './tasks/project.entity';
 import { Setting } from './settings/setting.entity';
 import { AiModel } from './settings/ai-model.entity';
 import { OcrModule } from './ocr/ocr.module';
@@ -23,7 +24,7 @@ import { OcrPage } from './ocr/ocr-page.entity';
       username: process.env.DB_USER || 'zupu',
       password: process.env.DB_PASS || 'zupu123',
       database: process.env.DB_NAME || 'zupu_scan',
-      entities: [User, Task, TaskImage, Setting, AiModel, OcrTask, OcrPage],
+      entities: [User, Task, TaskImage, Project, Setting, AiModel, OcrTask, OcrPage],
       synchronize: false,
       charset: 'utf8mb4',
     }),

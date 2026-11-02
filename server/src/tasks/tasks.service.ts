@@ -15,6 +15,8 @@ import sharp from 'sharp';
 import archiver from 'archiver';
 import { Task } from './task.entity';
 import { TaskImage } from './task-image.entity';
+import { Project } from './project.entity';
+import { TASKS_ALTER_SQL, TASKS_SCHEMA_SQL } from './tasks-schema';
 import {
   DEFAULT_PARAMS,
   ImageProcessService,
@@ -77,18 +79,112 @@ export class TasksService implements OnModuleInit {
   constructor(
     @InjectRepository(Task) private readonly tasks: Repository<Task>,
     @InjectRepository(TaskImage) private readonly images: Repository<TaskImage>,
+    @InjectRepository(Project) private readonly projects: Repository<Project>,
     private readonly processor: ImageProcessService,
     private readonly settings: SettingsService,
     private readonly aliyun: AliyunService,
   ) {}
 
   async onModuleInit() {
+    // 自动建表/补列（可重复执行），老库升级无需手工导 SQL
+    try {
+      for (const sql of TASKS_SCHEMA_SQL) await this.tasks.query(sql);
+      for (const sql of TASKS_ALTER_SQL) {
+        try {
+          await this.tasks.query(sql);
+        } catch {
+          /* 列/索引已存在，忽略 */
+        }
+      }
+    } catch (e) {
+      this.logger.error(`tasks schema ensure failed: ${e}`);
+    }
     // Nest restart / crash leaves status=processing forever — resume remaining pages.
     try {
       await this.recoverInterruptedProcessing();
     } catch (e) {
       this.logger.error(`recoverInterruptedProcessing failed: ${e}`);
     }
+  }
+
+  // ===== 项目（家族/姓氏）=====
+
+  /** 项目列表，带每个项目下的卷数与聚合状态 */
+  async listProjects(userId: number) {
+    const projects = await this.projects.find({ where: { userId }, order: { id: 'DESC' } });
+    const tasks = await this.tasks.find({ where: { userId }, order: { id: 'DESC' } });
+    const byProject = new Map<number, Task[]>();
+    for (const t of tasks) {
+      const pid = t.projectId == null ? 0 : Number(t.projectId);
+      if (!byProject.has(pid)) byProject.set(pid, []);
+      byProject.get(pid)!.push(t);
+    }
+    const summarize = (vols: Task[]) => ({
+      volumeCount: vols.length,
+      totalPages: vols.reduce((s, v) => s + (v.totalCount || 0), 0),
+      processing: vols.filter((v) => v.status === 'processing').length,
+      reviewing: vols.filter((v) => v.status === 'reviewing').length,
+      completed: vols.filter((v) => v.status === 'completed').length,
+    });
+    return projects.map((p) => ({
+      id: Number(p.id),
+      name: p.name,
+      surname: p.surname,
+      description: p.description,
+      createdAt: p.createdAt,
+      ...summarize(byProject.get(Number(p.id)) || []),
+    }));
+  }
+
+  async createProject(userId: number, dto: { name?: string; surname?: string; description?: string }) {
+    const name = String(dto.name || dto.surname || '').trim();
+    if (!name) throw new BadRequestException('请填写项目名称');
+    const now = new Date();
+    const p = this.projects.create({
+      userId,
+      name,
+      surname: String(dto.surname || '').trim(),
+      description: dto.description ? String(dto.description).trim() : null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const saved = await this.projects.save(p);
+    return { id: Number(saved.id), name: saved.name, surname: saved.surname };
+  }
+
+  async getProject(userId: number, projectId: number) {
+    const p = await this.projects.findOne({ where: { id: projectId, userId } });
+    if (!p) throw new NotFoundException('项目不存在');
+    return p;
+  }
+
+  async renameProject(userId: number, projectId: number, dto: { name?: string; surname?: string; description?: string }) {
+    const p = await this.getProject(userId, projectId);
+    if (dto.name !== undefined) {
+      const n = String(dto.name).trim();
+      if (!n) throw new BadRequestException('项目名称不能为空');
+      p.name = n;
+    }
+    if (dto.surname !== undefined) p.surname = String(dto.surname).trim();
+    if (dto.description !== undefined) p.description = dto.description ? String(dto.description).trim() : null;
+    p.updatedAt = new Date();
+    await this.projects.save(p);
+    return { id: Number(p.id), name: p.name, surname: p.surname };
+  }
+
+  /** 删除项目：连同项目下的所有卷一起删（卷的文件也清理） */
+  async deleteProject(userId: number, projectId: number) {
+    await this.getProject(userId, projectId);
+    const vols = await this.tasks.find({ where: { userId, projectId } });
+    for (const v of vols) {
+      try {
+        await this.deleteTask(userId, Number(v.id));
+      } catch (e) {
+        this.logger.warn(`deleteProject: delete volume ${v.id} failed: ${e}`);
+      }
+    }
+    await this.projects.delete({ id: projectId, userId });
+    return { ok: true, deletedVolumes: vols.length };
   }
 
   /** Reset orphaned processing images and continue unfinished tasks. */
@@ -138,10 +234,17 @@ export class TasksService implements OnModuleInit {
       useAiClean?: boolean;
       cleanModelId?: number | null;
       estimatedCost?: number | null;
+      projectId?: number | null;
     },
   ) {
     const name = dto.name;
     const sourceFolder = dto.sourceFolder;
+    // 归入项目（卷属于某个项目/家族）；传了就校验归属
+    let projectId: number | null = null;
+    if (dto.projectId != null && Number(dto.projectId) > 0) {
+      await this.getProject(userId, Number(dto.projectId));
+      projectId = Number(dto.projectId);
+    }
     const description =
       dto.description != null && String(dto.description).trim()
         ? String(dto.description).trim()
@@ -211,6 +314,7 @@ export class TasksService implements OnModuleInit {
     const now = new Date();
     const task = this.tasks.create({
       userId,
+      projectId,
       name: name || path.basename(folder),
       description,
       genealogyNote,

@@ -9,6 +9,10 @@ export class Task {
   @Column({ name: 'user_id', type: 'bigint', unsigned: true })
   userId: number;
 
+  /** 所属项目（家族/姓氏），null = 未归入任何项目 */
+  @Column({ name: 'project_id', type: 'bigint', unsigned: true, nullable: true })
+  projectId: number | null;
+
   @Column({ length: 128 })
   name: string;
 

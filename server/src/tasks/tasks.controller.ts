@@ -61,6 +61,25 @@ class CreateTaskDto {
   @Type(() => Number)
   @IsNumber()
   estimatedCost?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  projectId?: number;
+}
+
+class ProjectDto {
+  @IsOptional()
+  @IsString()
+  name?: string;
+
+  @IsOptional()
+  @IsString()
+  surname?: string;
+
+  @IsOptional()
+  @IsString()
+  description?: string;
 }
 
 @Controller('tasks')
@@ -76,6 +95,27 @@ export class TasksController {
   @Post()
   create(@Req() req: any, @Body() dto: CreateTaskDto) {
     return this.tasks.create(req.user.id, dto);
+  }
+
+  // ===== 项目（声明在 :id 路由之前，避免 projects 被当成 id）=====
+  @Get('projects')
+  listProjects(@Req() req: any) {
+    return this.tasks.listProjects(req.user.id);
+  }
+
+  @Post('projects')
+  createProject(@Req() req: any, @Body() dto: ProjectDto) {
+    return this.tasks.createProject(req.user.id, dto);
+  }
+
+  @Put('projects/:pid')
+  renameProject(@Req() req: any, @Param('pid', ParseIntPipe) pid: number, @Body() dto: ProjectDto) {
+    return this.tasks.renameProject(req.user.id, pid, dto);
+  }
+
+  @Delete('projects/:pid')
+  deleteProject(@Req() req: any, @Param('pid', ParseIntPipe) pid: number) {
+    return this.tasks.deleteProject(req.user.id, pid);
   }
 
   @Get(':id')
