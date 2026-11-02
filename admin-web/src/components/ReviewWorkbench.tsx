@@ -287,21 +287,37 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
     }
   }, [currentPageIndex, currentItem?.id, clearParamsDirty]);
 
-  // Prefetch current ± neighbors so flipping feels instant.
+  // 预取邻页：先让当前页加载完，再按"前后各 1 页（成品+原图）→ 前后第 2 页（只成品）"依次预取。
+  // 服务端已缩成工作图（几百 KB），不会一次性压垮带宽；每张间隔一点时间，不跟当前页抢连接。
   useEffect(() => {
-    const preload = (url?: string) => {
-      if (!url || url.startsWith('blob:')) return;
-      const img = new Image();
-      img.decoding = 'async';
-      img.src = url;
-    };
-    for (const delta of [-2, -1, 0, 1, 2]) {
+    const urls: string[] = [];
+    for (const delta of [1, -1]) {
       const it = task.items[currentPageIndex + delta];
       if (!it) continue;
-      preload(it.processedUrl);
-      preload(it.thumbnailUrl || it.originalUrl);
-      if (Math.abs(delta) <= 1) preload(it.originalUrl);
+      if (it.processedUrl) urls.push(it.processedUrl);
+      if (it.originalUrl) urls.push(it.originalUrl);
     }
+    for (const delta of [2, -2]) {
+      const it = task.items[currentPageIndex + delta];
+      if (it?.processedUrl) urls.push(it.processedUrl);
+    }
+    let cancelled = false;
+    const timers: number[] = [];
+    urls.forEach((url, i) => {
+      if (!url || url.startsWith('blob:')) return;
+      timers.push(
+        window.setTimeout(() => {
+          if (cancelled) return;
+          const img = new Image();
+          img.decoding = 'async';
+          img.src = url;
+        }, 400 + i * 250),
+      );
+    });
+    return () => {
+      cancelled = true;
+      timers.forEach((t) => window.clearTimeout(t));
+    };
   }, [currentPageIndex, task.items]);
 
   const runPreview = useCallback(

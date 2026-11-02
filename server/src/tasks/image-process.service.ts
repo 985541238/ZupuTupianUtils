@@ -5,6 +5,7 @@ import * as path from 'path';
 import { spawn } from 'child_process';
 import * as os from 'os';
 import { cpuGate } from '../common/cpu-gate';
+import { warmViewProxy } from '../common/view-proxy';
 
 export type ProcessParams = {
   threshold: number; // 80-220, maps to adaptive C bias around 168
@@ -439,6 +440,7 @@ export class ImageProcessService {
     fast = false,
     interactive = false,
   ): Promise<{ width: number; height: number }> {
+    if (!interactive) warmViewProxy(sourcePath); // 批量处理时顺带提前生成原图的工作图
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
     const resolved = await this.resolveCropAgainstSource(sourcePath, crop);
     const effectiveCrop = resolved.crop;
@@ -655,6 +657,8 @@ export class ImageProcessService {
       .resize(size, size, { fit: 'inside', withoutEnlargement: true })
       .jpeg({ quality: 75 })
       .toFile(thumbPath);
+    // 成品/图片就绪后顺手生成审阅页用的工作图，切页时直接命中缓存
+    warmViewProxy(sourcePath);
   }
 
   /**

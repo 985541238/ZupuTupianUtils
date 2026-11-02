@@ -1,4 +1,5 @@
 import sharp from 'sharp';
+import { warmViewProxy } from '../common/view-proxy';
 import {
   Body,
   Controller,
@@ -151,6 +152,11 @@ export class TasksController {
   @Get(':id/images')
   async images(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
     const list = await this.tasks.listImages(req.user.id, id);
+    // 打开这一卷时，后台按页码顺序补生成审阅用的工作图（低优先级，不挡住正在看的页）
+    for (const img of list) {
+      warmViewProxy(img.sourcePath);
+      warmViewProxy(img.resultPath);
+    }
     return list.map((img) => this.tasks.imageView(img));
   }
 

@@ -189,7 +189,14 @@ export default function App() {
     if (!currentUser) return;
     loadTasks();
     void loadOcrTasks();
+    // 轮询降负载：页面在后台标签时不请求；没有进行中的任务时放慢到每 4 次才请求 1 次
+    let ocrTick = 0;
+    let taskTick = 0;
     const ocrTimer = window.setInterval(() => {
+      if (document.hidden) return;
+      ocrTick++;
+      const ocrBusy = Array.from(ocrStatusRef.current.values()).some((s) => s === 'processing');
+      if (!ocrBusy && ocrTick % 4 !== 0) return;
       api.getOcrTasks()
         .then((list) => {
           const mapped = (list || []).map(mapOcrTask);
@@ -208,6 +215,10 @@ export default function App() {
         .catch(() => {});
     }, 3000);
     const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      taskTick++;
+      const taskBusy = Array.from(statusRef.current.values()).some((s) => s === 'processing');
+      if (!taskBusy && taskTick % 4 !== 0) return;
       api.getTasks()
         .then((list) => {
           const mapped = (list || []).map((t) => mapTask(t));
