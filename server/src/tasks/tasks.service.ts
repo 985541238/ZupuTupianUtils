@@ -183,6 +183,12 @@ export class TasksService implements OnModuleInit {
         this.logger.warn(`deleteProject: delete volume ${v.id} failed: ${e}`);
       }
     }
+    // 该项目的 OCR 项目一并清掉（页随外键级联删除），避免留下指向已删除卷的残留
+    try {
+      await this.tasks.query('DELETE FROM ocr_tasks WHERE project_id = ? AND user_id = ?', [projectId, userId]);
+    } catch (e) {
+      this.logger.warn(`deleteProject: clear ocr tasks failed: ${e}`);
+    }
     await this.projects.delete({ id: projectId, userId });
     return { ok: true, deletedVolumes: vols.length };
   }

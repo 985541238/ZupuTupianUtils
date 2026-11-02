@@ -1294,7 +1294,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
             <h3 className="text-base font-bold text-[#1D1D1F]">删除项目「{projectDeleteTarget.name}」？</h3>
             <p className="text-xs text-[#86868B] mt-2 leading-relaxed">
               {projectDeleteTarget.volumeCount > 0
-                ? `会同时删除项目下的 ${projectDeleteTarget.volumeCount} 卷及其处理结果，无法恢复。`
+                ? `会同时删除项目下的 ${projectDeleteTarget.volumeCount} 卷及其处理结果、对应的 OCR 项目，无法恢复。`
                 : '这个项目下还没有卷。'}
             </p>
             <div className="flex justify-end gap-2 mt-5">
