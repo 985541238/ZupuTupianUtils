@@ -119,6 +119,8 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
 
   /** Only true after user edits params/crop; page navigation stays clean and skips preview. */
   const paramsDirtyRef = useRef(false);
+  const detectCacheRef = useRef<Map<any, any>>(new Map());
+  const detectTimerRef = useRef<number | null>(null);
   const [paramsDirty, setParamsDirty] = useState(false);
   const [aiRecognizeBusy, setAiRecognizeBusy] = useState(false);
   const [aiResultOpen, setAiResultOpen] = useState(false);
@@ -247,14 +249,23 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
     setCurrentStats(currentItem.stats);
 
     // 自动检测这页更像哪种情况（脏污/字迹不清/标准），只做提示，不自动改参数
-    setDetectedMode(null);
+    // 快速连续翻页时不逐页请求：停留 600ms 才检测，且每页只检测一次（结果缓存在前端）
     const detectPid = pageId;
-    api
-      .detectMode(task.id, currentItem.id)
-      .then((r) => {
-        if (syncedPageIdRef.current === detectPid) setDetectedMode(r.mode);
-      })
-      .catch(() => {});
+    const cachedMode = detectCacheRef.current.get(detectPid);
+    setDetectedMode(cachedMode ?? null);
+    if (detectTimerRef.current) window.clearTimeout(detectTimerRef.current);
+    if (!cachedMode) {
+      detectTimerRef.current = window.setTimeout(() => {
+        if (syncedPageIdRef.current !== detectPid) return;
+        api
+          .detectMode(task.id, detectPid)
+          .then((r) => {
+            detectCacheRef.current.set(detectPid, r.mode);
+            if (syncedPageIdRef.current === detectPid) setDetectedMode(r.mode);
+          })
+          .catch(() => {});
+      }, 600);
+    }
 
     // Restore preview: always keep a visible frame (never blank).
     // Prefer session blob → server clean → source original → hold previous frame.

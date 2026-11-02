@@ -99,3 +99,15 @@ export function warmViewProxy(abs?: string | null) {
   if (!abs) return;
   void ensureViewProxy(abs, VIEW_MAX_SIDE, 'low').catch(() => undefined);
 }
+
+/** 只看缓存里有没有现成的工作图，不触发生成（用于"提示类"的轻量计算，别为它多解一次大图） */
+export function peekViewProxy(abs: string, maxSide = VIEW_MAX_SIDE): string | null {
+  try {
+    const st = fs.statSync(abs);
+    const key = crypto.createHash('sha1').update(`${abs}|${st.mtimeMs}|${st.size}|${maxSide}`).digest('hex');
+    const out = path.join(proxyRoot(), key + '.jpg');
+    return fs.existsSync(out) ? out : null;
+  } catch {
+    return null;
+  }
+}

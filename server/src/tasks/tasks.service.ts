@@ -8,6 +8,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as fs from 'fs';
+import { peekViewProxy } from '../common/view-proxy';
 import * as os from 'os';
 import * as crypto from 'crypto';
 import * as path from 'path';
@@ -42,6 +43,7 @@ export class TasksService implements OnModuleInit {
   private readonly cancelled = new Set<number>();
 
   /** 全局处理队列：多卷按序排队，一次只跑 VOLUME_CONCURRENCY 卷，避免同时处理拖垮机器（低占用） */
+  private readonly detectCache = new Map<string, { mode: 'standard' | 'stained' | 'faint'; scores: Record<string, number> }>();
   private readonly volQueue: number[] = [];
   private readonly volQueued = new Set<number>();
   private volActive = 0;
@@ -1256,9 +1258,25 @@ export class TasksService implements OnModuleInit {
   async detectImageMode(userId: number, taskId: number, imageId: number) {
     const task = await this.get(userId, taskId);
     const img = await this.getImage(userId, taskId, imageId);
+    // 同一张图(路径+修改时间)只检测一次；检测只是提示，优先用已缓存的小工作图，避免再解一遍大图
+    let key = '';
+    try {
+      const st = fs.statSync(img.sourcePath);
+      key = `${img.sourcePath}|${st.mtimeMs}|${st.size}`;
+      const hit = this.detectCache.get(key);
+      if (hit) return hit;
+    } catch {
+      /* 取不到就照常检测 */
+    }
     await this.restoreOriginalSource(task, img);
     try {
-      return await this.processor.detectMode(img.sourcePath);
+      const src = peekViewProxy(img.sourcePath) || img.sourcePath;
+      const r = await this.processor.detectMode(src);
+      if (key) {
+        if (this.detectCache.size > 2000) this.detectCache.clear();
+        this.detectCache.set(key, r);
+      }
+      return r;
     } catch {
       return { mode: 'standard' as const, scores: {} };
     }
