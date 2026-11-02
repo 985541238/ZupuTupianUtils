@@ -322,6 +322,6 @@ export async function previewFastBlob(
   return res.blob();
 }
 
-export function ocrExportUrl(taskId: string | number, mode: 'columns' | 'flow' = 'columns'): string {
-  return `${BASE}/ocr-tasks/${taskId}/export?mode=${mode}&access_token=${encodeURIComponent(getToken())}`;
+export function ocrExportUrl(taskId: string | number, mode: 'columns' | 'flow' = 'columns', volumeId?: number | null): string {
+  return `${BASE}/ocr-tasks/${taskId}/export?mode=${mode}${volumeId ? '&volumeId=' + volumeId : ''}&access_token=${encodeURIComponent(getToken())}`;
 }

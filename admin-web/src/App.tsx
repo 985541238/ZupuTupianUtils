@@ -427,7 +427,10 @@ export default function App() {
     await openReview(taskId, true);
   };
 
+  /** 审阅页「返回」时回到刚才那个 OCR 项目的详情，而不是项目列表 */
+  const [ocrReturnId, setOcrReturnId] = useState<string | null>(null);
   const goToOcr = useCallback(() => {
+    setOcrReturnId(null);
     setCurrentTab('ocr');
     pushOcrUrl();
     void loadOcrTasks();
@@ -503,6 +506,13 @@ export default function App() {
     return <LoginView onLogin={handleLogin} />;
   }
 
+  const backToOcrProject = useCallback(() => {
+    setOcrReturnId(activeOcrId);
+    setCurrentTab('ocr');
+    pushOcrUrl();
+    void loadOcrTasks();
+  }, [activeOcrId, loadOcrTasks]);
+
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden bg-[#F5F5F7] font-sans">
       <TopNav
@@ -510,7 +520,7 @@ export default function App() {
         onBackToTasks={goToTasks}
         onOpenSettings={() => setCurrentTab('settings')}
         onOpenOcr={goToOcr}
-        onBackToOcr={goToOcr}
+        onBackToOcr={backToOcrProject}
         user={currentUser}
         onLogout={handleLogout}
         onOpenAccount={() => setAccountOpen(true)}
@@ -558,6 +568,7 @@ export default function App() {
             onShowProblem={showOcrProblem}
             onOpenSetup={openOcrSetup}
             onGoImageTasks={goToTasks}
+            initialOpenId={ocrReturnId}
           />
         )}
 

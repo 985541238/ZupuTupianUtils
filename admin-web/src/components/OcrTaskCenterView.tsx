@@ -28,6 +28,8 @@ interface Props {
   onRefresh?: () => void;
   onStart: (taskId: string, modelId?: number | null, volumeId?: number | null) => void;
   onOpenReview: (taskId: string, volumeId?: number | null) => void;
+  /** 从审阅页返回时直接打开的 OCR 项目 */
+  initialOpenId?: string | null;
   onCreate: (data: { name: string; projectId: string; ocrModelId: number | null }) => Promise<OcrTask>;
   onDelete: (taskId: string) => void | Promise<void>;
   onShowProblem?: (task: OcrTask) => void;
@@ -80,6 +82,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
   onShowProblem,
   onOpenSetup,
   onGoImageTasks,
+  initialOpenId,
 }) => {
   const [statusFilter, setStatusFilter] = useState<'all' | Stage>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -94,7 +97,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
   const [sourcesLoading, setSourcesLoading] = useState(false);
   const [sourceId, setSourceId] = useState('');
   /** 点进某个 OCR 项目看各卷 */
-  const [openId, setOpenId] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<string | null>(initialOpenId ?? null);
   const [detailSrc, setDetailSrc] = useState<OcrSourceTask | null>(null);
   const syncedRef = React.useRef<Set<string>>(new Set());
   const [taskName, setTaskName] = useState('');
@@ -242,10 +245,10 @@ export const OcrTaskCenterView: React.FC<Props> = ({
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            {!isProcessing && task.doneCount > 0 && (
-              <button onClick={() => window.open(ocrExportUrl(task.id, 'columns'), '_blank')} className="h-10 px-4 text-sm font-semibold rounded-full bg-[#34C759] text-white cursor-pointer flex items-center gap-1.5" title="下载已识别页的文字（txt）">
+            {task.doneCount > 0 && (
+              <button onClick={() => window.open(ocrExportUrl(task.id, 'columns'), '_blank')} className="h-10 px-4 text-sm font-semibold rounded-full bg-white border border-black/[0.1] text-[#1D1D1F] hover:bg-[#F5F5F7] cursor-pointer flex items-center gap-1.5" title="下载整个项目已识别页的文字（txt）；单卷导出在各卷右边">
                 <Download className="w-3.5 h-3.5" />
-                导出文字
+                导出整个项目
               </button>
             )}
           </div>
@@ -260,6 +263,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
               const inTask = Number(v.inTask) || 0;
               const rec = Number(v.recognized) || 0;
               const conf = Number(v.confirmed) || 0;
+              const failedN = Number(v.failed) || 0;
               const allDone = inTask > 0 && rec >= inTask;
               const startVol = () => {
                 if (task.modelUsable === false) {
@@ -287,14 +291,11 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                     </p>
                   </div>
                   {v.completed ? (
-                    <div className="flex items-center gap-2 shrink-0">
-                      {allDone ? (
-                        <span className="inline-flex items-center gap-1 text-[13px] font-semibold text-[#248A3D]">
-                          <CheckCircle2 className="w-4 h-4" />
-                          已识别
-                        </span>
+                    <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
+                      {inTask === 0 ? (
+                        <span className="text-[13px] text-[#86868B]">正在并入…</span>
                       ) : null}
-                      {rec > 0 ? (
+                      {inTask > 0 && rec > 0 ? (
                         <button
                           onClick={() => onOpenReview(task.id, v.id)}
                           className="h-10 px-4 text-sm font-semibold rounded-full bg-white border border-[#0071E3]/30 text-[#0071E3] hover:bg-[#0071E3]/[0.05] cursor-pointer"
@@ -302,12 +303,33 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                           {isProcessing ? `先去审阅（${rec} 页）` : conf >= inTask ? '查看' : '进入审阅'}
                         </button>
                       ) : null}
-                      {isProcessing ? (
+                      {inTask > 0 && rec > 0 && !isProcessing ? (
+                        <button
+                          onClick={() => window.open(ocrExportUrl(task.id, 'columns', v.id), '_blank')}
+                          className="h-10 px-4 text-sm font-semibold rounded-full bg-[#F5F5F7] hover:bg-[#EBEBED] text-[#1D1D1F] cursor-pointer flex items-center gap-1.5"
+                          title="下载这一卷已识别页的文字（txt）"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          导出文字
+                        </button>
+                      ) : null}
+                      {isProcessing && inTask > 0 ? (
                         <button disabled className="h-10 px-5 text-sm font-semibold rounded-full bg-[#E8F1FC] text-[#0071E3] cursor-not-allowed flex items-center gap-1.5">
                           <Sparkles className="w-3.5 h-3.5 animate-spin" />
                           识别中
                         </button>
-                      ) : inTask > 0 && !allDone ? (
+                      ) : null}
+                      {!isProcessing && inTask > 0 && failedN > 0 ? (
+                        <button
+                          onClick={startVol}
+                          className="h-10 px-5 text-sm font-semibold rounded-full bg-[#FF9500] hover:bg-[#F08C00] text-white cursor-pointer flex items-center gap-1.5"
+                          title="只重新识别失败的页，已识别的不会重复收费"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          重试失败页（{failedN}）
+                        </button>
+                      ) : null}
+                      {!isProcessing && inTask > 0 && failedN === 0 && !allDone ? (
                         <button
                           onClick={startVol}
                           className="h-10 px-5 text-sm font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] cursor-pointer flex items-center gap-1.5 active:scale-[0.98]"
@@ -574,72 +596,18 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                     </div>
 
                     <div className="flex items-center justify-end gap-2 shrink-0 md:pl-2">
-                      {isProcessing && task.doneCount > 0 && (
-                        <button
-                          onClick={() => onOpenReview(task.id)}
-                          className="h-10 px-4 text-sm font-semibold rounded-full bg-white border border-[#0071E3]/30 text-[#0071E3] hover:bg-[#0071E3]/[0.05] transition-all cursor-pointer flex items-center justify-center gap-1.5"
-                        >
-                          <span>先去审阅（{task.doneCount} 页）</span>
-                        </button>
-                      )}
-                      {isProcessing && (
-                        <button disabled className="h-10 px-5 text-sm font-semibold rounded-full bg-[#E8F1FC] text-[#0071E3] cursor-not-allowed flex items-center justify-center gap-1.5">
+                      {isProcessing ? (
+                        <span className="inline-flex items-center gap-1.5 h-10 px-4 text-sm font-semibold rounded-full bg-[#E8F1FC] text-[#0071E3]">
                           <Sparkles className="w-3.5 h-3.5 animate-spin" />
-                          <span>识别中</span>
-                        </button>
-                      )}
-                      {!isProcessing && task.status === 'reviewing' && task.failedCount > 0 && (
-                        <button
-                          onClick={() => setRetryTask(task)}
-                          className="h-10 px-4 text-sm font-semibold rounded-full bg-[#FF9500] hover:bg-[#F08C00] text-white shadow-[0_2px_8px_rgba(255,149,0,0.28)] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
-                          title="只重新识别失败的页，已识别的不会重复收费"
-                        >
-                          <RotateCcw className="w-3.5 h-3.5" />
-                          <span>重试失败页（{task.failedCount}）</span>
-                        </button>
-                      )}
-                      {!isProcessing && task.status === 'failed' && task.doneCount > 0 && (
-                        <button
-                          onClick={() => onOpenReview(task.id)}
-                          className="h-10 px-4 text-sm font-semibold rounded-full bg-[#F5F5F7] hover:bg-[#EBEBED] text-[#1D1D1F] transition-all cursor-pointer"
-                        >
-                          先去审阅
-                        </button>
-                      )}
-                      {!isProcessing && task.status === 'reviewing' && (
-                        <button
-                          onClick={() => onOpenReview(task.id)}
-                          className="h-10 px-5 text-sm font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
-                        >
-                          <span>进入审阅</span>
-                          <ArrowRight className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                      {task.status === 'completed' && (
-                        <>
-                          <button
-                            onClick={() => onOpenReview(task.id)}
-                            className="h-10 px-4 text-sm font-semibold rounded-full bg-[#F5F5F7] hover:bg-[#EBEBED] text-[#1D1D1F] transition-all cursor-pointer flex items-center justify-center gap-1.5"
-                            title="查看全部文字与逐页结果"
-                          >
-                            <CheckCircle2 className="w-3.5 h-3.5 text-[#34C759]" />
-                            <span>查看</span>
-                          </button>
-                          <button
-                            onClick={() => window.open(ocrExportUrl(task.id, 'columns'), '_blank')}
-                            className="h-10 px-4 text-sm font-semibold rounded-full bg-[#34C759] hover:bg-[#2EB84E] text-white shadow-[0_2px_8px_rgba(52,199,89,0.25)] transition-all cursor-pointer flex items-center justify-center gap-1.5"
-                            title="下载全书文字（txt）"
-                          >
-                            <Download className="w-3.5 h-3.5" />
-                            <span>导出文字</span>
-                          </button>
-                        </>
-                      )}
+                          识别中
+                        </span>
+                      ) : null}
                       <button
                         onClick={() => setOpenId(task.id)}
-                        className="h-10 px-4 text-sm font-semibold rounded-full bg-white border border-black/[0.1] text-[#1D1D1F] hover:bg-[#F5F5F7] transition-all cursor-pointer"
+                        className="h-10 px-5 text-sm font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] transition-all cursor-pointer flex items-center gap-1.5 active:scale-[0.98]"
                       >
-                        各卷
+                        进入项目
+                        <ArrowRight className="w-3.5 h-3.5" />
                       </button>
                       <button
                         onClick={() => setDeleteTarget(task)}

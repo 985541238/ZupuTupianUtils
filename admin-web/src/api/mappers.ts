@@ -220,6 +220,7 @@ export function mapOcrSource(raw: any): OcrSourceTask {
         inTask: Number(v.inTask) || 0,
         recognized: Number(v.recognized) || 0,
         confirmed: Number(v.confirmed) || 0,
+        failed: Number(v.failed) || 0,
       })) : [],
     ocrTaskId: raw.ocrTaskId != null ? String(raw.ocrTaskId) : null,
     ocrTaskName: raw.ocrTaskName || null,

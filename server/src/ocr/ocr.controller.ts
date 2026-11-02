@@ -127,8 +127,8 @@ export class OcrController {
   }
 
   @Get(':id/export')
-  async export(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Query('mode') mode: string, @Res() res: Response) {
-    const r = await this.ocr.exportText(req.user.id, id, mode === 'flow' ? 'flow' : 'columns');
+  async export(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Query('mode') mode: string, @Query('volumeId') volumeId: string, @Res() res: Response) {
+    const r = await this.ocr.exportText(req.user.id, id, mode === 'flow' ? 'flow' : 'columns', Number(volumeId) || undefined);
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(r.fileName)}`);
     res.send(r.text);

@@ -203,6 +203,7 @@ export class OcrService implements OnModuleInit {
             inTask: mine.length,
             recognized: mine.filter((x) => x.status === 'ready' || x.status === 'confirmed').length,
             confirmed: mine.filter((x) => x.status === 'confirmed').length,
+            failed: mine.filter((x) => x.status === 'failed').length,
           };
         });
       }
@@ -577,7 +578,14 @@ export class OcrService implements OnModuleInit {
     const total = rows.length;
     const done = rows.filter((r) => r.status === 'ready' || r.status === 'confirmed').length;
     const confirmed = rows.filter((r) => r.status === 'confirmed').length;
-    await this.tasks.update({ id: taskId }, { totalCount: total, doneCount: done, confirmedCount: confirmed, updatedAt: new Date() });
+    const patch: Partial<OcrTask> = { totalCount: total, doneCount: done, confirmedCount: confirmed, updatedAt: new Date() };
+    // 状态随页面确认情况自动变化：全部页都确认 → 已完成；又有新页/取消确认 → 回到审阅中
+    const cur = await this.tasks.findOne({ where: { id: taskId }, select: ['id', 'status'] });
+    if (cur && !this.running.has(taskId)) {
+      if (cur.status === 'reviewing' && total > 0 && confirmed === total) patch.status = 'completed';
+      else if (cur.status === 'completed' && confirmed < total) patch.status = 'reviewing';
+    }
+    await this.tasks.update({ id: taskId }, patch);
   }
 
   // ---------------- 与图片处理同步 ----------------
@@ -952,9 +960,9 @@ export class OcrService implements OnModuleInit {
 
   // ---------------- 总览 / 导出 ----------------
 
-  async text(userId: number, id: number) {
+  async text(userId: number, id: number, volumeId?: number) {
     const t = await this.getTask(userId, id);
-    const rows = await this.pages.find({ where: { ocrTaskId: t.id }, order: { sortOrder: 'ASC', id: 'ASC' } });
+    const rows = await this.pages.find({ where: { ocrTaskId: t.id, ...(volumeId ? { volumeId } : {}) }, order: { sortOrder: 'ASC', id: 'ASC' } });
     const pages = rows.map((p, i) => {
       const columns = this.columnTexts(p);
       return {
@@ -971,6 +979,7 @@ export class OcrService implements OnModuleInit {
     return {
       id: Number(t.id),
       name: t.name,
+      volumeName: rows[0]?.volumeName || null,
       pages,
       totalChars: pages.reduce((a, b) => a + b.charCount, 0),
       totalUncertain: pages.reduce((a, b) => a + b.uncertainCount, 0),
@@ -987,14 +996,14 @@ export class OcrService implements OnModuleInit {
     }
   }
 
-  async exportText(userId: number, id: number, mode: 'columns' | 'flow') {
-    const r = await this.text(userId, id);
+  async exportText(userId: number, id: number, mode: 'columns' | 'flow', volumeId?: number) {
+    const r = await this.text(userId, id, volumeId);
     const parts = r.pages.map((p) => {
       const head = `【第 ${p.pageNo} 页 · ${p.fileName}】`;
       if (!p.columns.length) return head + '\n（本页没有识别结果）';
       return head + '\n' + (mode === 'flow' ? p.columns.join('') : p.columns.join('\n'));
     });
-    return { fileName: `${r.name}-OCR文字.txt`, text: parts.join('\n\n') + '\n' };
+    return { fileName: `${r.name}${volumeId && r.volumeName ? '-' + r.volumeName : ''}-OCR文字.txt`, text: parts.join('\n\n') + '\n' };
   }
 
   platformName(code?: string | null) {

@@ -210,6 +210,7 @@ export interface OcrSourceTask {
     inTask: number;
     recognized: number;
     confirmed: number;
+    failed: number;
   }[];
   /** 已经建过 OCR 任务则有值 */
   ocrTaskId: string | null;
