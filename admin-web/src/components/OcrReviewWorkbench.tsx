@@ -1801,7 +1801,20 @@ const OcrOverview: React.FC<{ taskId: string; onJump: (pageId: string) => void }
 
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(fullText);
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(fullText);
+      } else {
+        // 用 IP 走 http 访问时没有 clipboard API，退回到临时文本框 + execCommand
+        const ta = document.createElement('textarea');
+        ta.value = fullText;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        if (!ok) throw new Error('copy failed');
+      }
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1800);
     } catch {

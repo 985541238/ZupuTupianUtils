@@ -400,6 +400,49 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   const [uploadProg, setUploadProg] = useState<{ done: number; total: number } | null>(null);
   const IMG_RE = /\.(jpe?g|png|bmp|tiff?|webp)$/i;
 
+  /** 把选好的文件夹里的图片逐张上传到服务器，并用服务器上的目录建任务（showDirectoryPicker 和 webkitdirectory 共用） */
+  const uploadFolderFiles = async (dirName: string, files: File[]) => {
+    try {
+      const sess = await api.createUploadSession(dirName);
+      setUploadProg({ done: 0, total: files.length });
+      let next = 0;
+      let done = 0;
+      const worker = async () => {
+        while (next < files.length) {
+          const f = files[next++];
+          await api.uploadImage(sess.id, f);
+          done += 1;
+          setUploadProg({ done, total: files.length });
+        }
+      };
+      await Promise.all([worker(), worker(), worker()]);
+      setFolderPath(sess.dir);
+      setPageCountPreview(files.length);
+      if (!taskName.trim() && dirName) setTaskName(dirName);
+    } catch (e: any) {
+      alert('上传图片失败：' + (e?.message || '请重试'));
+    } finally {
+      setUploadProg(null);
+    }
+  };
+
+  const dirInputRef = React.useRef<HTMLInputElement>(null);
+  /** http://IP 访问（非安全环境）或 Firefox/Safari 没有 showDirectoryPicker：用 <input webkitdirectory> 选文件夹 */
+  const onDirInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const all = Array.from(e.target.files || []);
+    e.target.value = '';
+    if (!all.length) return;
+    const dirName = (all[0] as any).webkitRelativePath?.split('/')[0] || '';
+    const files = all
+      .filter((f) => ((f as any).webkitRelativePath || '').split('/').length === 2 && IMG_RE.test(f.name))
+      .sort((a, b) => a.name.localeCompare(b.name, 'zh', { numeric: true }));
+    if (!files.length) {
+      alert('这个文件夹里没有找到图片（支持 jpg / png / tif / bmp / webp，不含子文件夹）');
+      return;
+    }
+    await uploadFolderFiles(dirName, files);
+  };
+
   /** 浏览器选文件夹（showDirectoryPicker）→ 图片逐张上传到服务器 → 用服务器上的目录建任务 */
   const pickByBrowser = async (): Promise<boolean> => {
     const w = window as any;
@@ -420,33 +463,17 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
       alert('这个文件夹里没有找到图片（支持 jpg / png / tif / bmp / webp，不含子文件夹）');
       return true;
     }
-    try {
-      const sess = await api.createUploadSession(dir.name);
-      setUploadProg({ done: 0, total: files.length });
-      let next = 0;
-      let done = 0;
-      const worker = async () => {
-        while (next < files.length) {
-          const f = files[next++];
-          await api.uploadImage(sess.id, f);
-          done += 1;
-          setUploadProg({ done, total: files.length });
-        }
-      };
-      await Promise.all([worker(), worker(), worker()]);
-      setFolderPath(sess.dir);
-      setPageCountPreview(files.length);
-      if (!taskName.trim() && dir.name) setTaskName(dir.name);
-    } catch (e: any) {
-      alert('上传图片失败：' + (e?.message || '请重试'));
-    } finally {
-      setUploadProg(null);
-    }
+    await uploadFolderFiles(dir.name, files);
     return true;
   };
 
   const openFolderPicker = async () => {
     if (nativePicking || uploadProg) return;
+    // 没有 showDirectoryPicker（用 IP 走 http 访问、Firefox、Safari）：直接用 webkitdirectory 选文件夹，必须在点击事件里同步触发
+    if (typeof (window as any).showDirectoryPicker !== 'function' && dirInputRef.current) {
+      dirInputRef.current.click();
+      return;
+    }
     setNativePicking(true);
     try {
       // 1) 浏览器自带的选择窗口（Chrome / Edge）；2) 服务端弹系统窗口；3) 网页内目录选择
@@ -1426,6 +1453,14 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         onChange={(e) => setFolderPath(e.target.value)}
                         placeholder="粘贴或输入服务器上的文件夹路径"
                         className="flex-1 min-w-0 px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-mono text-[#1D1D1F]"
+                      />
+                      <input
+                        ref={dirInputRef}
+                        type="file"
+                        multiple
+                        className="hidden"
+                        onChange={(e) => void onDirInputChange(e)}
+                        {...({ webkitdirectory: '', directory: '' } as any)}
                       />
                       <button
                         type="button"
