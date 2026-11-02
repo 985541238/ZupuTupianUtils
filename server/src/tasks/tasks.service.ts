@@ -365,14 +365,7 @@ export class TasksService implements OnModuleInit {
     }
     await this.images.save(rows);
 
-    // 本地算法卷（不花钱）上传完直接进后台处理队列，用户可继续上传别的卷；
-    // 选了付费大模型的卷不自动跑，仍需手动点「开始处理」确认（避免意外扣费）。
-    if (!cleanModelId) {
-      saved.status = 'processing';
-      saved.updatedAt = new Date();
-      await this.tasks.save(saved);
-      this.enqueueVolume(Number(saved.id));
-    }
+    // 创建只是创建：处理由用户点「创建并开始」或卡片上的「开始处理」触发（走全局队列，一次只跑一卷）。
 
     return this.get(userId, Number(saved.id));
   }
