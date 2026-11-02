@@ -326,11 +326,6 @@ export const OcrTaskCenterView: React.FC<Props> = ({
             })}
           </div>
         )}
-        {onGoImageTasks ? (
-          <button type="button" onClick={onGoImageTasks} className="mt-4 text-[13px] text-[#0071E3] hover:underline cursor-pointer">
-            去图片处理继续上传 / 审阅卷 →
-          </button>
-        ) : null}
       </div>
     );
   };

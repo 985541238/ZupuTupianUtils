@@ -198,7 +198,18 @@ export interface OcrSourceTask {
   totalCount: number;
   /** 项目下各卷已通过的页数合计 */
   usableCount: number;
-  volumes: { id: number; name: string; usable: number; total: number; status: string }[];
+  volumes: {
+    id: number;
+    name: string;
+    usable: number;
+    passed: number;
+    total: number;
+    status: string;
+    completed: boolean;
+    inTask: number;
+    recognized: number;
+    confirmed: number;
+  }[];
   /** 已经建过 OCR 任务则有值 */
   ocrTaskId: string | null;
   ocrTaskName: string | null;
