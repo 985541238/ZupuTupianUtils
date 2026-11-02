@@ -32,7 +32,10 @@ export interface ScanItem {
   taskId: string;
   pageNumber: number;
   fileName: string;
+  /** 真正的原图（做过透视修正也不变） */
   originalUrl: string;
+  /** 处理所用的图：做过透视修正则是拉正后的图，否则同原图；裁剪在它上面框选 */
+  correctedUrl?: string;
   processedUrl?: string;
   thumbnailUrl?: string;
   /** 没做过透视修正的原图（透视修正选点用） */

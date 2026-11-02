@@ -65,7 +65,9 @@ export function mapImage(raw: any, taskId: string | number, pageNumber: number):
     taskId: String(taskId),
     pageNumber,
     fileName: raw.fileName || raw.name || `page_${pageNumber}.jpg`,
-    originalUrl: authImageUrl(raw.sourceUrl),
+    // 原图永远是真正的原图：做过透视修正也不变，只有结果图变；裁剪要在拉正后的图上框选，用 correctedUrl
+    originalUrl: authImageUrl(raw.perspectiveApplied && raw.trueOriginalUrl ? raw.trueOriginalUrl : raw.sourceUrl),
+    correctedUrl: authImageUrl(raw.sourceUrl),
     processedUrl: raw.resultUrl ? authImageUrl(raw.resultUrl) : undefined,
     thumbnailUrl: authImageUrl(raw.thumbUrl || raw.sourceUrl),
     trueOriginalUrl: authImageUrl(raw.trueOriginalUrl || raw.sourceUrl),
