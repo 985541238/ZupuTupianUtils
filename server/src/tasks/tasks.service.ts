@@ -1088,6 +1088,18 @@ export class TasksService implements OnModuleInit {
     return false;
   }
 
+  /** 自动检测这页更像哪种情况（脏污/字迹不清/标准），供审阅页推荐模式用 */
+  async detectImageMode(userId: number, taskId: number, imageId: number) {
+    const task = await this.get(userId, taskId);
+    const img = await this.getImage(userId, taskId, imageId);
+    await this.restoreOriginalSource(task, img);
+    try {
+      return await this.processor.detectMode(img.sourcePath);
+    } catch {
+      return { mode: 'standard' as const, scores: {} };
+    }
+  }
+
   async reprocessImage(
     userId: number,
     taskId: number,

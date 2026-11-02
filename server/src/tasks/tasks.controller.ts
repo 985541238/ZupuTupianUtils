@@ -124,6 +124,16 @@ export class TasksController {
     res.send(r.buf);
   }
 
+  /** 自动检测这页更像脏污 / 字迹不清 / 标准（本地，不花钱） */
+  @Get(':id/images/:imageId/detect-mode')
+  detectMode(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('imageId', ParseIntPipe) imageId: number,
+  ) {
+    return this.tasks.detectImageMode(req.user.id, id, imageId);
+  }
+
   /** 透视修正：自动找四个角（本地，不花钱） */
   @Post(':id/images/:imageId/perspective/detect')
   perspectiveDetect(

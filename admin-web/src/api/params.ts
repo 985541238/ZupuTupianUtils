@@ -29,6 +29,57 @@ export const DEFAULT_UI_PARAMS: ProcessParams = {
   stainStrength: 40,
 };
 
+/** 内置处理模式：选中后套用这组滑块值，用户之后仍可手动微调（变为「自定义」）。 */
+export type ProcessMode = 'auto' | 'standard' | 'stained' | 'faint';
+
+export interface ProcessModeDef {
+  key: Exclude<ProcessMode, 'auto'>;
+  label: string;
+  hint: string;
+  params: ProcessParams;
+}
+
+export const PROCESS_MODES: ProcessModeDef[] = [
+  {
+    key: 'standard',
+    label: '标准',
+    hint: '清晰印刷件：均衡去污与保字',
+    params: { contrastThreshold: 60, denoiseStrength: 55, sharpenStrength: 35, stainStrength: 40 },
+  },
+  {
+    key: 'stained',
+    label: '去污渍',
+    hint: '发黄/霉斑/脏底：重去渍去污，只留浓墨',
+    params: { contrastThreshold: 72, denoiseStrength: 80, sharpenStrength: 30, stainStrength: 85 },
+  },
+  {
+    key: 'faint',
+    label: '字迹增强',
+    hint: '复印淡、字不清：多留淡墨细笔并加锐',
+    params: { contrastThreshold: 28, denoiseStrength: 35, sharpenStrength: 55, stainStrength: 25 },
+  },
+];
+
+export function modeParams(key: Exclude<ProcessMode, 'auto'>): ProcessParams {
+  const m = PROCESS_MODES.find((x) => x.key === key);
+  return m ? { ...m.params } : { ...DEFAULT_UI_PARAMS };
+}
+
+/** 一组滑块值是否正好等于某内置模式（判断当前属于哪种模式还是「自定义」）。 */
+export function matchMode(p: ProcessParams): Exclude<ProcessMode, 'auto'> | null {
+  for (const m of PROCESS_MODES) {
+    if (
+      m.params.contrastThreshold === p.contrastThreshold &&
+      m.params.denoiseStrength === p.denoiseStrength &&
+      m.params.sharpenStrength === p.sharpenStrength &&
+      (m.params.stainStrength ?? 40) === (p.stainStrength ?? 40)
+    ) {
+      return m.key;
+    }
+  }
+  return null;
+}
+
 export function uiToNestParams(p: ProcessParams): NestParams {
   // Wider Nest spans so 0%↔100% visibly differ after ScanWash mapping.
   // Recommended UI marks: denoise 55%→8.8, threshold 60%→168, sharpen 35%→1.52

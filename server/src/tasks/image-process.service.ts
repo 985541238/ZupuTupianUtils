@@ -631,6 +631,60 @@ export class ImageProcessService {
       .toFile(thumbPath);
   }
 
+  /**
+   * 快速检测这页更像哪种情况：脏污(stained) / 字迹不清(faint) / 标准(standard)。
+   * 只在 400px 缩略图上统计颜色与墨色分布，不跑 Python、不落盘。
+   */
+  async detectMode(
+    sourcePath: string,
+  ): Promise<{ mode: 'standard' | 'stained' | 'faint'; scores: Record<string, number> }> {
+    const { data, info } = await sharp(sourcePath, { failOn: 'none' })
+      .rotate()
+      .resize(400, 400, { fit: 'inside', withoutEnlargement: true })
+      .removeAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const ch = info.channels;
+    const n = info.width * info.height;
+    let warmSum = 0; // R-B：黄/褐/红污渍偏暖
+    let dark = 0; // 深墨像素占比
+    let mid = 0; // 中灰（淡墨常落在这里）
+    let sum = 0;
+    let sumSq = 0;
+    for (let i = 0; i < n; i++) {
+      const r = data[i * ch];
+      const g = data[i * ch + 1];
+      const b = data[i * ch + 2];
+      const luma = 0.299 * r + 0.587 * g + 0.114 * b;
+      warmSum += r - b;
+      sum += luma;
+      sumSq += luma * luma;
+      if (luma < 90) dark++;
+      else if (luma < 180) mid++;
+    }
+    const warm = warmSum / n; // 平均 R-B
+    const darkFrac = dark / n;
+    const midFrac = mid / n;
+    const mean = sum / n;
+    const std = Math.sqrt(Math.max(0, sumSq / n - mean * mean));
+    const scores = {
+      warm: +warm.toFixed(2),
+      darkFrac: +darkFrac.toFixed(4),
+      midFrac: +midFrac.toFixed(4),
+      contrast: +std.toFixed(2),
+    };
+    // 规则（粗略，用户可改）：
+    // 偏暖明显(发黄/褐斑) 或 深墨很少但中灰偏多(像褪色/脏底) → 脏污
+    // 墨很浅：深墨极少、整体偏亮、对比低 → 字迹不清
+    let mode: 'standard' | 'stained' | 'faint' = 'standard';
+    if (warm >= 12 || (darkFrac < 0.06 && midFrac > 0.22)) {
+      mode = 'stained';
+    } else if (darkFrac < 0.035 && mean > 150 && std < 60) {
+      mode = 'faint';
+    }
+    return { mode, scores };
+  }
+
   async previewBuffer(
     sourcePath: string,
     params: ProcessParams,

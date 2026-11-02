@@ -111,6 +111,10 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
+  detectMode: (taskId: string | number, imageId: string | number) =>
+    request<{ mode: 'standard' | 'stained' | 'faint'; scores: Record<string, number> }>(
+      `/tasks/${taskId}/images/${imageId}/detect-mode`,
+    ),
   confirmImage: (taskId: string | number, imageId: string | number) =>
     request(`/tasks/${taskId}/images/${imageId}/confirm`, {
       method: 'POST',

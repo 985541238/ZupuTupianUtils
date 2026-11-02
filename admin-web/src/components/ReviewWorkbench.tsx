@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Task, ScanItem, ProcessParams, CropRect } from '../types';
 import { api, previewImageBlob } from '../api/client';
-import { buildPreviewBody, nestCropToUi } from '../api/params';
+import { buildPreviewBody, nestCropToUi, PROCESS_MODES, modeParams, matchMode } from '../api/params';
 import { PerspectiveDialog } from './PerspectiveDialog';
 import { mapImage, formatProcessingTime } from '../api/mappers';
 import {
@@ -86,6 +86,8 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
     };
   });
   const [applyScope, setApplyScope] = useState<'current' | 'remaining'>('current');
+  /** 自动检测出的推荐模式（脏污/字迹不清/标准），仅用于提示与「自动」按钮 */
+  const [detectedMode, setDetectedMode] = useState<'standard' | 'stained' | 'faint' | null>(null);
 
 
   const isDraggingSplitRef = useRef(false);
@@ -239,6 +241,16 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
           }
     );
     setCurrentStats(currentItem.stats);
+
+    // 自动检测这页更像哪种情况（脏污/字迹不清/标准），只做提示，不自动改参数
+    setDetectedMode(null);
+    const detectPid = pageId;
+    api
+      .detectMode(task.id, currentItem.id)
+      .then((r) => {
+        if (syncedPageIdRef.current === detectPid) setDetectedMode(r.mode);
+      })
+      .catch(() => {});
 
     // Restore preview: always keep a visible frame (never blank).
     // Prefer session blob → server clean → source original → hold previous frame.
@@ -815,6 +827,17 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
       triggerToast('参数已同步到后续未审页面');
     }
   };
+
+  /** 选中内置模式：一次套用整组滑块值，触发一次预览；之后仍可手动微调 */
+  const applyMode = (next: ProcessParams) => {
+    markParamsDirty();
+    setLocalParams(next);
+    if (applyScope === 'remaining') {
+      onBatchApplyParams(task.id, currentPageIndex, next);
+      triggerToast('模式已同步到后续未审页面');
+    }
+  };
+  const activeMode = matchMode(localParams);
 
   const enterCropMode = () => {
     compareBeforeCropRef.current = compareMode;
@@ -1868,6 +1891,54 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                   后续未审页 (批量)
                 </button>
               </div>
+            </div>
+
+            <div className="p-2.5 bg-white rounded-2xl border border-black/[0.06] shadow-2xs">
+              <div className="flex items-center justify-between mb-1.5">
+                <div className="text-[11px] font-medium text-[#86868B]">处理模式</div>
+                {detectedMode ? (
+                  <button
+                    type="button"
+                    onClick={() => applyMode(modeParams(detectedMode))}
+                    className="text-[10px] font-medium text-[#0071E3] hover:underline cursor-pointer flex items-center gap-1"
+                    title="套用自动检测推荐的模式参数"
+                  >
+                    <Sparkles className="w-3 h-3" />
+                    自动检测：{PROCESS_MODES.find((m) => m.key === detectedMode)?.label}
+                  </button>
+                ) : (
+                  <span className="text-[10px] text-[#C7C7CC]">检测中…</span>
+                )}
+              </div>
+              <div className="grid grid-cols-3 gap-1 p-1 bg-[#E5E5EA]/70 rounded-xl">
+                {PROCESS_MODES.map((m) => {
+                  const on = activeMode === m.key;
+                  const recommended = detectedMode === m.key;
+                  return (
+                    <button
+                      key={m.key}
+                      type="button"
+                      onClick={() => applyMode(modeParams(m.key))}
+                      title={m.hint}
+                      className={`relative py-1.5 text-xs font-medium rounded-lg transition-all cursor-pointer ${
+                        on
+                          ? 'bg-white text-[#0071E3] shadow-xs font-semibold'
+                          : 'text-[#6E6E73] hover:text-[#1D1D1F]'
+                      }`}
+                    >
+                      {m.label}
+                      {recommended && !on ? (
+                        <span className="absolute top-1 right-1.5 w-1.5 h-1.5 rounded-full bg-[#FF9500]" />
+                      ) : null}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-[10px] text-[#86868B] mt-1.5 leading-relaxed px-0.5">
+                {activeMode
+                  ? PROCESS_MODES.find((m) => m.key === activeMode)?.hint
+                  : '自定义：已手动调整，不属于任一内置模式'}
+              </p>
             </div>
 
             <div className="p-3 bg-white rounded-2xl border border-black/[0.06] shadow-2xs space-y-2">
