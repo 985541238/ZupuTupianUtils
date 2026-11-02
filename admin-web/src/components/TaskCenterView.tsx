@@ -328,7 +328,6 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     setPageCountPreview(0);
     setUseAiClean(false);
     void loadOcrModels();
-    void loadCleanModels();
     setTaskDescription('旧族谱复印页图片处理（去污去褶皱、白底黑字），供后续 OCR 识别与数据化');
     const cur = typeof projectFilter === 'number' ? projects.find((p) => p.id === projectFilter) : null;
     setGenealogyNote(cur ? cur.surname || '' : '');
@@ -1333,7 +1332,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
       {/* Create Task Modal — 宽版两栏：左「谱书信息」，右「处理方式」，底部常驻费用预估 */}
       {showCreateModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm animate-fade-in">
-          <div className="bg-white rounded-3xl border border-black/[0.08] shadow-[0_24px_64px_rgba(0,0,0,0.18)] max-w-[1080px] w-full max-h-[calc(100vh-32px)] flex flex-col animate-apple-in">
+          <div className="bg-white rounded-3xl border border-black/[0.08] shadow-[0_24px_64px_rgba(0,0,0,0.18)] max-w-[620px] w-full max-h-[calc(100vh-32px)] flex flex-col animate-apple-in">
             <div className="flex items-start justify-between px-6 pt-5 pb-4 border-b border-black/[0.06] shrink-0">
               <div>
                 <h3 className="text-base font-bold text-[#1D1D1F]">
@@ -1356,7 +1355,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
             </div>
 
             <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
+              <div className="grid grid-cols-1 gap-x-8 gap-y-6">
                 {/* 左栏：谱书信息 */}
                 <div className="space-y-4">
                   <div className="flex items-center gap-2">
@@ -1458,103 +1457,6 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                   </div>
                 </div>
 
-                {/* 右栏：处理方式 */}
-                <div className="space-y-4 md:pl-8 md:border-l md:border-black/[0.06]">
-                  <div className="flex items-center gap-2">
-                    <span className="w-5 h-5 rounded-full bg-[#0071E3] text-white text-[10px] font-bold flex items-center justify-center">2</span>
-                    <span className="text-sm font-semibold text-[#1D1D1F]">图片处理方式</span>
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <button
-                      type="button"
-                      onClick={() => setUseAiClean(false)}
-                      className={`text-left p-4 rounded-2xl border-2 cursor-pointer transition-colors ${
-                        !useAiClean ? 'border-[#0071E3] bg-[#0071E3]/[0.04]' : 'border-transparent bg-[#F5F5F7]/90 hover:bg-[#F0F0F3]'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm font-semibold text-[#1D1D1F]">现有算法处理</span>
-                        <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-[#34C759]/12 text-[#248A3D] font-semibold">免费</span>
-                      </div>
-                      <div className="text-xs text-[#86868B] mt-1.5 leading-relaxed">速度快；干净、轻微泛黄的页效果好</div>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!cleanModels.length) {
-                          onOpenSetup?.(null, undefined, () => void loadCleanModels());
-                          return;
-                        }
-                        setUseAiClean(true);
-                      }}
-                      className={`text-left p-4 rounded-2xl border-2 cursor-pointer transition-colors ${
-                        useAiClean ? 'border-[#AF52DE] bg-[#AF52DE]/[0.05]' : 'border-transparent bg-[#F5F5F7]/90 hover:bg-[#F0F0F3]'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm font-semibold text-[#1D1D1F] flex items-center gap-1.5">
-                          <Sparkles className="w-4 h-4 text-[#8944AB]" />
-                          AI 大模型处理
-                        </span>
-                        <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-[#AF52DE]/12 text-[#8944AB] font-semibold">效果更好</span>
-                      </div>
-                      <div className="text-xs text-[#86868B] mt-1.5 leading-relaxed">
-                        {cleanModels.length ? '污渍多、残破的页处理得更干净；按张收费' : '还没配置，点这里打开引导配置（约 3 分钟）'}
-                      </div>
-                    </button>
-                  </div>
-                  {useAiClean ? (
-                    <div className="p-4 rounded-2xl bg-[#AF52DE]/[0.04] border border-[#AF52DE]/15 space-y-3">
-                      <div className="grid grid-cols-[1fr_auto] gap-3 items-end">
-                        <div className="min-w-0">
-                          <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">选择模型</label>
-                          <select
-                            value={selectedCleanModelId ?? ''}
-                            onChange={(e) => setSelectedCleanModelId(e.target.value ? Number(e.target.value) : null)}
-                            className="w-full h-10 px-3 text-[13px] bg-white border border-black/[0.08] rounded-xl"
-                          >
-                            {cleanModels.map((m) => (
-                              <option key={m.id} value={m.id}>
-                                {m.displayName}
-                                {modelPriceText(m)}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => onOpenSetup?.(null, 3, () => void loadCleanModels())}
-                          className="h-10 px-3 text-xs font-semibold text-[#8944AB] rounded-xl hover:bg-[#AF52DE]/10 cursor-pointer whitespace-nowrap"
-                        >
-                          换模型 / 配置
-                        </button>
-                      </div>
-                      <div className="flex items-baseline justify-between gap-3">
-                        <span className="text-xs text-[#6E6E73]">预估费用</span>
-                        <span className="text-base font-bold text-[#1D1D1F] tabular-nums">
-                          {!pageCountPreview
-                            ? <span className="text-xs font-normal text-[#86868B]">填好文件夹后自动估算</span>
-                            : cleanEst.priced && cleanEst.cost != null
-                              ? moneyText(cleanEst)
-                              : <span className="text-xs font-normal text-[#C93400]">该模型没填单价，到「模型配置」补上即可估算</span>}
-                        </span>
-                      </div>
-                      <p className="text-xs text-[#86868B] leading-relaxed">
-                        整本每页都由大模型处理成白底黑字（大模型效果一般比算法更好）；审核时也可以对单页切回算法结果。
-                      </p>
-                    </div>
-                  ) : (
-                    <p className="text-xs text-[#86868B] leading-relaxed px-1">
-                      用现有算法处理整本。审核时如果某页效果不好，可以对那一页点「使用大模型处理」。
-                    </p>
-                  )}
-
-                  <div className="pt-4 border-t border-black/[0.06]">
-                    <p className="text-xs text-[#86868B] leading-relaxed">
-                      文字识别是单独的任务：图片处理审阅完成后，到顶部「OCR 识别」选择本任务，即可识别整本文字。
-                    </p>
-                  </div>
-                </div>
               </div>
             </div>
 
@@ -1564,17 +1466,10 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                   '正在统计图片张数…'
                 ) : pageCountPreview ? (
                   <>
-                    共 <b className="text-[#1D1D1F] tabular-nums">{pageCountPreview}</b> 张 · 预计费用{' '}
-                    <b className="text-[#1D1D1F] tabular-nums">
-                      {!useAiClean
-                        ? '¥0（算法免费）'
-                        : cleanEst.priced && cleanEst.cost != null
-                          ? moneyText(cleanEst)
-                          : '模型未填单价'}
-                    </b>
+                    共 <b className="text-[#1D1D1F] tabular-nums">{pageCountPreview}</b> 张图片 · 算法处理，免费
                   </>
                 ) : (
-                  '填好谱书信息和文件夹，选好处理方式即可创建'
+                  '填好卷名称和图片文件夹即可创建'
                 )}
               </div>
               <button
