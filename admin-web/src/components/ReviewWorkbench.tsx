@@ -1421,7 +1421,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
           </div>
 
           {/* 图片上方工具条：剪裁 / 透视修正；裁剪后出现「裁切后 | 完整原图」切换 */}
-          <div className="absolute top-[58px] left-1/2 -translate-x-1/2 z-20 flex items-center gap-1 p-1 apple-glass-heavy border border-black/[0.08] rounded-full shadow-[0_6px_18px_rgba(0,0,0,0.05)]">
+          <div className="absolute top-3.5 left-4 z-20 flex items-center gap-1 p-1 apple-glass-heavy border border-black/[0.08] rounded-full shadow-[0_6px_18px_rgba(0,0,0,0.05)]">
             <button
               type="button"
               onClick={(e) => {
@@ -1455,7 +1455,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
               <Scan className="w-3 h-3" />
               <span>{currentItem?.perspectiveApplied ? '已透视修正' : '透视修正'}</span>
             </button>
-            {confirmedCrop && !cropSelecting ? (
+            {(confirmedCrop || currentItem?.perspectiveApplied) && !cropSelecting ? (
               <>
                 <div className="h-4 w-px bg-black/[0.08] mx-1" />
                 <div className="flex items-center p-0.5 bg-[#E5E5EA]/70 rounded-full">
@@ -1465,9 +1465,9 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                     className={`px-3 py-1 text-xs font-medium rounded-full transition-all cursor-pointer ${
                       compareMode !== 'original-only' ? 'bg-white text-[#0071E3] shadow-xs font-semibold' : 'text-[#6E6E73] hover:text-[#1D1D1F]'
                     }`}
-                    title="查看裁切后的尺寸与效果"
+                    title="查看调整后的尺寸与效果"
                   >
-                    裁切后
+                    {confirmedCrop && currentItem?.perspectiveApplied ? '裁切+透视后' : confirmedCrop ? '裁切后' : '透视调整后'}
                   </button>
                   <button
                     type="button"
@@ -1475,9 +1475,9 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                     className={`px-3 py-1 text-xs font-medium rounded-full transition-all cursor-pointer ${
                       compareMode === 'original-only' ? 'bg-white text-[#0071E3] shadow-xs font-semibold' : 'text-[#6E6E73] hover:text-[#1D1D1F]'
                     }`}
-                    title="裁剪不会删除原图，随时可切回完整原图"
+                    title="裁剪/透视修正不会删除原图，随时可切回查看"
                   >
-                    完整原图
+                    原图
                   </button>
                 </div>
               </>
@@ -1487,7 +1487,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
           {/* Canvas Viewport */}
           <div
             ref={containerRef}
-            className={`flex-1 flex items-center justify-center p-8 pt-24 relative overflow-hidden ${
+            className={`flex-1 flex items-center justify-center p-8 pt-16 relative overflow-hidden ${
               cropSelecting ? 'pb-24' : ''
             }`}
           >
@@ -1606,14 +1606,14 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                 <div className="relative inline-block max-h-[78vh]">
                   <img
                     ref={originalImgRef}
-                    src={currentItem.originalUrl}
+                    src={!cropSelecting && currentItem.perspectiveApplied && currentItem.trueOriginalUrl ? currentItem.trueOriginalUrl : currentItem.originalUrl}
                     alt="原始扫描页"
                     className="max-h-[78vh] w-auto object-contain block select-none pointer-events-none"
                     draggable={false}
                   />
                   {!cropSelecting && (
                     <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-[#1D1D1F]/75 text-[10px] font-semibold text-white shadow-2xs z-10 pointer-events-none">
-                      {confirmedCrop ? '完整原图（未裁剪）' : '原图'}
+                      {confirmedCrop || currentItem.perspectiveApplied ? '原图（未裁剪/未透视修正）' : '原图'}
                     </div>
                   )}
                   {cropSelecting && (
