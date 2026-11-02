@@ -703,15 +703,6 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
               <span className="tabular-nums">
                 {saveState === 'saving' ? '保存中…' : saveState === 'saved' ? '修改已保存' : saveState === 'error' ? <span className="text-[#C62828]">保存失败，稍后重试</span> : ''}
               </span>
-              <a
-                href={ocrExportUrl(task.id, 'columns')}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white border border-black/[0.08] text-[#1D1D1F] font-semibold hover:bg-[#F5F5F7]"
-              >
-                <Download className="w-3.5 h-3.5" />
-                导出文字
-              </a>
             </div>
           </div>
 
@@ -1042,7 +1033,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
               <h3 className="text-[15px] font-semibold text-[#1D1D1F]">完成整本 OCR 任务？</h3>
               <p className="text-[13px] text-[#6E6E73] mt-1 leading-relaxed">
                 共 {pages.length} 页都已确认
-                {totalPending ? `，还有 ${totalPending} 处标记为待核对/占位符，将按现状保留` : ''}。完成后可在列表里导出全书文字。
+                {totalPending ? `，还有 ${totalPending} 处标记为待核对/占位符，将按现状保留` : ''}。
               </p>
             </div>
           </div>
