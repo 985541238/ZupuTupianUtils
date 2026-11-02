@@ -1,5 +1,5 @@
 import { ScanItem, Task, User } from '../types';
-import { authImageUrl, viewImageUrl } from './client';
+import { authImageUrl, viewImageUrl, viewThumbUrl } from './client';
 import type { OcrTask, OcrPage, OcrSourceTask, OcrTextPage } from '../types';
 import { DEFAULT_UI_PARAMS, nestToUiParams } from './params';
 
@@ -69,7 +69,7 @@ export function mapImage(raw: any, taskId: string | number, pageNumber: number):
     originalUrl: viewImageUrl(raw.perspectiveApplied && raw.trueOriginalUrl ? raw.trueOriginalUrl : raw.sourceUrl),
     correctedUrl: viewImageUrl(raw.sourceUrl),
     processedUrl: raw.resultUrl ? viewImageUrl(raw.resultUrl) : undefined,
-    thumbnailUrl: raw.thumbUrl ? authImageUrl(raw.thumbUrl) : viewImageUrl(raw.sourceUrl, 600),
+    thumbnailUrl: raw.thumbUrl ? authImageUrl(raw.thumbUrl) : viewThumbUrl(raw.sourceUrl, 256),
     trueOriginalUrl: authImageUrl(raw.trueOriginalUrl || raw.sourceUrl),
     perspectiveApplied: !!raw.perspectiveApplied,
     perspectiveQuads: raw.perspectiveQuads || null,

@@ -152,10 +152,10 @@ export class TasksController {
   @Get(':id/images')
   async images(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
     const list = await this.tasks.listImages(req.user.id, id);
-    // 打开这一卷时，后台按页码顺序补生成审阅用的工作图（低优先级，不挡住正在看的页）
-    for (const img of list) {
-      warmViewProxy(img.sourcePath);
-      warmViewProxy(img.resultPath);
+    // 只对首屏附近的页低优先级预热一张主图；整卷可能几百张，全量预热会让 CPU 持续满载。
+    // 其余页由前端翻页时的邻页预取 / 缩略图按需驱动，生成后落盘，第二次直接命中。
+    for (const img of list.slice(0, 8)) {
+      warmViewProxy(img.resultPath || img.sourcePath);
     }
     return list.map((img) => this.tasks.imageView(img));
   }

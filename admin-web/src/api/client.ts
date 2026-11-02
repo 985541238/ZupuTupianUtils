@@ -278,10 +278,19 @@ export function authImageUrl(url?: string | null): string {
 }
 
 /** 审阅页展示用的"工作图"：服务端按长边缩小并缓存，大图不再整张传输；原图/成品文件不变 */
-export function viewImageUrl(url?: string | null, maxSide = 2400): string {
+export function viewImageUrl(
+  url?: string | null,
+  maxSide = 2400,
+  prio: 'high' | 'low' = 'high',
+): string {
   const u = authImageUrl(url);
   if (!u || u.startsWith('blob:') || u.startsWith('data:') || !u.includes('/files/local')) return u;
-  return u + '&w=' + maxSide;
+  return u + '&w=' + maxSide + (prio === 'low' ? '&prio=low' : '');
+}
+
+/** 左侧列表/卡片封面的缩略图：固定小尺寸、低优先级，绝不与审阅主图抢服务器资源 */
+export function viewThumbUrl(url?: string | null, maxSide = 256): string {
+  return viewImageUrl(url, maxSide, 'low');
 }
 
 export function downloadUrl(

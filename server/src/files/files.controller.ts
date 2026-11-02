@@ -44,7 +44,12 @@ export class FilesController {
 
   @UseGuards(JwtAuthGuard)
   @Get('local')
-  async local(@Query('path') filePath: string, @Query('w') w: string, @Res() res: Response) {
+  async local(
+    @Query('path') filePath: string,
+    @Query('w') w: string,
+    @Query('prio') prio: string,
+    @Res() res: Response,
+  ) {
     const abs = this.files.assertReadable(filePath);
     const ext = path.extname(abs).toLowerCase();
     const map: Record<string, string> = {
@@ -57,11 +62,12 @@ export class FilesController {
       '.tiff': 'image/tiff',
     };
     const maxSide = Math.min(4000, Math.max(0, Number(w) || 0));
-    if (maxSide >= 300) {
-      const proxy = await ensureViewProxy(abs, maxSide);
+    if (maxSide >= 120) {
+      // 缩略图(prio=low)绝不插到审阅主图(high)前面；大图也只在这一层解码一次并缓存到磁盘
+      const proxy = await ensureViewProxy(abs, maxSide, prio === 'low' ? 'low' : 'high');
       if (proxy) {
         // sendFile 自带 ETag / 304，浏览器再次打开同一页直接走缓存
-        return res.sendFile(proxy, { headers: { 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=300' } });
+        return res.sendFile(proxy, { headers: { 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=600' } });
       }
     }
     res.setHeader('Content-Type', map[ext] || 'application/octet-stream');
