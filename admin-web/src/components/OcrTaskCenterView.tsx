@@ -213,6 +213,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
       const created = await onCreate({ name: taskName.trim(), projectId: sourceId, ocrModelId: modelId });
       setShowCreate(false);
       if (startAfter) onStart(created.id);
+      else if (created?.id) setOpenId(created.id); // 建好直接进项目，看各卷
     } catch (e: any) {
       alert(e?.message || '创建任务失败');
     } finally {
@@ -829,7 +830,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                           现有 <b className="text-[#1D1D1F] tabular-nums">{selectedSource.usableCount}</b> 页可识别
                         </>
                       ) : (
-                        '暂无已完成的卷，先创建，之后自动并入'
+                        '暂无已完成的卷，先创建；之后有卷完成会自动列出，再手动点「开始 OCR」'
                       )}
                     </>
                   ) : (
@@ -841,20 +842,11 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                 </button>
                 <button
                   type="button"
-                  disabled={creating || !sourceId || false}
+                  disabled={creating || !sourceId}
                   onClick={() => void submit(false)}
-                  className="h-10 px-4 text-sm font-semibold bg-white border border-black/[0.1] hover:bg-[#F5F5F7] text-[#1D1D1F] rounded-xl cursor-pointer disabled:opacity-50"
+                  className="h-10 px-6 text-sm font-semibold bg-[#0071E3] hover:bg-[#0077ED] text-white rounded-xl shadow-[0_2px_8px_rgba(0,113,227,0.25)] cursor-pointer disabled:opacity-50"
                 >
-                  仅创建
-                </button>
-                <button
-                  type="button"
-                  disabled={creating || !sourceId || !(selectedSource && selectedSource.usableCount > 0)}
-                  onClick={() => void submit(true)}
-                  className="h-10 px-5 text-sm font-semibold bg-[#0071E3] hover:bg-[#0077ED] text-white rounded-xl shadow-[0_2px_8px_rgba(0,113,227,0.25)] cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
-                >
-                  <Play className="w-3 h-3 fill-current" />
-                  创建并开始
+                  {creating ? '创建中…' : '创建'}
                 </button>
               </div>
             </div>
