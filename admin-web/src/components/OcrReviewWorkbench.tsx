@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { OcrTask, OcrPage, OcrColumn, OcrChar, OcrTextPage } from '../types';
-import { api, ocrExportUrl } from '../api/client';
+import { api } from '../api/client';
 import { mapOcrPage, mapOcrTextPage } from '../api/mappers';
 import { OcrModelPicker } from './OcrModelPicker';
 import {
@@ -1860,15 +1860,6 @@ const OcrOverview: React.FC<{ taskId: string; onJump: (pageId: string) => void }
             {copied ? <Check className="w-3.5 h-3.5 text-[#34C759]" /> : <Copy className="w-3.5 h-3.5" />}
             {copied ? '已复制' : '复制全文'}
           </button>
-          <a
-            href={ocrExportUrl(taskId, style === 'flow' ? 'flow' : 'columns')}
-            target="_blank"
-            rel="noreferrer"
-            className="h-8 px-3 text-xs font-semibold rounded-lg bg-[#0071E3] text-white hover:bg-[#0077ED] flex items-center gap-1.5"
-          >
-            <Download className="w-3.5 h-3.5" />
-            下载 txt
-          </a>
         </div>
       </div>
 
