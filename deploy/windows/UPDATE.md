@@ -30,3 +30,7 @@ Start-ScheduledTask -TaskName ZupuWorkbench
 
 ## 4. 回滚
 更新前把 `C:\node\rupuutils\zupu\server\dist` 和 `admin-web\dist` 复制一份备份；出问题时还原这两个目录并重启计划任务即可。
+
+## 一键更新（推荐）
+解压覆盖后，直接**双击 `deploy\windows\update.cmd`**（会自动请求管理员权限），它会依次：备份旧编译产物到 `backup\` → 停计划任务并释放 8090 端口 → 安装依赖 → 编译前后端 → 启动计划任务 → 检查端口。上面第 2 步的命令不用再手动敲。
+失败时窗口会提示原因；旧版本在 `backup\` 里可还原。
