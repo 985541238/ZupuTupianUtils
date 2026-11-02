@@ -242,11 +242,6 @@ export const OcrTaskCenterView: React.FC<Props> = ({
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            {isProcessing && task.doneCount > 0 && (
-              <button onClick={() => onOpenReview(task.id)} className="h-10 px-4 text-sm font-semibold rounded-full bg-white border border-[#0071E3]/30 text-[#0071E3] cursor-pointer">
-                先去审阅（{task.doneCount} 页）
-              </button>
-            )}
             {!isProcessing && task.doneCount > 0 && (
               <button onClick={() => onOpenReview(task.id)} className="h-10 px-5 text-sm font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white cursor-pointer flex items-center gap-1.5">
                 {task.status === 'completed' ? '查看' : '进入审阅'}
@@ -304,6 +299,14 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                           <CheckCircle2 className="w-4 h-4" />
                           已识别
                         </span>
+                      ) : null}
+                      {isProcessing && rec > 0 ? (
+                        <button
+                          onClick={() => onOpenReview(task.id)}
+                          className="h-10 px-4 text-sm font-semibold rounded-full bg-white border border-[#0071E3]/30 text-[#0071E3] hover:bg-[#0071E3]/[0.05] cursor-pointer"
+                        >
+                          先去审阅（{rec} 页）
+                        </button>
                       ) : null}
                       {isProcessing ? (
                         <button disabled className="h-10 px-5 text-sm font-semibold rounded-full bg-[#E8F1FC] text-[#0071E3] cursor-not-allowed flex items-center gap-1.5">
