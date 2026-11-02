@@ -151,7 +151,12 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   const [creating, setCreating] = useState(false);
 
   // 各阶段数量
-  const stageCount = (k: 'all' | Stage) => (k === 'all' ? tasks.length : tasks.filter((t) => stageOf(t) === k).length);
+  // 状态页签的数字只统计当前项目里的卷（之前统计的是所有项目，空项目也会显示别的项目的数量）
+  const scopeTasks = useMemo(
+    () => tasks.filter((t) => (projectFilter === 'none' ? t.projectId == null : projectFilter === 'all' ? true : Number(t.projectId) === projectFilter)),
+    [tasks, projectFilter],
+  );
+  const stageCount = (k: 'all' | Stage) => (k === 'all' ? scopeTasks.length : scopeTasks.filter((t) => stageOf(t) === k).length);
 
   // Filtered Tasks
   const filteredTasks = useMemo(() => {
@@ -903,7 +908,8 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
         <div className={projectFilter === 'all' ? 'hidden' : 'space-y-3'}>
           {paginatedTasks.length === 0 ? (
             <div className="bg-white rounded-3xl border border-black/[0.06] p-12 text-center shadow-xs">
-              <p className="text-sm text-[#86868B] mb-3">{tasks.some((t) => (projectFilter === 'none' ? t.projectId == null : Number(t.projectId) === projectFilter)) ? '没有符合筛选条件的卷' : '这个项目里还没有卷，点右上角「新建卷」上传第一卷'}</p>
+              <p className="text-sm text-[#86868B] mb-3">{scopeTasks.length > 0 ? '没有符合筛选条件的卷' : '这个项目里还没有卷，点右上角「新建卷」上传第一卷'}</p>
+              {scopeTasks.length > 0 && (
               <button
                 onClick={() => {
                   setStatusFilter('all');
@@ -916,6 +922,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
               >
                 重置筛选条件
               </button>
+              )}
             </div>
           ) : (
             paginatedTasks.map((task) => {
