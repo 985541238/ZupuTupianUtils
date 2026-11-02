@@ -63,13 +63,14 @@ export class FilesController {
       try {
         const meta = await sharp(abs, { limitInputPixels: false }).metadata();
         const side = Math.max(meta.width || 0, meta.height || 0);
-        if (!side || side <= maxSide * 1.15) return null;
+        // 尺寸没超、文件也不大(<400KB)才直接用原文件；否则一律压成 JPEG（2400px 以内的大文件也要压）
+        if (!side || (side <= maxSide && st.size < 400 * 1024)) return null;
         fs.mkdirSync(path.dirname(out), { recursive: true });
         const tmp = out + '.' + process.pid + '.tmp';
         await sharp(abs, { limitInputPixels: false, sequentialRead: true })
           .rotate()
           .resize({ width: maxSide, height: maxSide, fit: 'inside', withoutEnlargement: true })
-          .jpeg({ quality: 85, mozjpeg: false })
+          .jpeg({ quality: 82 })
           .toFile(tmp);
         fs.renameSync(tmp, out);
         return out;

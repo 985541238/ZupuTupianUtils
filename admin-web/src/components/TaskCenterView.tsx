@@ -986,7 +986,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                     <div className="w-12 h-[3.75rem] bg-[#F5F5F7] rounded-[12px] border border-black/[0.06] overflow-hidden shrink-0 flex items-center justify-center text-[15px] font-semibold text-[#0071E3] tracking-tight">
                       {task.items[0]?.thumbnailUrl || task.items[0]?.originalUrl ? (
                         <img
-                          src={task.items[0]?.processedUrl || task.items[0]?.thumbnailUrl || task.items[0]?.originalUrl}
+                          src={task.items[0]?.thumbnailUrl || task.items[0]?.processedUrl || task.items[0]?.originalUrl}
                           alt=""
                           className="w-full h-full object-cover"
                         />
