@@ -746,16 +746,6 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                     );
                   })}
 
-                  <button
-                    type="button"
-                    onClick={newProject}
-                    className="min-h-[190px] rounded-3xl border-2 border-dashed border-black/[0.12] hover:border-[#0071E3] hover:bg-[#0071E3]/[0.03] text-[#86868B] hover:text-[#0071E3] flex flex-col items-center justify-center gap-2 transition-all cursor-pointer"
-                  >
-                    <span className="w-10 h-10 rounded-full bg-[#F2F2F7] group-hover:bg-white flex items-center justify-center">
-                      <Plus className="w-5 h-5" />
-                    </span>
-                    <span className="text-sm font-semibold">新建项目</span>
-                  </button>
                 </div>
               )}
 
