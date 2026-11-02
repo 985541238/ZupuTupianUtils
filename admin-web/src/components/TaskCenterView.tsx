@@ -20,6 +20,7 @@ import {
   X,
   Trash2,
   Folder,
+  FolderOpen,
 } from 'lucide-react';
 
 interface TaskCenterViewProps {
@@ -100,9 +101,14 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   const [timeFilter, setTimeFilter] = useState<TimeFilterType>('all');
   const [searchQuery, setSearchQuery] = useState('');
   /** 项目（家族）列表与当前筛选、创建弹窗里输入的项目名 */
-  const [projects, setProjects] = useState<Array<{ id: number; name: string; volumeCount: number }>>([]);
+  type ProjectRow = { id: number; name: string; surname?: string; volumeCount: number; totalPages: number; processing: number; reviewing: number; completed: number };
+  const [projects, setProjects] = useState<ProjectRow[]>([]);
+  /** 'all' = 项目总览（第一层）；number / 'none' = 进入某个项目看它的卷（第二层） */
   const [projectFilter, setProjectFilter] = useState<'all' | 'none' | number>('all');
-  const [projectInput, setProjectInput] = useState('');
+  const [showProjectModal, setShowProjectModal] = useState(false);
+  const [newProjectName, setNewProjectName] = useState('');
+  const [creatingProject, setCreatingProject] = useState(false);
+  const [projectDeleteTarget, setProjectDeleteTarget] = useState<ProjectRow | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Task | null>(null);
   const [deleting, setDeleting] = useState(false);
 
@@ -193,7 +199,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   const loadProjects = React.useCallback(async () => {
     try {
       const list = await api.listProjects();
-      setProjects(Array.isArray(list) ? list.map((p) => ({ id: p.id, name: p.name, volumeCount: p.volumeCount })) : []);
+      setProjects(Array.isArray(list) ? list : []);
     } catch {
       /* ignore */
     }
@@ -314,8 +320,45 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     void loadOcrModels();
     void loadCleanModels();
     setTaskDescription('旧族谱复印页图片处理（去污去褶皱、白底黑字），供后续 OCR 识别与数据化');
-    setGenealogyNote('');
+    const cur = typeof projectFilter === 'number' ? projects.find((p) => p.id === projectFilter) : null;
+    setGenealogyNote(cur ? cur.surname || cur.name.replace(/氏$/, '') : '');
     setFolderPath('');
+  };
+
+  const submitNewProject = async () => {
+    const name = newProjectName.trim();
+    if (!name) {
+      alert('请填写项目名称，例如：李氏');
+      return;
+    }
+    if (projects.some((p) => p.name === name)) {
+      alert('已有同名项目，直接点进去新建卷即可');
+      return;
+    }
+    setCreatingProject(true);
+    try {
+      const np = await api.createProject({ name, surname: name.replace(/氏$/, '') });
+      await loadProjects();
+      setShowProjectModal(false);
+      setNewProjectName('');
+      setProjectFilter(np.id);
+    } catch (e: any) {
+      alert(e?.message || '创建项目失败');
+    } finally {
+      setCreatingProject(false);
+    }
+  };
+
+  const confirmDeleteProject = async () => {
+    if (!projectDeleteTarget) return;
+    try {
+      await api.deleteProject(projectDeleteTarget.id);
+      setProjectDeleteTarget(null);
+      await loadProjects();
+      onRefresh?.();
+    } catch (e: any) {
+      alert(e?.message || '删除项目失败');
+    }
   };
 
   const loadBrowse = async (target?: string) => {
@@ -466,23 +509,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     }
     setCreating(true);
     try {
-      // 解析项目：填了项目名就找现有的，没有就新建一个，卷归入该项目
-      let projectId: number | null = null;
-      const pname = projectInput.trim();
-      if (pname) {
-        const existing = projects.find((p) => p.name === pname);
-        if (existing) {
-          projectId = existing.id;
-        } else {
-          try {
-            const np = await api.createProject({ name: pname, surname: genealogyNote.trim() });
-            projectId = np.id;
-            await loadProjects();
-          } catch {
-            projectId = null;
-          }
-        }
-      }
+      const projectId: number | null = typeof projectFilter === 'number' ? projectFilter : null;
       const created = await onCreateTask(
         {
           name: taskName.trim(),
@@ -511,7 +538,6 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
       setTaskName('');
       setGenealogyNote('');
       setFolderPath('');
-      setProjectInput('');
       setUseAiRecognition(false);
       setUseAiClean(false);
     } catch (e: any) {
@@ -541,36 +567,170 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     <div className="flex-1 overflow-y-auto bg-[#F5F5F7]">
     <div className="px-6 py-6 lg:px-10 lg:py-8 max-w-[1440px] mx-auto w-full min-h-full flex flex-col justify-between">
       <div>
-        {/* Top Header & New Task Button */}
-        <div className="flex items-center justify-between gap-4 mb-5 pb-3.5 border-b border-black/[0.06]">
-          <div>
-            <h1 className="text-2xl font-bold text-[#1D1D1F] tracking-tight">图片处理任务</h1>
-            <p className="text-sm text-[#86868B] mt-1 font-medium">
-              一本谱书一个任务：把旧谱复印页处理成白底黑字，供后续识别与数据化
-            </p>
-          </div>
+        {/* Top Header：总览 = 项目；进入项目 = 该项目的卷 */}
+        {(() => {
+          const inProject = projectFilter !== 'all';
+          const curProject = typeof projectFilter === 'number' ? projects.find((p) => p.id === projectFilter) : null;
+          const curName = projectFilter === 'none' ? '未归类的卷' : curProject?.name || '项目';
+          return (
+            <div className="flex items-center justify-between gap-4 mb-5 pb-3.5 border-b border-black/[0.06]">
+              <div className="min-w-0">
+                {inProject ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setProjectFilter('all')}
+                      className="inline-flex items-center gap-1 text-[13px] font-medium text-[#0071E3] hover:underline cursor-pointer mb-1"
+                    >
+                      <ChevronLeft className="w-4 h-4" />
+                      全部项目
+                    </button>
+                    <h1 className="text-2xl font-bold text-[#1D1D1F] tracking-tight truncate">{curName}</h1>
+                    <p className="text-sm text-[#86868B] mt-1 font-medium">
+                      {projectFilter === 'none'
+                        ? '这些卷创建于「项目」功能上线之前，没有归入任何项目'
+                        : '一卷一个文件夹：在这里新建卷、上传图片，系统会在后台自动处理，处理好就能审阅'}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <h1 className="text-2xl font-bold text-[#1D1D1F] tracking-tight">图片处理 · 项目</h1>
+                    <p className="text-sm text-[#86868B] mt-1 font-medium">
+                      先新建项目（一个家族 / 一部谱书，如「李氏」），再进到项目里新建各卷（卷1、卷2…）
+                    </p>
+                  </>
+                )}
+              </div>
 
-          <div className="flex items-center gap-2">
-            {onRefresh && (
+              <div className="flex items-center gap-2">
+                {onRefresh && (
+                  <button
+                    onClick={() => {
+                      onRefresh();
+                      void loadProjects();
+                    }}
+                    className="h-10 px-4 text-sm font-semibold bg-white border border-black/[0.08] text-[#1D1D1F] rounded-xl hover:bg-[#F5F5F7] cursor-pointer"
+                  >
+                    {loading ? '刷新中…' : '刷新'}
+                  </button>
+                )}
+                {!inProject ? (
+                  <button
+                    onClick={() => {
+                      setNewProjectName('');
+                      setShowProjectModal(true);
+                    }}
+                    className="flex items-center gap-1.5 h-10 px-5 bg-[#0071E3] hover:bg-[#0077ED] active:scale-[0.98] text-white text-sm font-semibold rounded-xl shadow-[0_2px_8px_rgba(0,113,227,0.25)] transition-all cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    <Plus className="w-4 h-4 stroke-[2.5]" />
+                    <span>新建项目</span>
+                  </button>
+                ) : projectFilter !== 'none' ? (
+                  <button
+                    onClick={openCreateModal}
+                    className="flex items-center gap-1.5 h-10 px-5 bg-[#0071E3] hover:bg-[#0077ED] active:scale-[0.98] text-white text-sm font-semibold rounded-xl shadow-[0_2px_8px_rgba(0,113,227,0.25)] transition-all cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    <Plus className="w-4 h-4 stroke-[2.5]" />
+                    <span>新建卷</span>
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* 第一层：项目总览 */}
+        {projectFilter === 'all' && (() => {
+          const orphan = tasks.filter((t) => t.projectId == null);
+          return (
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+              {projects.map((p) => (
+                <div
+                  key={p.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setProjectFilter(p.id)}
+                  onKeyDown={(e) => e.key === 'Enter' && setProjectFilter(p.id)}
+                  className="group relative text-left bg-white rounded-[20px] border border-black/[0.05] shadow-[0_1px_2px_rgba(0,0,0,0.03)] hover:shadow-[0_8px_24px_rgba(0,0,0,0.08)] hover:border-[#0071E3]/30 p-5 transition-all cursor-pointer"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="w-11 h-11 rounded-2xl bg-[#0071E3]/10 text-[#0071E3] flex items-center justify-center shrink-0">
+                      <FolderOpen className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-lg font-bold text-[#1D1D1F] truncate">{p.name}</div>
+                      <div className="text-[13px] text-[#86868B]">
+                        {p.volumeCount} 卷 · 共 {p.totalPages} 页
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setProjectDeleteTarget(p);
+                      }}
+                      className="p-1.5 rounded-lg text-[#86868B] opacity-0 group-hover:opacity-100 hover:bg-[#FF3B30]/10 hover:text-[#FF3B30] transition-all cursor-pointer"
+                      title="删除项目"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5 mt-4 min-h-[22px]">
+                    {p.volumeCount === 0 ? (
+                      <span className="text-xs text-[#86868B]">还没有卷，点进去新建第一卷</span>
+                    ) : (
+                      <>
+                        {p.processing > 0 && (
+                          <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#0071E3]/10 text-[#0071E3]">
+                            处理中 {p.processing}
+                          </span>
+                        )}
+                        {p.reviewing > 0 && (
+                          <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#FF9500]/12 text-[#FF9500]">
+                            待审阅 {p.reviewing}
+                          </span>
+                        )}
+                        {p.completed > 0 && (
+                          <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#34C759]/12 text-[#248A3D]">
+                            已完成 {p.completed}
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </div>
+                  <ArrowRight className="w-4 h-4 text-[#C7C7CC] group-hover:text-[#0071E3] absolute right-5 bottom-5 transition-colors" />
+                </div>
+              ))}
+
               <button
-                onClick={onRefresh}
-                className="h-10 px-4 text-sm font-semibold bg-white border border-black/[0.08] text-[#1D1D1F] rounded-xl hover:bg-[#F5F5F7] cursor-pointer"
+                type="button"
+                onClick={() => {
+                  setNewProjectName('');
+                  setShowProjectModal(true);
+                }}
+                className="min-h-[132px] rounded-[20px] border-2 border-dashed border-black/[0.12] hover:border-[#0071E3] hover:bg-[#0071E3]/[0.03] text-[#6E6E73] hover:text-[#0071E3] flex flex-col items-center justify-center gap-1.5 transition-all cursor-pointer"
               >
-                {loading ? '刷新中…' : '刷新'}
+                <Plus className="w-6 h-6" />
+                <span className="text-sm font-semibold">新建项目</span>
+                <span className="text-xs opacity-80">例如：李氏</span>
               </button>
-            )}
-            <button
-              onClick={openCreateModal}
-              className="flex items-center gap-1.5 h-10 px-5 bg-[#0071E3] hover:bg-[#0077ED] active:scale-[0.98] text-white text-sm font-semibold rounded-xl shadow-[0_2px_8px_rgba(0,113,227,0.25)] transition-all cursor-pointer whitespace-nowrap shrink-0"
-            >
-              <Plus className="w-4 h-4 stroke-[2.5]" />
-              <span>新建任务</span>
-            </button>
-          </div>
-        </div>
+
+              {orphan.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setProjectFilter('none')}
+                  className="text-left bg-[#F5F5F7] rounded-[20px] border border-black/[0.05] hover:border-black/[0.12] p-5 transition-all cursor-pointer"
+                >
+                  <div className="text-base font-semibold text-[#6E6E73]">未归类的卷</div>
+                  <div className="text-[13px] text-[#86868B] mt-1">{orphan.length} 卷 · 项目功能上线前创建的</div>
+                </button>
+              )}
+            </div>
+          );
+        })()}
 
         {/* 筛选栏：状态 / 创建时间（含自定义日期） / 搜索 */}
-        <div className="flex flex-wrap xl:flex-nowrap items-center gap-3 mb-5">
+        <div className={`${projectFilter === 'all' ? 'hidden' : 'flex'} flex-wrap xl:flex-nowrap items-center gap-3 mb-5`}>
           <div className="flex items-center p-1 bg-[#E5E5EA]/75 rounded-xl border border-black/[0.04] shrink-0">
             {STAGE_TABS.map((t) => (
               <button
@@ -696,50 +856,11 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
           </div>
         )}
 
-        {/* 项目筛选：按家族/项目归类，点一个只看该项目下的卷 */}
-        {projects.length > 0 && (
-          <div className="flex items-center gap-1.5 flex-wrap mb-3">
-            <span className="text-[11px] font-medium text-[#86868B] mr-0.5">项目</span>
-            <button
-              type="button"
-              onClick={() => setProjectFilter('all')}
-              className={`px-2.5 py-1 text-xs font-medium rounded-full transition-all cursor-pointer ${
-                projectFilter === 'all' ? 'bg-[#0071E3] text-white shadow-xs' : 'bg-[#F5F5F7] text-[#6E6E73] hover:text-[#1D1D1F]'
-              }`}
-            >
-              全部
-            </button>
-            {projects.map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() => setProjectFilter(p.id)}
-                className={`px-2.5 py-1 text-xs font-medium rounded-full transition-all cursor-pointer ${
-                  projectFilter === p.id ? 'bg-[#0071E3] text-white shadow-xs' : 'bg-[#F5F5F7] text-[#6E6E73] hover:text-[#1D1D1F]'
-                }`}
-                title={`${p.name}：${p.volumeCount} 卷`}
-              >
-                {p.name}
-                <span className="ml-1 tabular-nums opacity-70">{p.volumeCount}</span>
-              </button>
-            ))}
-            <button
-              type="button"
-              onClick={() => setProjectFilter('none')}
-              className={`px-2.5 py-1 text-xs font-medium rounded-full transition-all cursor-pointer ${
-                projectFilter === 'none' ? 'bg-[#0071E3] text-white shadow-xs' : 'bg-[#F5F5F7] text-[#6E6E73] hover:text-[#1D1D1F]'
-              }`}
-            >
-              未归类
-            </button>
-          </div>
-        )}
-
         {/* Task Cards List (NO PATH DISPLAYED, UNIFORM BUTTON WIDTHS) */}
-        <div className="space-y-3">
+        <div className={projectFilter === 'all' ? 'hidden' : 'space-y-3'}>
           {paginatedTasks.length === 0 ? (
             <div className="bg-white rounded-3xl border border-black/[0.06] p-12 text-center shadow-xs">
-              <p className="text-xs text-[#86868B] mb-3">未找到符合条件的任务</p>
+              <p className="text-sm text-[#86868B] mb-3">{tasks.some((t) => (projectFilter === 'none' ? t.projectId == null : Number(t.projectId) === projectFilter)) ? '没有符合筛选条件的卷' : '这个项目里还没有卷，点右上角「新建卷」上传第一卷'}</p>
               <button
                 onClick={() => {
                   setStatusFilter('all');
@@ -800,7 +921,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         <h3 className="text-base font-semibold text-[#1D1D1F] tracking-tight truncate leading-snug">
                           {task.name}
                         </h3>
-                        {task.projectId != null && projects.find((p) => p.id === task.projectId) ? (
+                        {false && task.projectId != null && projects.find((p) => p.id === task.projectId) ? (
                           <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-medium bg-[#AF52DE]/10 text-[#8944AB]">
                             {projects.find((p) => p.id === task.projectId)?.name}
                           </span>
@@ -1011,7 +1132,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
       </div>
 
       {/* Bottom Pagination Bar */}
-      {totalItems > 0 && (
+      {projectFilter !== 'all' && totalItems > 0 && (
         <div className="pt-5 mt-4 border-t border-black/[0.06] flex items-center justify-between text-xs text-[#86868B]">
           <div>
             显示第 <span className="font-semibold text-[#1D1D1F]">{(currentPage - 1) * pageSize + 1}</span> -{' '}
@@ -1067,14 +1188,88 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
         </div>
       )}
 
+      {/* 新建项目 */}
+      {showProjectModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white rounded-3xl border border-black/[0.08] shadow-[0_24px_64px_rgba(0,0,0,0.18)] max-w-[440px] w-full p-6 animate-apple-in">
+            <h3 className="text-base font-bold text-[#1D1D1F]">新建项目</h3>
+            <p className="text-xs text-[#86868B] mt-1 leading-relaxed">
+              项目就是一个家族 / 一部谱书，例如「李氏」。建好后进入项目，再把每一卷（卷1、卷2…）的图片文件夹逐个加进去。
+            </p>
+            <label className="block text-[13px] font-semibold text-[#1D1D1F] mt-4 mb-1.5">
+              项目名称 <span className="text-[#FF3B30]">*</span>
+            </label>
+            <input
+              type="text"
+              autoFocus
+              value={newProjectName}
+              onChange={(e) => setNewProjectName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && !creatingProject && void submitNewProject()}
+              placeholder="例如：李氏"
+              className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
+            />
+            <div className="flex justify-end gap-2 mt-5">
+              <button
+                onClick={() => setShowProjectModal(false)}
+                className="h-10 px-5 text-sm font-semibold bg-[#F5F5F7] hover:bg-[#E5E5EA] text-[#1D1D1F] rounded-xl cursor-pointer"
+              >
+                取消
+              </button>
+              <button
+                disabled={creatingProject}
+                onClick={() => void submitNewProject()}
+                className="h-10 px-5 text-sm font-semibold bg-[#0071E3] hover:bg-[#0077ED] disabled:opacity-60 text-white rounded-xl cursor-pointer"
+              >
+                {creatingProject ? '创建中…' : '创建并进入'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 删除项目确认 */}
+      {projectDeleteTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white rounded-3xl border border-black/[0.08] shadow-[0_24px_64px_rgba(0,0,0,0.18)] max-w-[420px] w-full p-6 animate-apple-in">
+            <h3 className="text-base font-bold text-[#1D1D1F]">删除项目「{projectDeleteTarget.name}」？</h3>
+            <p className="text-xs text-[#86868B] mt-2 leading-relaxed">
+              {projectDeleteTarget.volumeCount > 0
+                ? `会同时删除项目下的 ${projectDeleteTarget.volumeCount} 卷及其处理结果，无法恢复。`
+                : '这个项目下还没有卷。'}
+            </p>
+            <div className="flex justify-end gap-2 mt-5">
+              <button
+                onClick={() => setProjectDeleteTarget(null)}
+                className="h-10 px-5 text-sm font-semibold bg-[#F5F5F7] hover:bg-[#E5E5EA] text-[#1D1D1F] rounded-xl cursor-pointer"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => void confirmDeleteProject()}
+                className="h-10 px-5 text-sm font-semibold bg-[#FF3B30] hover:bg-[#E0352B] text-white rounded-xl cursor-pointer"
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Create Task Modal — 宽版两栏：左「谱书信息」，右「处理方式」，底部常驻费用预估 */}
       {showCreateModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm animate-fade-in">
           <div className="bg-white rounded-3xl border border-black/[0.08] shadow-[0_24px_64px_rgba(0,0,0,0.18)] max-w-[1080px] w-full max-h-[calc(100vh-32px)] flex flex-col animate-apple-in">
             <div className="flex items-start justify-between px-6 pt-5 pb-4 border-b border-black/[0.06] shrink-0">
               <div>
-                <h3 className="text-base font-bold text-[#1D1D1F]">新建族谱图片处理任务</h3>
-                <p className="text-xs text-[#86868B] mt-0.5">一本谱书建一个任务：把旧谱复印页处理成白底黑字，供后续 OCR 识别与数据化</p>
+                <h3 className="text-base font-bold text-[#1D1D1F]">
+                  新建卷
+                  {typeof projectFilter === 'number' && projects.find((p) => p.id === projectFilter) ? (
+                    <span className="ml-2 px-2 py-0.5 rounded-full text-[12px] font-semibold bg-[#0071E3]/10 text-[#0071E3]">
+                      {projects.find((p) => p.id === projectFilter)?.name}
+                    </span>
+                  ) : null}
+                </h3>
+                <p className="text-xs text-[#86868B] mt-0.5">一卷对应一个图片文件夹：选好文件夹后创建，系统会自动在后台开始处理</p>
               </div>
               <button
                 onClick={() => setShowCreateModal(false)}
@@ -1096,13 +1291,13 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                   <div className="grid grid-cols-[1fr_140px] gap-3">
                     <div>
                       <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">
-                        族谱名称 <span className="text-[#FF3B30]">*</span>
+                        卷名称 <span className="text-[#FF3B30]">*</span>
                       </label>
                       <input
                         type="text"
                         value={taskName}
                         onChange={(e) => setTaskName(e.target.value)}
-                        placeholder="例如：《××族谱》卷×"
+                        placeholder="例如：卷1"
                         autoFocus
                         className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
                       />
@@ -1119,24 +1314,6 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
                       />
                     </div>
-                  </div>
-                  <div>
-                    <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">
-                      项目 / 家族 <span className="text-[11px] font-normal text-[#86868B]">（选填，用于归类，如 李氏；填已有项目名归入，填新名自动新建）</span>
-                    </label>
-                    <input
-                      type="text"
-                      list="zupu-project-list"
-                      value={projectInput}
-                      onChange={(e) => setProjectInput(e.target.value)}
-                      placeholder="例如：李氏（该项目下可放 卷1、卷2…）"
-                      className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
-                    />
-                    <datalist id="zupu-project-list">
-                      {projects.map((p) => (
-                        <option key={p.id} value={p.name} />
-                      ))}
-                    </datalist>
                   </div>
                   <div>
                     <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">
