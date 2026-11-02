@@ -1371,17 +1371,19 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                     : 'text-[#6E6E73] hover:text-[#1D1D1F]'
                 }`}
               >
-                仅净图
+                {confirmedCrop ? '仅裁切后' : '仅净图'}
               </button>
               <button
                 onClick={() => setCompareMode('original-only')}
-                className={`px-2.5 py-1 text-xs font-medium rounded-full transition-all cursor-pointer ${
+                className={`px-2.5 py-1 text-xs font-medium rounded-full transition-all cursor-pointer flex items-center gap-1 ${
                   compareMode === 'original-only'
                     ? 'bg-white text-[#1D1D1F] shadow-xs font-semibold'
                     : 'text-[#6E6E73] hover:text-[#1D1D1F]'
                 }`}
+                title="查看完整原图（裁剪不会删除原图，随时可切回）"
               >
-                仅原图
+                <ImageIcon className="w-3 h-3 text-[#0071E3]" />
+                原图
               </button>
             </div>
 
@@ -1462,6 +1464,19 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
               </div>
             )}
 
+            {/* 裁剪后提示：原图并未删除，随时可切回查看 */}
+            {confirmedCrop && !cropSelecting && compareMode !== 'original-only' && (
+              <button
+                type="button"
+                onClick={() => setCompareMode('original-only')}
+                className="absolute bottom-4 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1.5 px-3 py-1.5 apple-glass-heavy border border-black/[0.08] rounded-full text-[11px] text-[#1D1D1F] shadow-sm cursor-pointer hover:bg-white"
+                title="裁剪只处理所选区域，原图始终保留"
+              >
+                <ImageIcon className="w-3.5 h-3.5 text-[#0071E3]" />
+                <span>已按裁剪区域处理 · 原图仍保留，点此看完整原图</span>
+              </button>
+            )}
+
             {/* Split Comparison Mode */}
             {compareMode === 'split' && (
               <div
@@ -1504,10 +1519,10 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                 </div>
 
                 <div className="absolute bottom-3 left-3 px-2 py-0.5 rounded-full apple-glass-heavy border border-black/[0.06] text-[10px] font-mono text-[#86868B] shadow-2xs pointer-events-none z-10">
-                  原图 (污渍/褶皱)
+                  原图{confirmedCrop ? '（完整）' : ' (污渍/褶皱)'}
                 </div>
                 <div className="absolute bottom-3 right-3 px-2 py-0.5 rounded-full apple-glass-heavy border border-black/[0.06] text-[10px] font-mono text-[#0071E3] font-semibold shadow-2xs pointer-events-none z-10">
-                  还原净图 (白底黑字)
+                  {confirmedCrop ? '裁切后净图' : '还原净图 (白底黑字)'}
                 </div>
 
               </div>
@@ -1525,8 +1540,8 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                     alt=""
                     className="max-h-[78vh] w-auto object-contain"
                   />
-                  <div className="absolute bottom-2 left-2 px-2 py-0.5 rounded-full apple-glass text-[10px] font-mono text-[#86868B] border border-black/[0.06]">
-                    原始印刷扫描页
+                  <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-[#1D1D1F]/75 text-[10px] font-semibold text-white shadow-2xs">
+                    原图{confirmedCrop ? '（完整，未裁剪）' : ''}
                   </div>
                 </div>
 
@@ -1537,8 +1552,8 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                     alt=""
                     className="max-h-[78vh] w-auto object-contain"
                   />
-                  <div className="absolute bottom-2 left-2 px-2 py-0.5 rounded-full apple-glass text-[10px] font-mono text-[#0071E3] font-semibold border border-black/[0.06]">
-                    还原白底黑字净图
+                  <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-[#0071E3] text-[10px] font-semibold text-white shadow-2xs">
+                    {confirmedCrop ? '裁切后净图' : '还原净图'}
                   </div>
                 </div>
               </div>
@@ -1575,6 +1590,11 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                     className="max-h-[78vh] w-auto object-contain block select-none pointer-events-none"
                     draggable={false}
                   />
+                  {!cropSelecting && (
+                    <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-[#1D1D1F]/75 text-[10px] font-semibold text-white shadow-2xs z-10 pointer-events-none">
+                      {confirmedCrop ? '完整原图（未裁剪）' : '原图'}
+                    </div>
+                  )}
                   {cropSelecting && (
                     <div
                       ref={cropLayerRef}
