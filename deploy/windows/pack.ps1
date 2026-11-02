@@ -1,4 +1,4 @@
-# 打更新包：排除依赖、编译产物、数据与本地配置；带上 server/.env.production
+﻿# 打更新包：排除依赖、编译产物、数据与本地配置；带上 server/.env.production
 $ErrorActionPreference = 'Stop'
 $root = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 $name = "zupu-update-$(Get-Date -Format 'yyyyMMdd-HHmm')"

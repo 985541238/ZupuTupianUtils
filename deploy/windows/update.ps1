@@ -1,14 +1,15 @@
-# 一键更新部署：备份旧编译产物 → 停服务 → 安装依赖 → 编译前后端 → 启服务 → 检查端口
+# One-click update: backup -> stop service -> npm install -> build -> start service -> check port
+# NOTE: keep this file ASCII-only (Windows PowerShell 5 reads BOM-less files as ANSI/GBK).
 $ErrorActionPreference = 'Stop'
 $root = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 $task = 'ZupuWorkbench'
 $port = 8090
 Set-Location $root
 
-function Step($m) { Write-Host "`n==> $m" -ForegroundColor Cyan }
+function Step($m) { Write-Host ""; Write-Host "==> $m" -ForegroundColor Cyan }
 
 try {
-  Step '备份当前编译产物（保留最近一份到 backup\）'
+  Step 'Backup current build output to backup\ (latest copy only)'
   $bk = Join-Path $root 'backup'
   New-Item -ItemType Directory $bk -Force | Out-Null
   foreach ($d in @('server\dist', 'admin-web\dist')) {
@@ -20,37 +21,38 @@ try {
     }
   }
 
-  Step "停止计划任务 $task"
+  Step "Stop scheduled task $task"
   Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
   Start-Sleep -Seconds 2
-  # 兜底：结束仍占用端口的旧进程
+  # Fallback: kill any old process still holding the port
   Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
     ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
 
-  Step '安装服务端依赖'
+  Step 'npm install (server)'
   npm --prefix server install --no-audit --no-fund
-  if ($LASTEXITCODE -ne 0) { throw 'server npm install 失败' }
+  if ($LASTEXITCODE -ne 0) { throw 'server npm install failed' }
 
-  Step '安装前端依赖'
+  Step 'npm install (admin-web)'
   npm --prefix admin-web install --no-audit --no-fund
-  if ($LASTEXITCODE -ne 0) { throw 'admin-web npm install 失败' }
+  if ($LASTEXITCODE -ne 0) { throw 'admin-web npm install failed' }
 
-  Step '编译前后端'
+  Step 'Build server + admin-web'
   npm run build:prod
-  if ($LASTEXITCODE -ne 0) { throw '编译失败' }
+  if ($LASTEXITCODE -ne 0) { throw 'build failed' }
 
-  Step "启动计划任务 $task"
+  Step "Start scheduled task $task"
   Start-ScheduledTask -TaskName $task
   Start-Sleep -Seconds 6
 
-  Step "检查端口 $port"
+  Step "Check port $port"
   $ok = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
   if ($ok) {
-    Write-Host "更新完成，服务已在端口 $port 运行。请在浏览器按 Ctrl+F5 刷新。" -ForegroundColor Green
+    Write-Host "UPDATE DONE. Service is listening on port $port. Press Ctrl+F5 in the browser." -ForegroundColor Green
   } else {
-    Write-Host "服务未监听端口 $port，请查看 logs\server.log 末尾的报错。" -ForegroundColor Red
+    Write-Host "Service is NOT listening on port $port. Check the tail of logs\server.log." -ForegroundColor Red
   }
 } catch {
-  Write-Host "`n更新失败：$($_.Exception.Message)" -ForegroundColor Red
-  Write-Host "旧版本备份在 backup\ 目录（server-dist、admin-web-dist），可还原后再启动计划任务。" -ForegroundColor Yellow
+  Write-Host ""
+  Write-Host ("UPDATE FAILED: " + $_.Exception.Message) -ForegroundColor Red
+  Write-Host "Previous build is in backup\ (server-dist, admin-web-dist). Restore it and start the task again if needed." -ForegroundColor Yellow
 }
