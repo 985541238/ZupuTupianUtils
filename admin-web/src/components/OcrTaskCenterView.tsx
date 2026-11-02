@@ -737,51 +737,38 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                     </div>
                   ) : (
                     <div className="space-y-2">
-                      {sources.map((s) => {
-                        const disabled = !!s.ocrTaskId;
-                        const active = sourceId === s.id;
-                        return (
-                          <button
-                            key={s.id}
-                            type="button"
-                            disabled={disabled}
-                            onClick={() => setSourceId(s.id)}
-                            className={`w-full text-left rounded-2xl border-2 p-3.5 transition-colors ${
-                              active
-                                ? 'border-[#0071E3] bg-[#0071E3]/[0.04]'
-                                : disabled
-                                  ? 'border-transparent bg-[#F5F5F7] opacity-70 cursor-not-allowed'
-                                  : 'border-transparent bg-[#F5F5F7] hover:bg-[#EEEEF2] cursor-pointer'
-                            }`}
-                          >
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-sm font-bold text-[#1D1D1F] truncate">{s.name}</span>
-                              <span className="text-xs text-[#6E6E73] tabular-nums shrink-0">
-                                {s.volumeCount} 卷 · 可识别 <b className="text-[#1D1D1F]">{s.usableCount}</b> 页
+                      <select
+                        value={sourceId}
+                        onChange={(e) => setSourceId(e.target.value)}
+                        className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium cursor-pointer"
+                      >
+                        <option value="">请选择图片处理的项目…</option>
+                        {sources.map((s) => (
+                          <option key={s.id} value={s.id} disabled={!!s.ocrTaskId}>
+                            {s.name}（{s.volumeCount} 卷{s.ocrTaskId ? ' · 已建过 OCR 项目' : ` · 可识别 ${s.usableCount} 页`}）
+                          </option>
+                        ))}
+                      </select>
+                      {selectedSource ? (
+                        <div className="rounded-xl bg-[#F5F5F7] px-3.5 py-3">
+                          {selectedSource.usableCount === 0 ? (
+                            <p className="text-xs text-[#86868B]">暂时没有「已完成」的卷，也可以先新建；卷在图片处理里完成后会自动列出，再点「开始 OCR」。</p>
+                          ) : null}
+                          <div className="flex flex-wrap gap-1.5 mt-1">
+                            {selectedSource.volumes.map((v) => (
+                              <span
+                                key={v.id}
+                                className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${
+                                  v.completed ? 'bg-[#34C759]/12 text-[#248A3D]' : 'bg-white text-[#86868B] border border-black/[0.06]'
+                                }`}
+                              >
+                                {v.completed ? `✓ ${v.name} · ${v.usable} 页` : `${v.name} · 未完成`}
                               </span>
-                            </div>
-                            {s.ocrTaskId ? (
-                              <p className="text-xs text-[#C93400] mt-1.5">已建过 OCR 项目「{s.ocrTaskName}」，后面完成的卷会自动并入，不用重复建</p>
-                            ) : s.usableCount === 0 ? (
-                              <p className="text-xs text-[#86868B] mt-1.5">暂时没有「已完成」的卷，也可以先新建；卷在图片处理里完成后会自动列出，再点「开始 OCR」</p>
-                            ) : (
-                              <div className="flex flex-wrap gap-1.5 mt-2">
-                                {s.volumes.map((v) => (
-                                  <span
-                                    key={v.id}
-                                    className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${
-                                      v.completed ? 'bg-[#34C759]/12 text-[#248A3D]' : 'bg-white text-[#86868B] border border-black/[0.06]'
-                                    }`}
-                                  >
-                                    {v.completed ? `✓ ${v.name} · ${v.usable} 页` : `${v.name} · 未完成`}
-                                  </span>
-                                ))}
-                              </div>
-                            )}
-                          </button>
-                        );
-                      })}
-                      <p className="text-[11px] text-[#86868B] px-1 leading-relaxed">可以先新建；只识别「已完成」的卷里通过的页，还没完成的卷完成后会自动并入这个项目，到时在项目里点各卷的「开始 OCR」。</p>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                      <p className="text-[11px] text-[#86868B] px-1 leading-relaxed">每个项目只能建一个 OCR 项目；已建过的在下拉里置灰。只识别「已完成」的卷，其余卷完成后自动并入。</p>
                     </div>
                   )}
                 </div>
