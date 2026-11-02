@@ -263,14 +263,14 @@ export class OcrService implements OnModuleInit {
     const proj = await this.projects.findOne({ where: { id: pid, userId } });
     if (!proj) throw new BadRequestException('所选项目不存在');
     const dup = await this.tasks.findOne({ where: { userId, projectId: pid } });
-    if (dup) throw new BadRequestException(`「${proj.name}」已经有 OCR 任务了，新通过的页面请在任务里点「同步新页面」`);
+    if (dup) throw new BadRequestException(`「${proj.name}」已经有 OCR 项目了，后面完成的卷会自动并入`);
     const { items, vols } = await this.projectUsable(userId, pid);
-    if (!vols.length) throw new BadRequestException('这个项目里还没有卷，请先在图片处理里新建卷');
-    if (!items.length) throw new BadRequestException('这个项目里还没有「通过」的页面，请先在图片处理里把卷审阅完成');
+    // 允许先建：此时还没有已完成的卷也行，之后有卷完成会自动并入
+    void vols;
 
     const model = await this.settings.baiduOcrEngine();
     const name = String(body.name || '').trim() || `${proj.name} · OCR`;
-    const est = this.settings.estimateCost(model, items.length);
+    const est = items.length ? this.settings.estimateCost(model, items.length) : null;
     const now = new Date();
     const task = await this.tasks.save(
       this.tasks.create({
@@ -291,7 +291,7 @@ export class OcrService implements OnModuleInit {
         updatedAt: now,
       }),
     );
-    await this.pages.save(await this.buildPageRows(Number(task.id), items, 0));
+    if (items.length) await this.pages.save(await this.buildPageRows(Number(task.id), items, 0));
     return this.getView(userId, Number(task.id));
   }
 

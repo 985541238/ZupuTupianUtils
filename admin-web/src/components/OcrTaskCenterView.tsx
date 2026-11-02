@@ -581,7 +581,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                     </div>
 
                     <div className="flex items-center justify-end gap-2 shrink-0 md:pl-2">
-                      {(task.status === 'pending' || task.status === 'failed') && (
+                      {(task.status === 'pending' || task.status === 'failed') && task.totalCount > 0 && (
                         <button
                           onClick={() => (task.status === 'failed' || task.doneCount > 0 || task.modelUsable === false ? setRetryTask(task) : onStart(task.id))}
                           className="h-10 px-5 text-sm font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
@@ -738,7 +738,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                   ) : (
                     <div className="space-y-2">
                       {sources.map((s) => {
-                        const disabled = !!s.ocrTaskId || s.usableCount === 0;
+                        const disabled = !!s.ocrTaskId;
                         const active = sourceId === s.id;
                         return (
                           <button
@@ -763,7 +763,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                             {s.ocrTaskId ? (
                               <p className="text-xs text-[#C93400] mt-1.5">已建过 OCR 项目「{s.ocrTaskName}」，后面完成的卷会自动并入，不用重复建</p>
                             ) : s.usableCount === 0 ? (
-                              <p className="text-xs text-[#86868B] mt-1.5">还没有「已完成」的卷，先去图片处理把卷审阅完</p>
+                              <p className="text-xs text-[#86868B] mt-1.5">暂时没有「已完成」的卷，也可以先新建；卷在图片处理里完成后会自动列出，再点「开始 OCR」</p>
                             ) : (
                               <div className="flex flex-wrap gap-1.5 mt-2">
                                 {s.volumes.map((v) => (
@@ -781,7 +781,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                           </button>
                         );
                       })}
-                      <p className="text-[11px] text-[#86868B] px-1 leading-relaxed">只识别「已完成」的卷里通过的页；还没完成的卷，完成后会自动并入这个项目。</p>
+                      <p className="text-[11px] text-[#86868B] px-1 leading-relaxed">可以先新建；只识别「已完成」的卷里通过的页，还没完成的卷完成后会自动并入这个项目，到时在项目里点各卷的「开始 OCR」。</p>
                     </div>
                   )}
                 </div>
@@ -837,7 +837,13 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                 <div className="mr-auto text-[13px] text-[#6E6E73]">
                   {selectedSource ? (
                     <>
-                      将识别 <b className="text-[#1D1D1F] tabular-nums">{selectedSource.usableCount}</b> 页
+                      {selectedSource.usableCount > 0 ? (
+                        <>
+                          现有 <b className="text-[#1D1D1F] tabular-nums">{selectedSource.usableCount}</b> 页可识别
+                        </>
+                      ) : (
+                        '暂无已完成的卷，先创建，之后自动并入'
+                      )}
                     </>
                   ) : (
                     '先选择一个项目'
@@ -856,7 +862,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                 </button>
                 <button
                   type="button"
-                  disabled={creating || !sourceId || false}
+                  disabled={creating || !sourceId || !(selectedSource && selectedSource.usableCount > 0)}
                   onClick={() => void submit(true)}
                   className="h-10 px-5 text-sm font-semibold bg-[#0071E3] hover:bg-[#0077ED] text-white rounded-xl shadow-[0_2px_8px_rgba(0,113,227,0.25)] cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
                 >
