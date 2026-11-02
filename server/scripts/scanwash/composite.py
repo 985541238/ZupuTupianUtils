@@ -24,17 +24,18 @@ def composite(gray: np.ndarray, mask: np.ndarray, cut: float, sharpen: float) ->
     outside = crisp[~mask]
     black = float(np.percentile(inside, 30))
     paper = float(np.percentile(outside, 40)) if outside.size else black + 80.0
-    white = black + max(paper - black, 24.0) * 0.58
+    white = black + max(paper - black, 24.0) * 0.72
     tone = np.clip((crisp - black) / (white - black), 0.0, 1.0)
     ink = 255.0 * tone
 
     # 细笔的灰边贴着墨心，这段过渡要留下来，轮廓才不会收成一个像素。
     # 远离墨心的浅灰才是透字。
-    core = crisp <= (black + 8.0)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    core = crisp <= (black + 24.0)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
     near = cv2.dilate(core.astype(np.uint8), kernel).astype(bool)
     out = ink.copy()
-    out[(~near) & (out < 252)] = 255.0
+    # 只把远离墨心、且确实接近纸色(偏亮)的浅灰当透字刷白；中等灰度是真笔画，保留
+    out[(~near) & (out > 205)] = 255.0
     alpha = 1.0 - out / 255.0
     return out.astype(np.float32), alpha
 
@@ -50,11 +51,11 @@ def _smooth_edges(image: np.ndarray) -> np.ndarray:
 
 
 def _fill_stroke_holes(image: np.ndarray) -> np.ndarray:
+    # 只用小闭运算接上笔画内的细裂缝；不做连通域填腔（会把口/日/国等字内腔误填成黑块）
     ink = cv2.bitwise_not(np.clip(image, 0, 255).astype(np.uint8))
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     filled = cv2.morphologyEx(ink, cv2.MORPH_CLOSE, kernel)
     return cv2.bitwise_not(filled)
-
 
 def refine_thin_strokes(image: np.ndarray) -> np.ndarray:
     """细字放大两倍后，用距离场把边缘收成平滑曲线。
