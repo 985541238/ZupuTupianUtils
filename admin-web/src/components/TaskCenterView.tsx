@@ -107,6 +107,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   const [projectFilter, setProjectFilter] = useState<'all' | 'none' | number>('all');
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
+  const [newProjectSurname, setNewProjectSurname] = useState('');
   const [creatingProject, setCreatingProject] = useState(false);
   const [projectDeleteTarget, setProjectDeleteTarget] = useState<ProjectRow | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Task | null>(null);
@@ -321,14 +322,19 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     void loadCleanModels();
     setTaskDescription('旧族谱复印页图片处理（去污去褶皱、白底黑字），供后续 OCR 识别与数据化');
     const cur = typeof projectFilter === 'number' ? projects.find((p) => p.id === projectFilter) : null;
-    setGenealogyNote(cur ? cur.surname || cur.name.replace(/氏$/, '') : '');
+    setGenealogyNote(cur ? cur.surname || '' : '');
     setFolderPath('');
   };
 
   const submitNewProject = async () => {
     const name = newProjectName.trim();
+    const surname = newProjectSurname.trim();
     if (!name) {
-      alert('请填写项目名称，例如：李氏');
+      alert('请填写项目名称，例如：王氏族谱');
+      return;
+    }
+    if (!surname) {
+      alert('请填写姓氏，例如：王');
       return;
     }
     if (projects.some((p) => p.name === name)) {
@@ -337,10 +343,11 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     }
     setCreatingProject(true);
     try {
-      const np = await api.createProject({ name, surname: name.replace(/氏$/, '') });
+      const np = await api.createProject({ name, surname });
       await loadProjects();
       setShowProjectModal(false);
       setNewProjectName('');
+      setNewProjectSurname('');
       setProjectFilter(np.id);
     } catch (e: any) {
       alert(e?.message || '创建项目失败');
@@ -511,7 +518,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     try {
       const projectId: number | null = typeof projectFilter === 'number' ? projectFilter : null;
       const proj = projectId != null ? projects.find((p) => p.id === projectId) : null;
-      const surnameFinal = proj ? proj.surname || proj.name.replace(/氏$/, '') : genealogyNote.trim();
+      const surnameFinal = proj ? proj.surname || genealogyNote.trim() : genealogyNote.trim();
       const created = await onCreateTask(
         {
           name: taskName.trim(),
@@ -620,6 +627,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                   <button
                     onClick={() => {
                       setNewProjectName('');
+                      setNewProjectSurname('');
                       setShowProjectModal(true);
                     }}
                     className="flex items-center gap-1.5 h-10 px-5 bg-[#0071E3] hover:bg-[#0077ED] active:scale-[0.98] text-white text-sm font-semibold rounded-xl shadow-[0_2px_8px_rgba(0,113,227,0.25)] transition-all cursor-pointer whitespace-nowrap shrink-0"
@@ -646,6 +654,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
           const orphan = tasks.filter((t) => t.projectId == null);
           const newProject = () => {
             setNewProjectName('');
+            setNewProjectSurname('');
             setShowProjectModal(true);
           };
           return (
@@ -1229,18 +1238,35 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
             <p className="text-xs text-[#86868B] mt-1 leading-relaxed">
               项目就是一个家族 / 一部谱书，例如「李氏」。建好后进入项目，再把每一卷（卷1、卷2…）的图片文件夹逐个加进去。
             </p>
-            <label className="block text-[13px] font-semibold text-[#1D1D1F] mt-4 mb-1.5">
-              项目名称 <span className="text-[#FF3B30]">*</span>
-            </label>
-            <input
-              type="text"
-              autoFocus
-              value={newProjectName}
-              onChange={(e) => setNewProjectName(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && !creatingProject && void submitNewProject()}
-              placeholder="例如：李氏"
-              className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
-            />
+            <div className="grid grid-cols-[1fr_120px] gap-3 mt-4">
+              <div>
+                <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">
+                  项目名 <span className="text-[#FF3B30]">*</span>
+                </label>
+                <input
+                  type="text"
+                  autoFocus
+                  value={newProjectName}
+                  onChange={(e) => setNewProjectName(e.target.value)}
+                  placeholder="例如：王氏族谱"
+                  className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
+                />
+              </div>
+              <div>
+                <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">
+                  姓氏 <span className="text-[#FF3B30]">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={newProjectSurname}
+                  onChange={(e) => setNewProjectSurname(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && !creatingProject && void submitNewProject()}
+                  placeholder="例如：王"
+                  className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
+                />
+              </div>
+            </div>
+            <p className="text-[11px] text-[#86868B] mt-2">项目名和姓氏建好后，项目里新建的每一卷都会直接带入，卷里不能再改。</p>
             <div className="flex justify-end gap-2 mt-5">
               <button
                 onClick={() => setShowProjectModal(false)}
@@ -1321,38 +1347,58 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                     <span className="w-5 h-5 rounded-full bg-[#0071E3] text-white text-[10px] font-bold flex items-center justify-center">1</span>
                     <span className="text-sm font-semibold text-[#1D1D1F]">谱书信息</span>
                   </div>
-                  <div className="grid grid-cols-[1fr_140px] gap-3">
-                    <div>
-                      <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">
-                        卷名称 <span className="text-[#FF3B30]">*</span>
-                      </label>
-                      <input
-                        type="text"
-                        value={taskName}
-                        onChange={(e) => setTaskName(e.target.value)}
-                        placeholder="例如：卷1"
-                        autoFocus
-                        className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">
-                        姓氏 {typeof projectFilter === 'number' ? <span className="text-[11px] font-normal text-[#86868B]">（随项目）</span> : <span className="text-[#FF3B30]">*</span>}
-                      </label>
-                      <input
-                        type="text"
-                        value={genealogyNote}
-                        onChange={(e) => setGenealogyNote(e.target.value)}
-                        readOnly={typeof projectFilter === 'number'}
-                        placeholder="例如：吴"
-                        title={typeof projectFilter === 'number' ? '姓氏由所属项目决定，不能修改' : undefined}
-                        className={`w-full px-3.5 py-2.5 text-[13px] border border-black/[0.06] rounded-xl font-medium ${
-                          typeof projectFilter === 'number'
-                            ? 'bg-[#EDEDF0] text-[#6E6E73] cursor-not-allowed focus:outline-none'
-                            : 'bg-[#F5F5F7] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3]'
-                        }`}
-                      />
-                    </div>
+                  {(() => {
+                    const curP = typeof projectFilter === 'number' ? projects.find((p) => p.id === projectFilter) : null;
+                    const ro = 'w-full px-3.5 py-2.5 text-[13px] bg-[#EDEDF0] text-[#6E6E73] border border-black/[0.06] rounded-xl font-medium cursor-not-allowed focus:outline-none';
+                    return curP ? (
+                      <div className="grid grid-cols-[1fr_120px] gap-3">
+                        <div>
+                          <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">
+                            项目名 <span className="text-[11px] font-normal text-[#86868B]">（不可修改）</span>
+                          </label>
+                          <input type="text" value={curP.name} readOnly className={ro} />
+                        </div>
+                        <div>
+                          <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">
+                            姓氏 {curP.surname ? <span className="text-[11px] font-normal text-[#86868B]">（不可改）</span> : <span className="text-[#FF3B30]">*</span>}
+                          </label>
+                          <input
+                            type="text"
+                            value={genealogyNote}
+                            readOnly={!!curP.surname}
+                            onChange={(e) => setGenealogyNote(e.target.value)}
+                            placeholder="例如：王"
+                            className={curP.surname ? ro : 'w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl font-medium focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3]'}
+                          />
+                        </div>
+                      </div>
+                    ) : (
+                      <div>
+                        <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">
+                          姓氏 <span className="text-[#FF3B30]">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          value={genealogyNote}
+                          onChange={(e) => setGenealogyNote(e.target.value)}
+                          placeholder="例如：吴"
+                          className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
+                        />
+                      </div>
+                    );
+                  })()}
+                  <div>
+                    <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">
+                      卷名称 <span className="text-[#FF3B30]">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={taskName}
+                      onChange={(e) => setTaskName(e.target.value)}
+                      placeholder="例如：卷1"
+                      autoFocus
+                      className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
+                    />
                   </div>
                   <div>
                     <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">
