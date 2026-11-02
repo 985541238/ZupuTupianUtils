@@ -39,6 +39,41 @@ export class TasksService implements OnModuleInit {
   /** Tasks cancelled via delete while runProcess is mid-loop */
   private readonly cancelled = new Set<number>();
 
+  /** 全局处理队列：多卷按序排队，一次只跑 VOLUME_CONCURRENCY 卷，避免同时处理拖垮机器（低占用） */
+  private readonly volQueue: number[] = [];
+  private readonly volQueued = new Set<number>();
+  private volActive = 0;
+  private readonly maxVolActive = Math.max(1, Number(process.env.VOLUME_CONCURRENCY) || 1);
+
+  /** 把一卷排进全局队列（已在跑或已排队则忽略），并尝试启动 */
+  private enqueueVolume(taskId: number) {
+    const id = Number(taskId);
+    if (this.running.has(id) || this.volQueued.has(id)) return;
+    this.volQueued.add(id);
+    this.volQueue.push(id);
+    this.pumpVolumes();
+  }
+
+  /** 队列泵：在并发上限内取出排队的卷依次处理 */
+  private pumpVolumes() {
+    while (this.volActive < this.maxVolActive && this.volQueue.length) {
+      const id = this.volQueue.shift()!;
+      this.volQueued.delete(id);
+      if (this.cancelled.has(id)) continue;
+      this.volActive++;
+      this.running.add(id);
+      setImmediate(() =>
+        this.runProcess(id)
+          .catch((e) => this.logger.error(`runProcess ${id}: ${e}`))
+          .finally(() => {
+            this.running.delete(id);
+            this.volActive = Math.max(0, this.volActive - 1);
+            this.pumpVolumes();
+          }),
+      );
+    }
+  }
+
   constructor(
     @InjectRepository(Task) private readonly tasks: Repository<Task>,
     @InjectRepository(TaskImage) private readonly images: Repository<TaskImage>,
@@ -72,14 +107,8 @@ export class TasksService implements OnModuleInit {
         })
         .where('task_id = :tid AND status = :st', { tid: task.id, st: 'processing' })
         .execute();
-      const id = Number(task.id);
-      if (this.running.has(id)) continue;
-      this.running.add(id);
-      setImmediate(() =>
-        this.runProcess(id)
-          .catch((e) => this.logger.error(`resume task ${id}: ${e}`))
-          .finally(() => this.running.delete(id)),
-      );
+      // 走全局队列恢复，避免重启时所有中断任务一拥而上
+      this.enqueueVolume(Number(task.id));
     }
   }
 
@@ -231,6 +260,16 @@ export class TasksService implements OnModuleInit {
       );
     }
     await this.images.save(rows);
+
+    // 本地算法卷（不花钱）上传完直接进后台处理队列，用户可继续上传别的卷；
+    // 选了付费大模型的卷不自动跑，仍需手动点「开始处理」确认（避免意外扣费）。
+    if (!cleanModelId) {
+      saved.status = 'processing';
+      saved.updatedAt = new Date();
+      await this.tasks.save(saved);
+      this.enqueueVolume(Number(saved.id));
+    }
+
     return this.get(userId, Number(saved.id));
   }
 
@@ -268,7 +307,7 @@ export class TasksService implements OnModuleInit {
     const task = await this.get(userId, taskId);
     const id = Number(task.id);
 
-    if (this.running.has(id)) {
+    if (this.running.has(id) || this.volQueued.has(id)) {
       return { message: '正在处理中', task };
     }
 
@@ -307,13 +346,10 @@ export class TasksService implements OnModuleInit {
     task.updatedAt = new Date();
     await this.tasks.save(task);
 
-    this.running.add(id);
-    setImmediate(() =>
-      this.runProcess(id)
-        .catch((e) => this.logger.error(`runProcess ${id}: ${e}`))
-        .finally(() => this.running.delete(id)),
-    );
-    return { message: '已开始处理', task };
+    // 进全局队列：空闲就立即开始，有别的卷在跑就排队等候
+    this.enqueueVolume(id);
+    const waiting = this.volActive >= this.maxVolActive;
+    return { message: waiting ? '已加入处理队列' : '已开始处理', task };
   }
 
   private async runProcess(taskId: number) {
