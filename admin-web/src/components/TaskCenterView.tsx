@@ -510,13 +510,15 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     setCreating(true);
     try {
       const projectId: number | null = typeof projectFilter === 'number' ? projectFilter : null;
+      const proj = projectId != null ? projects.find((p) => p.id === projectId) : null;
+      const surnameFinal = proj ? proj.surname || proj.name.replace(/氏$/, '') : genealogyNote.trim();
       const created = await onCreateTask(
         {
           name: taskName.trim(),
           folderPath: folderPath.trim(),
           description: taskDescription.trim() || '旧族谱复印页图片处理（去污去褶皱、白底黑字），供后续 OCR 识别与数据化',
-          genealogyNote: genealogyNote.trim(),
-          surname: genealogyNote.trim(),
+          genealogyNote: surnameFinal,
+          surname: surnameFinal,
           projectId,
           useAi: useAiRecognition,
           ocrModelId: useAiRecognition ? selectedModelId : null,
@@ -1345,14 +1347,20 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                     </div>
                     <div>
                       <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">
-                        姓氏 <span className="text-[#FF3B30]">*</span>
+                        姓氏 {typeof projectFilter === 'number' ? <span className="text-[11px] font-normal text-[#86868B]">（随项目）</span> : <span className="text-[#FF3B30]">*</span>}
                       </label>
                       <input
                         type="text"
                         value={genealogyNote}
                         onChange={(e) => setGenealogyNote(e.target.value)}
+                        readOnly={typeof projectFilter === 'number'}
                         placeholder="例如：吴"
-                        className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
+                        title={typeof projectFilter === 'number' ? '姓氏由所属项目决定，不能修改' : undefined}
+                        className={`w-full px-3.5 py-2.5 text-[13px] border border-black/[0.06] rounded-xl font-medium ${
+                          typeof projectFilter === 'number'
+                            ? 'bg-[#EDEDF0] text-[#6E6E73] cursor-not-allowed focus:outline-none'
+                            : 'bg-[#F5F5F7] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3]'
+                        }`}
                       />
                     </div>
                   </div>
