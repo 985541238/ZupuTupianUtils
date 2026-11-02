@@ -577,15 +577,6 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                     </div>
 
                     <div className="flex items-center justify-end gap-2 shrink-0 md:pl-2">
-                      {(task.status === 'pending' || task.status === 'failed') && task.totalCount > 0 && (
-                        <button
-                          onClick={() => (task.status === 'failed' || task.doneCount > 0 || task.modelUsable === false ? setRetryTask(task) : onStart(task.id))}
-                          className="h-10 px-5 text-sm font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
-                        >
-                          <Play className="w-3 h-3 fill-current" />
-                          <span>{task.status === 'failed' && task.doneCount ? '继续识别' : '开始识别'}</span>
-                        </button>
-                      )}
                       {isProcessing && task.doneCount > 0 && (
                         <button
                           onClick={() => onOpenReview(task.id)}
