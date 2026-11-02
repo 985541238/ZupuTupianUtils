@@ -170,7 +170,8 @@ export const api = {
   // ---- OCR 识别任务 ----
   getOcrTasks: () => request<any[]>('/ocr-tasks'),
   getOcrSources: () => request<any[]>('/ocr-tasks/sources'),
-  createOcrTask: (data: { name?: string; sourceTaskId: number | string; ocrModelId?: number | null }) =>
+  syncOcrTask: (id: string | number) => request<{ added: number; task: any }>('/ocr-tasks/' + id + '/sync', { method: 'POST', body: '{}' }),
+  createOcrTask: (data: { name?: string; projectId: number | string; ocrModelId?: number | null }) =>
     request<any>('/ocr-tasks', { method: 'POST', body: JSON.stringify(data) }),
   getOcrTask: (id: string | number) => request<any>('/ocr-tasks/' + id),
   deleteOcrTask: (id: string | number) => request<any>('/ocr-tasks/' + id, { method: 'DELETE' }),

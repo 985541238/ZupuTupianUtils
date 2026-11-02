@@ -147,6 +147,10 @@ export function mapOcrTask(raw: any): OcrTask {
     name: raw.name || '未命名 OCR 任务',
     sourceTaskId: String(raw.sourceTaskId ?? ''),
     sourceTaskName: raw.sourceTaskName || '',
+    projectId: raw.projectId != null ? Number(raw.projectId) : null,
+    projectName: raw.projectName || null,
+    volumeCount: Number(raw.volumeCount) || 0,
+    newPageCount: Number(raw.newPageCount) || 0,
     status: (raw.status || 'pending') as OcrTask['status'],
     totalCount: Number(raw.totalCount) || 0,
     doneCount: Number(raw.doneCount) || 0,
@@ -189,6 +193,7 @@ export function mapOcrPage(raw: any, taskId: string | number, pageNumber: number
     hasPrev: !!raw.hasPrev,
     prevModelName: raw.prevModelName || null,
     imageRejected: !!raw.imageRejected,
+    volumeName: raw.volumeName || null,
     columns: raw.data?.columns,
   };
 }
@@ -198,8 +203,12 @@ export function mapOcrSource(raw: any): OcrSourceTask {
     id: String(raw.id),
     name: raw.name || '',
     surname: raw.surname || undefined,
+    volumeCount: Number(raw.volumeCount) || 0,
     totalCount: Number(raw.totalCount) || 0,
     usableCount: Number(raw.usableCount) || 0,
+    volumes: Array.isArray(raw.volumes) ? raw.volumes.map((v: any) => ({ id: Number(v.id), name: v.name || '', usable: Number(v.usable) || 0, total: Number(v.total) || 0, status: v.status || '' })) : [],
+    ocrTaskId: raw.ocrTaskId != null ? String(raw.ocrTaskId) : null,
+    ocrTaskName: raw.ocrTaskName || null,
     updatedAt: formatTime(raw.updatedAt),
   };
 }

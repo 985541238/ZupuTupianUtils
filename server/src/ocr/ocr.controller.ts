@@ -109,6 +109,12 @@ export class OcrController {
     return this.ocr.recognizePage(req.user.id, id, pageId, body || {});
   }
 
+  /** 把项目里新通过的页补进这个 OCR 任务 */
+  @Post(':id/sync')
+  sync(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
+    return this.ocr.sync(req.user.id, id);
+  }
+
   @Post(':id/confirm')
   confirmAll(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
     return this.ocr.confirmAll(req.user.id, id);

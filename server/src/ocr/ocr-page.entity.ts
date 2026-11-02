@@ -13,6 +13,13 @@ export class OcrPage {
   @Column({ name: 'image_id', type: 'bigint', unsigned: true })
   imageId: number;
 
+  /** 来自项目下哪一卷 */
+  @Column({ name: 'volume_id', type: 'bigint', unsigned: true, nullable: true })
+  volumeId: number | null;
+
+  @Column({ name: 'volume_name', type: 'varchar', length: 128, nullable: true })
+  volumeName: string | null;
+
   @Column({ name: 'file_name', length: 255 })
   fileName: string;
 

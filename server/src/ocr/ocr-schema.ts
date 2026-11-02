@@ -27,6 +27,8 @@ export const OCR_SCHEMA_SQL: string[] = [
   \`ocr_task_id\` BIGINT UNSIGNED NOT NULL,
   \`image_id\` BIGINT UNSIGNED NOT NULL COMMENT '对应 task_images.id',
   \`file_name\` VARCHAR(255) NOT NULL,
+  \`volume_id\` BIGINT UNSIGNED NULL COMMENT '所属卷 tasks.id',
+  \`volume_name\` VARCHAR(128) NULL,
   \`image_path\` VARCHAR(1024) NOT NULL COMMENT '识别所用的处理后图片',
   \`image_sig\` VARCHAR(128) NULL COMMENT '识别时所用图片的签名，图片处理里重新调整后会变',
   \`sort_order\` INT NOT NULL DEFAULT 0,
@@ -58,4 +60,8 @@ export const OCR_ALTER_SQL: string[] = [
   "ALTER TABLE `ocr_pages` ADD COLUMN `model_name` VARCHAR(128) NULL",
   "ALTER TABLE `ocr_pages` ADD COLUMN `prev_data_json` MEDIUMTEXT NULL",
   "ALTER TABLE `ocr_pages` ADD COLUMN `prev_model_name` VARCHAR(128) NULL",
+  "ALTER TABLE `ocr_tasks` ADD COLUMN `project_id` BIGINT UNSIGNED NULL",
+  "ALTER TABLE `ocr_tasks` ADD COLUMN `project_name` VARCHAR(128) NULL",
+  "ALTER TABLE `ocr_pages` ADD COLUMN `volume_id` BIGINT UNSIGNED NULL",
+  "ALTER TABLE `ocr_pages` ADD COLUMN `volume_name` VARCHAR(128) NULL",
 ];

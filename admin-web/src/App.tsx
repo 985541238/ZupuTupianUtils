@@ -467,7 +467,7 @@ export default function App() {
     }
   };
 
-  const handleCreateOcr = async (data: { name: string; sourceTaskId: string; ocrModelId: number | null }) => {
+  const handleCreateOcr = async (data: { name: string; projectId: string; ocrModelId: number | null }) => {
     const created = await api.createOcrTask(data);
     await loadOcrTasks();
     return mapOcrTask(created);

@@ -126,6 +126,12 @@ export interface OcrTask {
   name: string;
   sourceTaskId: string;
   sourceTaskName: string;
+  /** 所属项目（OCR 任务按项目建，汇总各卷通过的页） */
+  projectId?: number | null;
+  projectName?: string | null;
+  volumeCount?: number;
+  /** 项目里新通过、还没进任务的页数 */
+  newPageCount?: number;
   status: OcrStatus;
   totalCount: number;
   doneCount: number;
@@ -174,16 +180,25 @@ export interface OcrPage {
   prevModelName?: string | null;
   /** 图片处理里这一页后来被标为未通过 */
   imageRejected?: boolean;
+  /** 这一页来自项目下哪一卷 */
+  volumeName?: string | null;
   /** 只有单页详情接口才带 */
   columns?: OcrColumn[];
 }
 
+/** 新建 OCR 任务时可选的「项目」 */
 export interface OcrSourceTask {
   id: string;
   name: string;
   surname?: string;
+  volumeCount: number;
   totalCount: number;
+  /** 项目下各卷已通过的页数合计 */
   usableCount: number;
+  volumes: { id: number; name: string; usable: number; total: number; status: string }[];
+  /** 已经建过 OCR 任务则有值 */
+  ocrTaskId: string | null;
+  ocrTaskName: string | null;
   updatedAt: string;
 }
 

@@ -626,7 +626,8 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                         <span className="text-[10px] font-semibold text-[#86868B] bg-black/[0.05] px-1.5 py-0.5 rounded-full">未识别</span>
                       )}
                     </div>
-                    <div className="text-[11px] text-[#86868B] truncate mt-0.5" title={p.fileName}>
+                    <div className="text-[11px] text-[#86868B] truncate mt-0.5" title={(p.volumeName ? p.volumeName + ' · ' : '') + p.fileName}>
+                      {p.volumeName ? <b className="font-semibold text-[#6E6E73]">{p.volumeName} · </b> : null}
                       {p.fileName}
                     </div>
                     {p.charCount > 0 ? (
@@ -771,7 +772,8 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                       </button>
                     </div>
                   </div>
-                  <div className="text-[11px] text-[#86868B] mt-0.5 truncate" title={cur.fileName}>
+                  <div className="text-[11px] text-[#86868B] mt-0.5 truncate" title={(cur.volumeName ? cur.volumeName + ' · ' : '') + cur.fileName}>
+                    {cur.volumeName ? <b className="font-semibold text-[#6E6E73]">{cur.volumeName} · </b> : null}
                     {cur.fileName}
                   </div>
                 </div>

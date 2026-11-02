@@ -27,7 +27,7 @@ interface Props {
   onRefresh?: () => void;
   onStart: (taskId: string, modelId?: number | null) => void;
   onOpenReview: (taskId: string) => void;
-  onCreate: (data: { name: string; sourceTaskId: string; ocrModelId: number | null }) => Promise<OcrTask>;
+  onCreate: (data: { name: string; projectId: string; ocrModelId: number | null }) => Promise<OcrTask>;
   onDelete: (taskId: string) => void | Promise<void>;
   onShowProblem?: (task: OcrTask) => void;
   onOpenSetup?: (platform?: string | null, step?: 1 | 2 | 3, onDone?: () => void) => void;
@@ -92,7 +92,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
   const [sources, setSources] = useState<OcrSourceTask[]>([]);
   const [sourcesLoading, setSourcesLoading] = useState(false);
   const [sourceId, setSourceId] = useState('');
-  const [dupOk, setDupOk] = useState(false);
+  const [syncingId, setSyncingId] = useState<string | null>(null);
   const [taskName, setTaskName] = useState('');
   const [nameTouched, setNameTouched] = useState(false);
   const [models, setModels] = useState<any[]>([]);
@@ -121,14 +121,12 @@ export const OcrTaskCenterView: React.FC<Props> = ({
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const paged = useMemo(() => filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize), [filtered, currentPage]);
 
-  const dupTasks = sourceId ? tasks.filter((t) => String(t.sourceTaskId) === String(sourceId)) : [];
   const selectedSource = sources.find((s) => s.id === sourceId) || null;
   const selectedModel = models.find((m) => Number(m.id) === modelId) || null;
 
   const openCreate = async () => {
     setShowCreate(true);
     setSourceId('');
-    setDupOk(false);
     setTaskName('');
     setNameTouched(false);
     setSourcesLoading(true);
@@ -137,7 +135,8 @@ export const OcrTaskCenterView: React.FC<Props> = ({
       setCfgReady(cfg ? !!cfg.configured : null);
       const list = (src || []).map(mapOcrSource);
       setSources(list);
-      if (list.length === 1) setSourceId(list[0].id);
+      const pick = list.filter((x) => !x.ocrTaskId && x.usableCount > 0);
+      if (pick.length === 1) setSourceId(pick[0].id);
       const enabled = (ms || []).filter((m: any) => m.enabled);
       setModels(enabled);
       const def = enabled.find((m: any) => m.isDefault) || enabled[0];
@@ -149,7 +148,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
     }
   };
 
-  // 选了图片处理任务后，任务名默认「来源名 · OCR」，用户改过就不再覆盖
+  // 选了项目后，任务名默认「项目名 · OCR」，用户改过就不再覆盖
   useEffect(() => {
     if (selectedSource && !nameTouched) setTaskName(`${selectedSource.name} · OCR`);
   }, [selectedSource, nameTouched]);
@@ -171,12 +170,24 @@ export const OcrTaskCenterView: React.FC<Props> = ({
     };
   }, [modelId, selectedSource]);
 
+  const syncTask = async (t: OcrTask) => {
+    setSyncingId(t.id);
+    try {
+      const r = await api.syncOcrTask(t.id);
+      onRefresh?.();
+      if (r.added) alert(`已把 ${r.added} 页新通过的页面加入任务，识别时会一并处理`);
+    } catch (e: any) {
+      alert(e?.message || '同步失败');
+    } finally {
+      setSyncingId(null);
+    }
+  };
+
   const submit = async (startAfter: boolean) => {
-    if (!sourceId) return alert('请先选择一个图片处理任务');
-    if (dupTasks.length && !dupOk) return alert('这个图片处理任务已经建过 OCR 任务，请先勾选「我知道，仍要再建一个」');
+    if (!sourceId) return alert('请先选择一个项目');
     setCreating(true);
     try {
-      const created = await onCreate({ name: taskName.trim(), sourceTaskId: sourceId, ocrModelId: modelId });
+      const created = await onCreate({ name: taskName.trim(), projectId: sourceId, ocrModelId: modelId });
       setShowCreate(false);
       if (startAfter) onStart(created.id);
     } catch (e: any) {
@@ -194,7 +205,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
             <div>
               <h1 className="text-2xl font-bold text-[#1D1D1F] tracking-tight">OCR 识别任务</h1>
               <p className="text-sm text-[#86868B] mt-1 font-medium">
-                选择已完成的图片处理任务，识别整本谱书的文字；审阅时可在图片上逐字核对、修改
+                一个项目一个识别任务：自动汇总项目下各卷「通过」的页，按卷、按页顺序识别；审阅时可在图片上逐字核对、修改
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -264,7 +275,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                 </p>
                 <p className="text-xs text-[#86868B] mb-4">
                   {tasks.length === 0
-                    ? '先在「图片处理」完成一本谱书的审阅，然后在这里新建识别任务'
+                    ? '先在「图片处理」里把项目下各卷审阅并标记通过，然后在这里新建识别任务'
                     : '换个筛选条件试试'}
                 </p>
                 {tasks.length === 0 ? (
@@ -329,7 +340,10 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                             {task.createdAt}
                           </span>
                           <span className="text-black/15">·</span>
-                          <span className="truncate max-w-[260px]" title={task.sourceTaskName}>来源：{task.sourceTaskName || '—'}</span>
+                          <span className="truncate max-w-[260px]" title={task.projectName || task.sourceTaskName}>
+                            项目：{task.projectName || task.sourceTaskName || '—'}
+                            {task.volumeCount ? ` · ${task.volumeCount} 卷` : ''}
+                          </span>
                           <span className="text-black/15">·</span>
                           <span className="tabular-nums">共 {task.totalCount} 页</span>
                           {formatProcessingTime(task.processingTimeMs) || task.actualCost ? (
@@ -382,7 +396,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                           </div>
                         )}
 
-                        {!isProcessing && (task.errorMessage || task.staleCount || task.failedCount || (task.status === 'reviewing' && task.uncertainCount > 0)) ? (
+                        {!isProcessing && (task.errorMessage || task.newPageCount || task.staleCount || task.failedCount || (task.status === 'reviewing' && task.uncertainCount > 0)) ? (
                           <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
                             {task.failedCount || task.errorMessage ? (
                               <span
@@ -391,6 +405,19 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                               >
                                 <span className="w-1.5 h-1.5 rounded-full bg-[#FF3B30]" />
                                 {task.failedCount ? `${task.failedCount} 页识别失败` : '识别出错'}
+                              </span>
+                            ) : null}
+                            {task.newPageCount ? (
+                              <span className="inline-flex items-center gap-1.5 pl-2.5 pr-1 py-0.5 rounded-full text-xs font-medium bg-[#34C759]/12 text-[#248A3D]" title="项目里又有页面审阅通过了，还没加进这个识别任务">
+                                新增 {task.newPageCount} 页待加入
+                                <button
+                                  type="button"
+                                  disabled={syncingId === task.id}
+                                  onClick={() => void syncTask(task)}
+                                  className="px-2 py-0.5 rounded-full bg-[#34C759] text-white text-[11px] font-semibold hover:bg-[#2FB350] disabled:opacity-60 cursor-pointer"
+                                >
+                                  {syncingId === task.id ? '加入中…' : '加入任务'}
+                                </button>
                               </span>
                             ) : null}
                             {task.staleCount ? (
@@ -538,7 +565,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
               <div className="flex items-start justify-between px-6 pt-5 pb-4 border-b border-black/[0.06] shrink-0">
                 <div>
                   <h3 className="text-base font-bold text-[#1D1D1F]">新建 OCR 识别任务</h3>
-                  <p className="text-xs text-[#86868B] mt-0.5">选择一个已完成的图片处理任务，对其中「通过」的页面按顺序识别文字</p>
+                  <p className="text-xs text-[#86868B] mt-0.5">选择一个项目，汇总它下面各卷「通过」的页面，按卷、按页顺序识别文字</p>
                 </div>
                 <button onClick={() => setShowCreate(false)} className="text-[#86868B] hover:text-[#1D1D1F] text-xl font-light p-1 cursor-pointer leading-none" aria-label="关闭">
                   ×
@@ -549,16 +576,14 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                 <div>
                   <div className="flex items-center gap-2 mb-2.5">
                     <span className="w-5 h-5 rounded-full bg-[#0071E3] text-white text-[10px] font-bold flex items-center justify-center">1</span>
-                    <span className="text-sm font-semibold text-[#1D1D1F]">选择图片处理任务</span>
+                    <span className="text-sm font-semibold text-[#1D1D1F]">选择项目</span>
                   </div>
                   {sourcesLoading ? (
                     <p className="text-xs text-[#86868B] px-1">加载中…</p>
                   ) : sources.length === 0 ? (
                     <div className="rounded-2xl border border-dashed border-black/[0.12] bg-[#F5F5F7] p-5 text-center">
-                      <p className="text-[13px] text-[#1D1D1F] font-semibold">还没有可选的任务</p>
-                      <p className="text-xs text-[#86868B] mt-1 leading-relaxed">
-                        只有「已完成」的图片处理任务（所有页都标记过通过/未通过，并至少有一页通过）才能做 OCR 识别。
-                      </p>
+                      <p className="text-[13px] text-[#1D1D1F] font-semibold">还没有项目</p>
+                      <p className="text-xs text-[#86868B] mt-1 leading-relaxed">先在「图片处理」里新建项目、上传各卷并审阅，把处理好的页标记为「通过」，再来识别。</p>
                       {onGoImageTasks ? (
                         <button
                           type="button"
@@ -574,46 +599,51 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                     </div>
                   ) : (
                     <div className="space-y-2">
-                      <select
-                        value={sourceId}
-                        onChange={(e) => {
-                          setSourceId(e.target.value);
-                          setDupOk(false);
-                        }}
-                        className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium cursor-pointer"
-                      >
-                        <option value="">请选择图片处理任务…</option>
-                        {sources.map((s) => {
-                          const n = tasks.filter((t) => String(t.sourceTaskId) === String(s.id)).length;
-                          return (
-                            <option key={s.id} value={s.id}>
-                              {s.name}（可识别 {s.usableCount} 页{n ? ` · 已建 ${n} 个 OCR 任务` : ''}）
-                            </option>
-                          );
-                        })}
-                      </select>
-                      {selectedSource ? (
-                        <p className="text-xs text-[#86868B] px-1">
-                          {selectedSource.surname ? `${selectedSource.surname}氏 · ` : ''}共 {selectedSource.totalCount} 页，其中可识别 {selectedSource.usableCount} 页 · 完成于 {selectedSource.updatedAt}
-                        </p>
-                      ) : null}
-                      {dupTasks.length ? (
-                        <div className="rounded-xl bg-[#FF9500]/10 border border-[#FF9500]/30 p-3 text-[12px] text-[#C93400] leading-relaxed">
-                          <p className="font-semibold">这个图片处理任务已经建过 OCR 任务了：</p>
-                          <ul className="mt-1 space-y-0.5">
-                            {dupTasks.map((t) => (
-                              <li key={t.id}>
-                                · {t.name}（{OCR_STATUS_TEXT[t.status] || t.status}，{t.doneCount}/{t.totalCount} 页）
-                              </li>
-                            ))}
-                          </ul>
-                          <p className="mt-1">再建一个会重复识别、重复产生费用。确定要再建，请勾选：</p>
-                          <label className="mt-1.5 flex items-center gap-2 font-semibold cursor-pointer">
-                            <input type="checkbox" checked={dupOk} onChange={(e) => setDupOk(e.target.checked)} className="accent-[#FF9500]" />
-                            我知道，仍要再建一个
-                          </label>
-                        </div>
-                      ) : null}
+                      {sources.map((s) => {
+                        const disabled = !!s.ocrTaskId || s.usableCount === 0;
+                        const active = sourceId === s.id;
+                        return (
+                          <button
+                            key={s.id}
+                            type="button"
+                            disabled={disabled}
+                            onClick={() => setSourceId(s.id)}
+                            className={`w-full text-left rounded-2xl border-2 p-3.5 transition-colors ${
+                              active
+                                ? 'border-[#0071E3] bg-[#0071E3]/[0.04]'
+                                : disabled
+                                  ? 'border-transparent bg-[#F5F5F7] opacity-70 cursor-not-allowed'
+                                  : 'border-transparent bg-[#F5F5F7] hover:bg-[#EEEEF2] cursor-pointer'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-sm font-bold text-[#1D1D1F] truncate">{s.name}</span>
+                              <span className="text-xs text-[#6E6E73] tabular-nums shrink-0">
+                                {s.volumeCount} 卷 · 可识别 <b className="text-[#1D1D1F]">{s.usableCount}</b> 页
+                              </span>
+                            </div>
+                            {s.ocrTaskId ? (
+                              <p className="text-xs text-[#C93400] mt-1.5">已有 OCR 任务「{s.ocrTaskName}」，新通过的页请在任务里点「加入任务」，不用重复建</p>
+                            ) : s.usableCount === 0 ? (
+                              <p className="text-xs text-[#86868B] mt-1.5">还没有「通过」的页面，先去图片处理审阅</p>
+                            ) : (
+                              <div className="flex flex-wrap gap-1.5 mt-2">
+                                {s.volumes.map((v) => (
+                                  <span
+                                    key={v.id}
+                                    className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${
+                                      v.usable >= v.total && v.total > 0 ? 'bg-[#34C759]/12 text-[#248A3D]' : 'bg-white text-[#6E6E73] border border-black/[0.06]'
+                                    }`}
+                                  >
+                                    {v.name} {v.usable}/{v.total}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </button>
+                        );
+                      })}
+                      <p className="text-[11px] text-[#86868B] px-1 leading-relaxed">只识别「通过」的页；还在审阅的卷，后面通过的页可随时加入这个任务。</p>
                     </div>
                   )}
                 </div>
@@ -653,7 +683,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                       <span className="text-xs text-[#6E6E73]">预估费用</span>
                       <span className="text-base font-bold text-[#1D1D1F] tabular-nums">
                         {!selectedSource ? (
-                          <span className="text-xs font-normal text-[#86868B]">选好图片处理任务后自动估算</span>
+                          <span className="text-xs font-normal text-[#86868B]">选好项目后自动估算</span>
                         ) : est.priced && est.cost != null ? (
                           `¥${est.cost.toFixed(2)}`
                         ) : (
@@ -672,7 +702,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                       将识别 <b className="text-[#1D1D1F] tabular-nums">{selectedSource.usableCount}</b> 页
                     </>
                   ) : (
-                    '先选择一个图片处理任务'
+                    '先选择一个项目'
                   )}
                 </div>
                 <button type="button" onClick={() => setShowCreate(false)} className="h-10 px-4 text-sm font-medium text-[#86868B] hover:text-[#1D1D1F] cursor-pointer">
@@ -680,7 +710,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                 </button>
                 <button
                   type="button"
-                  disabled={creating || !sourceId || (dupTasks.length > 0 && !dupOk)}
+                  disabled={creating || !sourceId || false}
                   onClick={() => void submit(false)}
                   className="h-10 px-4 text-sm font-semibold bg-white border border-black/[0.1] hover:bg-[#F5F5F7] text-[#1D1D1F] rounded-xl cursor-pointer disabled:opacity-50"
                 >
@@ -688,7 +718,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                 </button>
                 <button
                   type="button"
-                  disabled={creating || !sourceId || (dupTasks.length > 0 && !dupOk)}
+                  disabled={creating || !sourceId || false}
                   onClick={() => void submit(true)}
                   className="h-10 px-5 text-sm font-semibold bg-[#0071E3] hover:bg-[#0077ED] text-white rounded-xl shadow-[0_2px_8px_rgba(0,113,227,0.25)] cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
                 >

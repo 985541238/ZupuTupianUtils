@@ -7,6 +7,7 @@ import { OcrTask } from './ocr-task.entity';
 import { OcrPage } from './ocr-page.entity';
 import { Task } from '../tasks/task.entity';
 import { TaskImage } from '../tasks/task-image.entity';
+import { Project } from '../tasks/project.entity';
 import { SettingsService } from '../settings/settings.service';
 import { AliyunService, AiConfigError, OcrParseError } from '../ai/aliyun.service';
 import { getPlatformDef } from '../settings/platforms';
@@ -33,6 +34,7 @@ export class OcrService implements OnModuleInit {
     @InjectRepository(OcrPage) private readonly pages: Repository<OcrPage>,
     @InjectRepository(Task) private readonly srcTasks: Repository<Task>,
     @InjectRepository(TaskImage) private readonly srcImages: Repository<TaskImage>,
+    @InjectRepository(Project) private readonly projects: Repository<Project>,
     private readonly settings: SettingsService,
     private readonly aliyun: AliyunService,
   ) {}
@@ -139,8 +141,20 @@ export class OcrService implements OnModuleInit {
     } catch {
       /* 不影响列表 */
     }
+    let newPageCount = 0;
+    let volumeCount = 0;
+    try {
+      if (t.projectId != null) {
+        newPageCount = (await this.newItems(Number(t.userId), t)).length;
+        volumeCount = await this.srcTasks.count({ where: { projectId: t.projectId } });
+      }
+    } catch {
+      /* 不影响列表 */
+    }
     return {
       ...t,
+      newPageCount,
+      volumeCount,
       failedCount: live.filter((p) => p.status === 'failed').length,
       /** 正在识别的页（页序号 + 开始时间），前端据此显示「第 N 页识别中 · 已用 X 秒」 */
       processingPages: live
@@ -155,61 +169,49 @@ export class OcrService implements OnModuleInit {
     };
   }
 
-  /** 能用来建 OCR 任务的图片处理任务：已完成，且有通过审核的页 */
+  /** 项目下所有「通过」且有结果图的页：按卷（创建先后）→ 页序排好 */
+  private async projectUsable(userId: number, projectId: number) {
+    const vols = await this.srcTasks.find({ where: { userId, projectId }, order: { id: 'ASC' } });
+    const out: { img: TaskImage; vol: Task }[] = [];
+    const volStat: { id: number; name: string; usable: number; total: number; status: string }[] = [];
+    for (const v of vols) {
+      const imgs = await this.srcImages.find({ where: { taskId: v.id }, order: { sortOrder: 'ASC', id: 'ASC' } });
+      const ok = imgs.filter((i) => i.status === 'confirmed' && i.resultPath && fs.existsSync(i.resultPath));
+      for (const img of ok) out.push({ img, vol: v });
+      volStat.push({ id: Number(v.id), name: v.name, usable: ok.length, total: imgs.length, status: v.status });
+    }
+    return { vols, items: out, volStat };
+  }
+
+  /** 能建 OCR 任务的项目：列出每个项目下各卷的可识别页数，以及是否已经建过 */
   async sources(userId: number) {
-    const tasks = await this.srcTasks.find({ where: { userId, status: 'completed' }, order: { updatedAt: 'DESC' } });
+    const projs = await this.projects.find({ where: { userId }, order: { updatedAt: 'DESC' } });
+    const existing = await this.tasks.find({ where: { userId } });
     const out = [];
-    for (const t of tasks) {
-      const imgs = await this.srcImages.find({ where: { taskId: t.id, status: 'confirmed' } });
-      const usable = imgs.filter((i) => i.resultPath && fs.existsSync(i.resultPath)).length;
-      if (!usable) continue;
+    for (const p of projs) {
+      const { items, volStat } = await this.projectUsable(userId, Number(p.id));
+      const ocr = existing.find((t) => Number(t.projectId) === Number(p.id));
       out.push({
-        id: t.id,
-        name: t.name,
-        surname: t.surname,
-        totalCount: t.totalCount,
-        usableCount: usable,
-        updatedAt: t.updatedAt,
+        id: Number(p.id),
+        name: p.name,
+        surname: p.surname,
+        volumeCount: volStat.length,
+        totalCount: volStat.reduce((a, v) => a + v.total, 0),
+        usableCount: items.length,
+        volumes: volStat,
+        ocrTaskId: ocr ? Number(ocr.id) : null,
+        ocrTaskName: ocr ? ocr.name : null,
+        updatedAt: p.updatedAt,
       });
     }
     return out;
   }
 
-  async create(userId: number, body: { name?: string; sourceTaskId?: number; ocrModelId?: number }) {
-    const srcId = Number(body.sourceTaskId);
-    if (!srcId) throw new BadRequestException('请选择一个图片处理任务');
-    const src = await this.srcTasks.findOne({ where: { id: srcId, userId } });
-    if (!src) throw new BadRequestException('所选图片处理任务不存在');
-    if (src.status !== 'completed') throw new BadRequestException('只能选择「已完成」的图片处理任务，请先在图片处理里完成审阅');
-    const imgs = (await this.srcImages.find({ where: { taskId: src.id, status: 'confirmed' }, order: { sortOrder: 'ASC', id: 'ASC' } })).filter(
-      (i) => i.resultPath && fs.existsSync(i.resultPath),
-    );
-    if (!imgs.length) throw new BadRequestException('该图片处理任务里没有「通过」的页面，无法识别');
-
-    const model = await this.settings.baiduOcrEngine();
-    const name = String(body.name || '').trim() || `${src.name} · OCR`;
-    const est = this.settings.estimateCost(model, imgs.length);
+  private async buildPageRows(taskId: number, items: { img: TaskImage; vol: Task }[], startOrder: number) {
     const now = new Date();
-    const task = await this.tasks.save(
-      this.tasks.create({
-        userId,
-        name: name.slice(0, 128),
-        sourceTaskId: src.id,
-        sourceTaskName: src.name.slice(0, 128),
-        ocrModelId: Number(model.id),
-        status: 'pending',
-        totalCount: imgs.length,
-        doneCount: 0,
-        confirmedCount: 0,
-        estimatedCost: est != null ? String(est) : null,
-        actualCost: '0',
-        createdAt: now,
-        updatedAt: now,
-      }),
-    );
     const rows: OcrPage[] = [];
-    for (let i = 0; i < imgs.length; i++) {
-      const img = imgs[i];
+    for (let i = 0; i < items.length; i++) {
+      const { img, vol } = items[i];
       let width = img.width;
       let height = img.height;
       try {
@@ -221,11 +223,13 @@ export class OcrService implements OnModuleInit {
       }
       rows.push(
         this.pages.create({
-          ocrTaskId: task.id,
+          ocrTaskId: taskId,
           imageId: img.id,
+          volumeId: Number(vol.id),
+          volumeName: vol.name.slice(0, 128),
           fileName: img.fileName,
           imagePath: img.resultPath!,
-          sortOrder: i,
+          sortOrder: startOrder + i,
           width,
           height,
           status: 'pending',
@@ -234,8 +238,72 @@ export class OcrService implements OnModuleInit {
         }),
       );
     }
-    await this.pages.save(rows);
+    return rows;
+  }
+
+  /** 按项目建 OCR 任务：一个项目一个任务，汇总项目下各卷通过的页 */
+  async create(userId: number, body: { name?: string; projectId?: number; ocrModelId?: number }) {
+    const pid = Number(body.projectId);
+    if (!pid) throw new BadRequestException('请选择一个项目');
+    const proj = await this.projects.findOne({ where: { id: pid, userId } });
+    if (!proj) throw new BadRequestException('所选项目不存在');
+    const dup = await this.tasks.findOne({ where: { userId, projectId: pid } });
+    if (dup) throw new BadRequestException(`「${proj.name}」已经有 OCR 任务了，新通过的页面请在任务里点「同步新页面」`);
+    const { items, vols } = await this.projectUsable(userId, pid);
+    if (!vols.length) throw new BadRequestException('这个项目里还没有卷，请先在图片处理里新建卷');
+    if (!items.length) throw new BadRequestException('这个项目里还没有「通过」的页面，请先在图片处理里审阅并标记通过');
+
+    const model = await this.settings.baiduOcrEngine();
+    const name = String(body.name || '').trim() || `${proj.name} · OCR`;
+    const est = this.settings.estimateCost(model, items.length);
+    const now = new Date();
+    const task = await this.tasks.save(
+      this.tasks.create({
+        userId,
+        name: name.slice(0, 128),
+        sourceTaskId: Number(vols[0].id),
+        sourceTaskName: proj.name.slice(0, 128),
+        projectId: pid,
+        projectName: proj.name.slice(0, 128),
+        ocrModelId: Number(model.id),
+        status: 'pending',
+        totalCount: items.length,
+        doneCount: 0,
+        confirmedCount: 0,
+        estimatedCost: est != null ? String(est) : null,
+        actualCost: '0',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    await this.pages.save(await this.buildPageRows(Number(task.id), items, 0));
     return this.getView(userId, Number(task.id));
+  }
+
+  /** 项目里新通过、还没进任务的页（按图片 id 判断） */
+  private async newItems(userId: number, t: OcrTask) {
+    if (t.projectId == null) return [];
+    const { items } = await this.projectUsable(userId, Number(t.projectId));
+    const have = new Set((await this.pages.find({ where: { ocrTaskId: t.id }, select: ['id', 'imageId'] })).map((p) => Number(p.imageId)));
+    return items.filter((x) => !have.has(Number(x.img.id)));
+  }
+
+  /** 把项目里新通过的页补进任务（追加在最后，已识别/已确认的页不动） */
+  async sync(userId: number, id: number) {
+    const t = await this.getTask(userId, id);
+    if (this.running.has(Number(t.id))) throw new BadRequestException('正在识别中，识别结束后再同步');
+    const add = await this.newItems(userId, t);
+    if (!add.length) return { added: 0, task: await this.getView(userId, Number(t.id)) };
+    const last = await this.pages.find({ where: { ocrTaskId: t.id }, order: { sortOrder: 'DESC' }, take: 1 });
+    const start = last.length ? Number(last[0].sortOrder) + 1 : 0;
+    await this.pages.save(await this.buildPageRows(Number(t.id), add, start));
+    await this.refreshCounts(Number(t.id));
+    const fresh = await this.tasks.findOne({ where: { id: t.id } });
+    if (fresh && fresh.status === 'completed') {
+      fresh.status = 'reviewing'; // 有新页要识别/确认，任务重新打开
+      await this.tasks.save(fresh);
+    }
+    return { added: add.length, task: await this.getView(userId, Number(t.id)) };
   }
 
   async remove(userId: number, id: number) {

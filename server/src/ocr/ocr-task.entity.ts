@@ -20,6 +20,13 @@ export class OcrTask {
   @Column({ name: 'source_task_name', length: 128, default: '' })
   sourceTaskName: string;
 
+  /** 所属项目：OCR 任务按项目建，汇总项目下各卷通过的页 */
+  @Column({ name: 'project_id', type: 'bigint', unsigned: true, nullable: true })
+  projectId: number | null;
+
+  @Column({ name: 'project_name', type: 'varchar', length: 128, nullable: true })
+  projectName: string | null;
+
   @Column({ name: 'ocr_model_id', type: 'bigint', unsigned: true, nullable: true })
   ocrModelId: number | null;
 
