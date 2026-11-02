@@ -124,6 +124,20 @@ export class TasksController {
     res.send(r.buf);
   }
 
+  /** 快速预览：拖动滑块时的即时反馈，降分辨率、不落盘（成品仍由 /preview 完整生成） */
+  @Post(':id/images/:imageId/preview-fast')
+  async previewFast(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('imageId', ParseIntPipe) imageId: number,
+    @Body() body: any,
+    @Res() res: Response,
+  ) {
+    const buf = await this.tasks.previewImageFast(req.user.id, id, imageId, body || {});
+    res.setHeader('Content-Type', 'image/png');
+    res.send(buf);
+  }
+
   /** 自动检测这页更像脏污 / 字迹不清 / 标准（本地，不花钱） */
   @Get(':id/images/:imageId/detect-mode')
   detectMode(

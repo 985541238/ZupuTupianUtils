@@ -288,6 +288,24 @@ export async function previewImageBlob(
   return blob;
 }
 
+/** 快速预览：拖动滑块时的即时反馈（服务端降分辨率、不落盘）。失败时调用方静默忽略。 */
+export async function previewFastBlob(
+  taskId: string | number,
+  imageId: string | number,
+  body: { params: any; cropBox?: any }
+): Promise<Blob> {
+  const res = await fetch(`${BASE}/tasks/${taskId}/images/${imageId}/preview-fast`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer ' + getToken(),
+    },
+    body: JSON.stringify(body || {}),
+  });
+  if (!res.ok) throw new Error('快速预览失败');
+  return res.blob();
+}
+
 export function ocrExportUrl(taskId: string | number, mode: 'columns' | 'flow' = 'columns'): string {
   return `${BASE}/ocr-tasks/${taskId}/export?mode=${mode}&access_token=${encodeURIComponent(getToken())}`;
 }

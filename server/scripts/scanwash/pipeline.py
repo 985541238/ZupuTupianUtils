@@ -89,7 +89,9 @@ def process_page(
 
     metrics = evaluate(image, ink.mask, alpha, tier, warnings)
     png = np.clip(np.rint(image), 0, 255).astype(np.uint8)
-    png = refine_thin_strokes(png)
+    # 细笔收边较费时（会临时 2 倍放大）。拖动滑块的快速预览可用 ZW_SKIP_REFINE=1 跳过，落盘成品仍走完整流程。
+    if not os.environ.get("ZW_SKIP_REFINE"):
+        png = refine_thin_strokes(png)
 
     # 统一缩回输入尺寸（细笔收边可能放大过，内存保护可能缩小过；审阅/OCR 需要与原图同尺寸）
     if png.shape[0] != in_h or png.shape[1] != in_w:

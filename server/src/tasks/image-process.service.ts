@@ -269,6 +269,7 @@ export class ImageProcessService {
     outPath: string,
     params: ProcessParams,
     crop?: CropBox | null,
+    fast = false,
   ): Promise<{ width: number; height: number }> {
     const args = [
       this.scriptPath(),
@@ -300,8 +301,12 @@ export class ImageProcessService {
       args.push('--crop', `${crop.x},${crop.y},${crop.w},${crop.h}`);
     }
     const timeoutMs = Number(process.env.PROCESS_IMAGE_TIMEOUT_MS || 180000);
+    // 快速预览：降分辨率处理、跳过细笔收边（只用于拖动滑块时的即时反馈；落盘成品走完整流程）
+    const childEnv = fast
+      ? { ...process.env, ZW_MAX_PIXELS: '1300000', ZW_SKIP_REFINE: '1' }
+      : process.env;
     return new Promise((resolve, reject) => {
-      const child = spawn(bin, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = spawn(bin, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: childEnv });
       let stdout = '';
       let stderr = '';
       let settled = false;
@@ -412,6 +417,7 @@ export class ImageProcessService {
     outPath: string,
     params: ProcessParams,
     crop?: CropBox | null,
+    fast = false,
   ): Promise<{ width: number; height: number }> {
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
     const resolved = await this.resolveCropAgainstSource(sourcePath, crop);
@@ -443,7 +449,7 @@ export class ImageProcessService {
       if (py && fs.existsSync(this.scriptPath())) {
         try {
           // Crop already applied to workPath; do not pass --crop again.
-          return await this.runPython(py, workPath, outPath, paramsForRun, null);
+          return await this.runPython(py, workPath, outPath, paramsForRun, null, fast);
         } catch (e) {
           if (wantedCrop) {
             // Never silently return a full-page clean when user asked for a crop.
@@ -689,13 +695,14 @@ export class ImageProcessService {
     sourcePath: string,
     params: ProcessParams,
     crop?: CropBox | null,
+    fast = false,
   ): Promise<Buffer> {
     const tmp = path.join(
       process.env.OUTPUT_ROOT || path.join(process.cwd(), '..', 'data', 'output'),
       '_preview',
       `${Date.now()}-${Math.random().toString(16).slice(2)}.png`,
     );
-    await this.processToFile(sourcePath, tmp, params, crop);
+    await this.processToFile(sourcePath, tmp, params, crop, fast);
     const buf = fs.readFileSync(tmp);
     try {
       fs.unlinkSync(tmp);

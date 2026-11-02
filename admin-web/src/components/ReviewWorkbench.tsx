@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Task, ScanItem, ProcessParams, CropRect } from '../types';
-import { api, previewImageBlob } from '../api/client';
+import { api, previewImageBlob, previewFastBlob } from '../api/client';
 import { buildPreviewBody, nestCropToUi, PROCESS_MODES, modeParams, matchMode } from '../api/params';
 import { PerspectiveDialog } from './PerspectiveDialog';
 import { mapImage, formatProcessingTime } from '../api/mappers';
@@ -96,6 +96,10 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   const previewDataUrlRef = useRef<string>('');
   const localParamsRef = useRef<ProcessParams>(localParams);
   const previewGenRef = useRef(0);
+  /** 快速预览（拖动时的即时反馈）：独立计数与时间戳，保证永不覆盖更新的完整预览结果 */
+  const fastGenRef = useRef(0);
+  const fastUrlRef = useRef<string>('');
+  const lastFullAppliedAtRef = useRef<number>(0);
   const originalImgRef = useRef<HTMLImageElement>(null);
   const cropLayerRef = useRef<HTMLDivElement>(null);
   const cropDragRef = useRef<{ x: number; y: number } | null>(null);
@@ -421,6 +425,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
           try { URL.revokeObjectURL(previewUrlRef.current); } catch {}
         }
         previewUrlRef.current = url;
+        lastFullAppliedAtRef.current = performance.now();
         setPreviewDataUrl(url);
         setCurrentStats({
           processingTimeMs:
@@ -440,6 +445,45 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
     [task.id],
   );
 
+  /**
+   * 快速预览（拖动滑块时的即时反馈）：只更新显示的图，不落盘、不碰会话/参数/持久化。
+   * 带时间戳守卫，确保晚到的完整预览永远不会被快速结果覆盖。失败静默忽略。
+   */
+  const runFastPreview = useCallback(
+    async (params: ProcessParams, crop?: CropRect | null) => {
+      const item = currentItemRef.current;
+      if (!item) return;
+      const pageId = item.id;
+      const gen = ++fastGenRef.current;
+      const startedAt = performance.now();
+      try {
+        const imgEl = originalImgRef.current;
+        const ow = imgEl && imgEl.naturalWidth > 0 ? imgEl.naturalWidth : item.originalWidth;
+        const oh = imgEl && imgEl.naturalHeight > 0 ? imgEl.naturalHeight : item.originalHeight;
+        const activeCrop = crop ?? confirmedCropRef.current ?? undefined;
+        const body = buildPreviewBody(params, activeCrop, ow, oh);
+        if ((crop || confirmedCropRef.current) && !body.cropBox) return; // 有裁剪却没框 → 放弃
+        const blob = await previewFastBlob(task.id, pageId, body);
+        // 丢弃条件：已不是最新快速请求 / 已切页 / 期间完整预览已给出更新结果
+        if (gen !== fastGenRef.current || syncedPageIdRef.current !== pageId) return;
+        if (lastFullAppliedAtRef.current > startedAt) return;
+        const url = URL.createObjectURL(blob);
+        if (
+          fastUrlRef.current &&
+          fastUrlRef.current.startsWith('blob:') &&
+          fastUrlRef.current !== previewDataUrlRef.current
+        ) {
+          try { URL.revokeObjectURL(fastUrlRef.current); } catch {}
+        }
+        fastUrlRef.current = url;
+        setPreviewDataUrl(url);
+      } catch {
+        // 快速预览失败：静默忽略，完整预览仍会给出结果
+      }
+    },
+    [task.id],
+  );
+
   useEffect(() => {
     if (cropSelecting) return;
     // Do not re-run recognition on page switch / mount of already-processed result.
@@ -448,6 +492,13 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
       skipAutoPreviewRef.current = false;
       return;
     }
+    // 即时反馈：拖动后很快先出一张降分辨率的快速预览（不落盘）
+    const fastTimer = setTimeout(() => {
+      if (!paramsDirtyRef.current) return;
+      const item = currentItemRef.current;
+      const crop = confirmedCropRef.current || (item ? pageSessionRef.current.get(item.id)?.crop || null : null);
+      void runFastPreview(localParamsRef.current, crop ?? undefined);
+    }, 130);
     const timer = setTimeout(() => {
       // Guard again: a concurrent clear (page switch / pass) may have flipped dirty off.
       if (!paramsDirtyRef.current) return;
@@ -464,8 +515,11 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
       // runPreview itself clears dirty so persist/onUpdateTaskItem cannot re-arm a loop.
       void runPreview(localParamsRef.current, crop ?? undefined);
     }, 280);
-    return () => clearTimeout(timer);
-  }, [localParams, confirmedCrop, cropSelecting, runPreview, paramsDirty]);
+    return () => {
+      clearTimeout(fastTimer);
+      clearTimeout(timer);
+    };
+  }, [localParams, confirmedCrop, cropSelecting, runPreview, runFastPreview, paramsDirty]);
 
   useEffect(() => {
     return () => {

@@ -1088,6 +1088,31 @@ export class TasksService implements OnModuleInit {
     return false;
   }
 
+  /**
+   * 快速预览（拖动滑块时的即时反馈）：降分辨率、跳过细笔收边，**不落盘、不改数据库**。
+   * 落盘成品仍由 previewImage 走完整流程，OCR/导出用的始终是完整质量，不受影响。
+   */
+  async previewImageFast(
+    userId: number,
+    taskId: number,
+    imageId: number,
+    body: { params?: ProcessParams; cropBox?: CropBox | null },
+  ): Promise<Buffer> {
+    const task = await this.get(userId, taskId);
+    const img = await this.getImage(userId, taskId, imageId);
+    await this.restoreOriginalSource(task, img);
+    const params = { ...DEFAULT_PARAMS, ...(body.params || this.processor.parseParams(img.params)) };
+    params.autoCrop = false;
+    let processCrop: CropBox | null = null;
+    if (body.cropBox && body.cropBox.w > 0 && body.cropBox.h > 0) {
+      const resolved = await this.processor.resolveCropAgainstSource(img.sourcePath, body.cropBox);
+      processCrop = resolved.crop || null;
+    } else if (body.cropBox === undefined) {
+      processCrop = this.processor.parseCrop(img.cropBox);
+    }
+    return this.processor.previewBuffer(img.sourcePath, params, processCrop, true);
+  }
+
   /** 自动检测这页更像哪种情况（脏污/字迹不清/标准），供审阅页推荐模式用 */
   async detectImageMode(userId: number, taskId: number, imageId: number) {
     const task = await this.get(userId, taskId);
