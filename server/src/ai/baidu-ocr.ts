@@ -1,4 +1,5 @@
 import sharp from 'sharp';
+import { readingOrder } from './reading-order';
 
 /**
  * 百度智能云「通用文字识别（高精度含位置版）」：
@@ -213,17 +214,12 @@ export async function baiduAccurateOcr(
     }
     merged.push(cur);
   }
-  // 阅读顺序：从右到左；同一横向位置的从上到下
-  merged.sort((a, b) => {
-    const ca = (a.x1 + a.x2) / 2;
-    const cb = (b.x1 + b.x2) / 2;
-    const tol = Math.min(a.x2 - a.x1, b.x2 - b.x1) * 0.5;
-    return Math.abs(ca - cb) <= tol ? a.y1 - b.y1 : cb - ca;
-  });
+  // 阅读顺序：整页竖排 = 从右到左；分段竖排（世系图/表格）= 先分段（上→下、右→左）再段内从右到左
+  const ordered = readingOrder(merged, W, H);
 
   const nx = (v: number) => Math.max(0, Math.min(1000, (v / W) * 1000));
   const ny = (v: number) => Math.max(0, Math.min(1000, (v / H) * 1000));
-  const columns: BaiduColumn[] = merged.map((m) => {
+  const columns: BaiduColumn[] = ordered.map((m) => {
     const ok = m.chars.length > 0 && m.chars.map((x) => x.c).join('') === m.text;
     return {
       text: m.text,
