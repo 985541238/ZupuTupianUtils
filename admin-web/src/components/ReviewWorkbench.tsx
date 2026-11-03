@@ -2021,7 +2021,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                   <span className="text-[10px] text-[#C7C7CC]">检测中…</span>
                 )}
               </div>
-              <div className="grid grid-cols-3 gap-1 p-1 bg-[#E5E5EA]/70 rounded-xl">
+              <div className="grid grid-cols-4 gap-1 p-1 bg-[#E5E5EA]/70 rounded-xl">
                 {PROCESS_MODES.map((m) => {
                   const on = activeMode === m.key;
                   const recommended = detectedMode === m.key;

@@ -8,6 +8,7 @@ export interface NestParams {
   contrast: number;
   /** 0~1 destain strength */
   stain: number;
+  strongDestain?: boolean;
   autoCrop: boolean;
   cropPadding: number;
 }
@@ -30,7 +31,7 @@ export const DEFAULT_UI_PARAMS: ProcessParams = {
 };
 
 /** 内置处理模式：选中后套用这组滑块值，用户之后仍可手动微调（变为「自定义」）。 */
-export type ProcessMode = 'auto' | 'standard' | 'stained' | 'faint';
+export type ProcessMode = 'auto' | 'standard' | 'stained' | 'faint' | 'strongStain';
 
 export interface ProcessModeDef {
   key: Exclude<ProcessMode, 'auto'>;
@@ -53,6 +54,12 @@ export const PROCESS_MODES: ProcessModeDef[] = [
     params: { contrastThreshold: 72, denoiseStrength: 80, sharpenStrength: 30, stainStrength: 85 },
   },
   {
+    key: 'strongStain',
+    label: '强力去污',
+    hint: '大片墨渍/黑斑/脏底：强力抬白背景污渍，尽量保留文字结构',
+    params: { contrastThreshold: 78, denoiseStrength: 100, sharpenStrength: 42, stainStrength: 100, strongDestain: true },
+  },
+  {
     key: 'faint',
     label: '字迹增强',
     hint: '复印淡、字不清：保留淡墨细笔，同时去污去噪并加锐',
@@ -73,6 +80,7 @@ export function matchMode(p: ProcessParams): Exclude<ProcessMode, 'auto'> | null
       m.params.denoiseStrength === p.denoiseStrength &&
       m.params.sharpenStrength === p.sharpenStrength &&
       (m.params.stainStrength ?? 40) === (p.stainStrength ?? 40)
+      && Boolean(m.params.strongDestain) === Boolean(p.strongDestain)
     ) {
       return m.key;
     }
@@ -90,6 +98,7 @@ export function uiToNestParams(p: ProcessParams): NestParams {
     threshold: 60 + (p.contrastThreshold / 100) * 180,
     contrast: 0.4 + (p.sharpenStrength / 100) * 3.2,
     stain: Math.max(0, Math.min(1, stainPct / 100)),
+    strongDestain: Boolean(p.strongDestain),
     autoCrop: false,
     cropPadding: DEFAULT_CROP_PADDING,
   };
@@ -115,6 +124,7 @@ export function nestToUiParams(raw: any): ProcessParams {
     contrastThreshold: Math.round(Math.max(0, Math.min(100, ((threshold - 60) / 180) * 100))),
     sharpenStrength: Math.round(Math.max(0, Math.min(100, ((contrast - 0.4) / 3.2) * 100))),
     stainStrength: Math.round(Math.max(0, Math.min(100, stain * 100))),
+    strongDestain: Boolean(p.strongDestain),
   };
 }
 

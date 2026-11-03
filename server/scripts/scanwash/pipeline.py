@@ -39,7 +39,7 @@ def imwrite_gray(path: Path, gray: np.ndarray) -> None:
     encoded.tofile(str(path))
 
 
-def _destain_gray(bgr: np.ndarray, stain: float) -> np.ndarray:
+def _destain_gray(bgr: np.ndarray, stain: float, strong_destain: bool = False) -> np.ndarray:
     """转灰并抑制黄/褐/红污渍：墨是中性色（R≈B），污渍偏暖（R高B低）。
     stain 越大，偏暖处越往白推；中性墨不受影响。返回 uint8 灰度。"""
     b, g, r = cv2.split(bgr.astype(np.float32))
@@ -48,6 +48,14 @@ def _destain_gray(bgr: np.ndarray, stain: float) -> np.ndarray:
     if s > 0:
         warm = np.clip(r - b, 0.0, 255.0)  # 黄/褐/红：R 明显高于 B
         gray = gray + s * 1.3 * warm
+    if strong_destain:
+        # 强力模式处理大片黑斑/脏底：抬高低频背景，保留局部文字对比，
+        # 后续 Sauvola 和连通域继续负责保字与过滤孤立噪点。
+        # 先轻度平滑高频脏点，避免把黑色颗粒作为文字证据带入成品。
+        smooth = cv2.GaussianBlur(gray, (0, 0), 0.85)
+        background = cv2.GaussianBlur(smooth, (0, 0), 18.0)
+        lift = np.clip(250.0 - background, 0.0, 140.0) * 1.12
+        gray = smooth + lift
     return np.clip(gray, 0, 255).astype(np.uint8)
 
 
@@ -70,7 +78,11 @@ def process_page(
 
     geometry = correct(work_src, tier)
     bgr = geometry.bgr if geometry.bgr is not None else cv2.cvtColor(geometry.gray, cv2.COLOR_GRAY2BGR)
-    gray_in = _destain_gray(bgr, getattr(preset, "stain", 0.0))
+    gray_in = _destain_gray(
+        bgr,
+        getattr(preset, "stain", 0.0),
+        bool(getattr(preset, "strong_destain", False)),
+    )
 
     gray = normalize(gray_in, preset)
     ink = build_mask(gray, preset)

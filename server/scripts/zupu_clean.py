@@ -33,7 +33,7 @@ def _through_mid(x: float, x_mid: float, y0: float, y_mid: float, y1: float) -> 
     return y_mid + t * (y1 - y_mid)
 
 
-def map_overrides(tier: str, threshold: float, denoise: float, contrast: float, stain: float | None = None) -> Preset:
+def map_overrides(tier: str, threshold: float, denoise: float, contrast: float, stain: float | None = None, strong_destain: bool = False) -> Preset:
     """审阅页滑块 → 覆盖该档内置预设的几项（算法 demo 版）。
     推荐档（threshold 60% / denoise 55% / sharpen 35% / stain 40%）落在各参数中点，默认即内置值附近。
 
@@ -60,6 +60,7 @@ def map_overrides(tier: str, threshold: float, denoise: float, contrast: float, 
         sharpen=sharpen,
         denoise=float(np.clip(d, 0.0, 1.0)),
         stain=s,
+        strong_destain=bool(strong_destain),
     )
 
 
@@ -71,6 +72,7 @@ def run_page_overridden(
     contrast: float,
     auto_crop: bool,
     stain: float | None = None,
+    strong_destain: bool = False,
 ):
     started = time.perf_counter()
     source = imread(path)
@@ -84,7 +86,7 @@ def run_page_overridden(
     else:
         raise ValueError(f"未知预设: {preset_name}")
 
-    preset = map_overrides(tier, threshold, denoise, contrast, stain=stain)
+    preset = map_overrides(tier, threshold, denoise, contrast, stain=stain, strong_destain=strong_destain)
     png, page_meta = process_page(source, tier, preset, auto_crop)
     out_h, out_w = png.shape
     meta = {
@@ -143,6 +145,7 @@ def main() -> int:
     p.add_argument("--contrast", type=float, default=1.2)
     # Destain 0~1 (UI 0~100% → Nest stain → here). Default mild ~0.40.
     p.add_argument("--stain", type=float, default=0.4)
+    p.add_argument("--strong-destain", action="store_true")
     p.add_argument("--min-area", type=float, default=35)
     # Product: full page unless Nest already carved a manual cropBox. Default OFF.
     p.add_argument("--auto-crop", type=int, default=0)
@@ -168,6 +171,7 @@ def main() -> int:
             args.contrast,
             bool(args.auto_crop) and not manual_crop,
             stain=float(args.stain),
+            strong_destain=bool(args.strong_destain),
         )
 
         if manual_crop:

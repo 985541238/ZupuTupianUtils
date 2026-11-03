@@ -22,6 +22,7 @@ class Preset:
     # 审阅页滑块覆盖位：去污渍力度（连通域剔除）、去渍力度（彩色黄褐斑抑制）
     denoise: float = 0.5
     stain: float = 0.4
+    strong_destain: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)

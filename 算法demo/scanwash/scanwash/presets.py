@@ -15,6 +15,7 @@ class Preset:
     deskew: bool
     crop_text_block: bool
     keep_gutter: bool
+    strong_destain: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)

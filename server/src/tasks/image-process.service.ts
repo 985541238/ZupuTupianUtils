@@ -13,6 +13,7 @@ export type ProcessParams = {
   contrast: number; // CLAHE clipLimit ~0.8-3
   /** 0~1 destain strength (mid-scale / LAB blot / round-blob filter). Mild default. */
   stain?: number;
+  strongDestain?: boolean;
   autoCrop: boolean;
   cropPadding: number;
   method?: 'adaptive' | 'sauvola' | 'relative';
@@ -27,6 +28,7 @@ export const DEFAULT_PARAMS: ProcessParams = {
   denoise: 6,
   contrast: 1.5,
   stain: 0.4,
+  strongDestain: false,
   // Product: only WeChat/manual cropBox may crop. Never auto content-crop.
   autoCrop: false,
   cropPadding: 16,
@@ -55,6 +57,7 @@ export class ImageProcessService {
       } else {
         p.stain = Math.max(0, Math.min(1, p.stain));
       }
+      p.strongDestain = p.strongDestain === true;
       return p;
     } catch {
       return { ...fallback };
@@ -307,6 +310,7 @@ export class ImageProcessService {
       '--crop-padding',
       String(params.cropPadding ?? 16),
     ];
+    if (params.strongDestain) args.push('--strong-destain');
     if (crop && crop.w > 0 && crop.h > 0) {
       args.push('--crop', `${crop.x},${crop.y},${crop.w},${crop.h}`);
     }

@@ -19,6 +19,8 @@ export interface ProcessParams {
   sharpenStrength: number; // 0 - 100
   /** Destain (dot mold / yellow-brown blot), 0-100. Default ~40. */
   stainStrength: number;
+  /** 强力背景去污模式。 */
+  strongDestain?: boolean;
 }
 
 export interface PageStats {
@@ -81,6 +83,7 @@ export interface Task {
   cleanModelId?: number | null;
   ocrModelId?: number | null;
   estimatedCost?: number | null;
+  batchCrop?: { enabled: true; quads: number[][][] } | null;
   actualCost?: number;
   errorMessage?: string | null;
   /** 出错类型:平台，如 arrears:ark */
