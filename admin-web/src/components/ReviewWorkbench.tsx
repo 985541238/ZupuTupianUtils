@@ -1153,6 +1153,14 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
     window.addEventListener('mouseup', handleMouseUp);
   };
 
+  /** 在审阅画布内滚轮缩放，避免滚动页面或触发浏览器默认行为。 */
+  const handleViewerWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    if (cropSelecting) return;
+    e.preventDefault();
+    const direction = e.deltaY < 0 ? 1 : -1;
+    setZoomLevel((z) => Math.max(0.6, Math.min(2.5, Number((z + direction * 0.1).toFixed(2)))));
+  };
+
 
 
   const passedCount = task.items.filter((it) => it.reviewStatus === 'passed').length;
@@ -1483,6 +1491,8 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
             className={`flex-1 flex items-center justify-center p-8 relative overflow-hidden ${
               cropSelecting ? 'pb-24' : ''
             }`}
+            onWheel={handleViewerWheel}
+            title={cropSelecting ? undefined : '滚动鼠标滚轮缩放图片'}
           >
             {isProcessing && (
               <div className="absolute top-16 right-6 z-30 flex items-center gap-2 px-3 py-1.5 apple-glass-heavy border border-black/[0.08] rounded-full text-[#1D1D1F] text-xs shadow-sm">

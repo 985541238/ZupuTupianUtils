@@ -27,11 +27,12 @@ PRESETS: dict[str, Preset] = {
         sauvola_k=0.15,
         bh_percentile=97,
         keep_dark_pct=60,
-        sharpen=0.55,
+        sharpen=0.6,
         white_target=252,
         deskew=True,
         crop_text_block=False,
-        keep_gutter=True,
+        # 不凭文字列间距推断书缝；原图没有折痕时不能凭空生成竖向暗带。
+        keep_gutter=False,
     ),
     "aged": Preset(
         name="aged",
@@ -39,11 +40,12 @@ PRESETS: dict[str, Preset] = {
         sauvola_k=0.20,
         bh_percentile=96,
         keep_dark_pct=55,
-        sharpen=0.7,
+        sharpen=0.72,
         white_target=250,
         deskew=True,
         crop_text_block=False,
-        keep_gutter=True,
+        # 不凭文字列间距推断书缝；原图没有折痕时不能凭空生成竖向暗带。
+        keep_gutter=False,
     ),
     "damaged": Preset(
         name="damaged",

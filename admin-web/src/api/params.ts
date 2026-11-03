@@ -55,8 +55,8 @@ export const PROCESS_MODES: ProcessModeDef[] = [
   {
     key: 'faint',
     label: '字迹增强',
-    hint: '复印淡、字不清：多留淡墨细笔并加锐',
-    params: { contrastThreshold: 28, denoiseStrength: 35, sharpenStrength: 55, stainStrength: 25 },
+    hint: '复印淡、字不清：保留淡墨细笔，同时去污去噪并加锐',
+    params: { contrastThreshold: 34, denoiseStrength: 60, sharpenStrength: 60, stainStrength: 55 },
   },
 ];
 

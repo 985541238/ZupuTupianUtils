@@ -251,7 +251,9 @@ def main() -> int:
     if base is not None:
         n = base
         t_o = 148
-        o_ink = base < 160  # 算法成品已是白底黑字
+        # 算法成品的灰色边缘/淡墨也要进入融合候选；否则模型一旦把浅笔判成污渍，
+        # 后面只能从纯白底图里删除它，无法再保护原有的低对比度笔画。
+        o_ink = base < 205  # 算法成品已是白底深色字，放宽阈值优先保字
     else:
         n = normalize_bg(o)
         t_o = otsu(n, 120, 225)

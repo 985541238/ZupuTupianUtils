@@ -1000,7 +1000,7 @@ function siliconflowSize(id: string, w: number, h: number): string | null {
   return best;
 }
 
-const NEGATIVE_PROMPT = '改字，错字，补字，漏字，增加文字，删除文字，变形，模糊，水印，彩色，纸张纹理，阴影，边框装饰';
+const NEGATIVE_PROMPT = '改字，错字，补字，漏字，增加文字，删除文字，重绘文字，浅灰笔画被擦除，淡墨被当成污渍，断笔被填白，过度二值化，过度锐化，变形，模糊，水印，彩色，纸张纹理，阴影，边框装饰';
 
 function outputRoot() {
   return process.env.OUTPUT_ROOT || path.join(process.cwd(), '..', 'data', 'output');

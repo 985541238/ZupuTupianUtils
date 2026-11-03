@@ -26,7 +26,7 @@ def build_mask(gray: np.ndarray, preset: Preset) -> MaskResult:
     sauvola = _sauvola(image.astype(np.float32), preset.sauvola_k)
     in_band, peaks, spacing = _column_bands(sauvola, width)
     cut = _gray_cut(image, sauvola, in_band, preset.keep_dark_pct)
-    mask = _combine(image, stroke, sauvola, in_band, preset.keep_dark_pct)
+    mask = _combine(image, stroke, sauvola, in_band, preset.keep_dark_pct, preset.denoise)
     mask = _filter_components(mask, height, width)
     return MaskResult(mask=mask, stroke=stroke, cut=cut, peaks=peaks, spacing=spacing)
 
@@ -95,6 +95,7 @@ def _combine(
     sauvola: np.ndarray,
     in_band: np.ndarray,
     keep_dark_pct: float,
+    denoise: float,
 ) -> np.ndarray:
     mask = np.zeros(image.shape, dtype=bool)
     for start, end in _runs(in_band):
@@ -104,7 +105,12 @@ def _combine(
             cut = 100.0
         else:
             cut = float(np.percentile(image[:, start:end][region_ink], keep_dark_pct))
-        mask[:, start:end] = region_stroke | (region_ink & (image[:, start:end] < cut))
+        region_image = image[:, start:end]
+        strong_ink = region_ink & (region_image < cut)
+        weak_extra = 72.0 - 28.0 * float(np.clip(denoise, 0.0, 1.0))
+        weak_cut = max(cut + weak_extra, 110.0)
+        weak_ink = region_ink & (region_image < weak_cut)
+        mask[:, start:end] = region_stroke | strong_ink | weak_ink
     outside = ~in_band
     if outside.any():
         mask[:, outside] |= stroke[:, outside] & (image[:, outside] < 60)

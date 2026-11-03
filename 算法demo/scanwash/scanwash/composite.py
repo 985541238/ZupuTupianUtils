@@ -18,23 +18,32 @@ def composite(gray: np.ndarray, mask: np.ndarray, cut: float, sharpen: float) ->
     solid = _fill_stroke_holes(image)
     smooth = _smooth_edges(solid).astype(np.float32)
     wide = cv2.GaussianBlur(smooth, (0, 0), 0.9)
-    crisp = np.clip(smooth + float(sharpen) * 1.6 * (smooth - wide), 0, 255)
+    # 适度加强局部边缘对比，补回扫描造成的浅笔断续；不做硬阈值，避免把细笔变成锯齿。
+    crisp = np.clip(smooth + float(sharpen) * 2.1 * (smooth - wide), 0, 255)
 
     inside = crisp[mask]
     outside = crisp[~mask]
     black = float(np.percentile(inside, 30))
     paper = float(np.percentile(outside, 40)) if outside.size else black + 80.0
-    white = black + max(paper - black, 24.0) * 0.58
+    # 白底映射不能过早压扁中灰；否则原图仍有信息的淡墨会被推成接近纯白。
+    white = black + max(paper - black, 24.0) * 0.82
     tone = np.clip((crisp - black) / (white - black), 0.0, 1.0)
     ink = 255.0 * tone
 
     # 细笔的灰边贴着墨心，这段过渡要留下来，轮廓才不会收成一个像素。
-    # 远离墨心的浅灰才是透字。
+    # 淡墨笔画可能没有足够深的墨心；文字掩膜本身也是有效证据，不能刷白。
     core = crisp <= (black + 8.0)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-    near = cv2.dilate(core.astype(np.uint8), kernel).astype(bool)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
+    near_source = core | mask
+    near = cv2.dilate(near_source.astype(np.uint8), kernel).astype(bool)
     out = ink.copy()
     out[(~near) & (out < 252)] = 255.0
+    # 只加深文字近邻的浅灰笔画，不扩张掩膜，避免把污渍重新带回来。
+    faint = near & (out < 250.0)
+    ink_power = 1.12 + 0.10 * float(np.clip(sharpen, 0.0, 1.6))
+    out[faint] = 255.0 * np.power(np.clip(out[faint] / 255.0, 0.0, 1.0), ink_power)
+    ink_region = cv2.dilate(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))).astype(bool)
+    out[ink_region] = np.minimum(out[ink_region], 195.0)
     alpha = 1.0 - out / 255.0
     return out.astype(np.float32), alpha
 

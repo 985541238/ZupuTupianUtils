@@ -26,9 +26,10 @@ def build_mask(gray: np.ndarray, preset: Preset) -> MaskResult:
     sauvola = _sauvola(image.astype(np.float32), preset.sauvola_k)
     in_band, peaks, spacing = _column_bands(sauvola, width)
     cut = _gray_cut(image, sauvola, in_band, preset.keep_dark_pct)
-    mask = _combine(image, stroke, sauvola, in_band, preset.keep_dark_pct)
-    # 去污渍滑块（denoise 0~1）：越大，剔除越大的孤立小块（点渍/霉点），同时也会吃掉很小的笔画点
-    min_area = int(round(16 + float(getattr(preset, "denoise", 0.5)) * 160))
+    mask = _combine(image, stroke, sauvola, in_band, preset.keep_dark_pct, preset.denoise)
+    # 去污渍滑块（denoise 0~1）：只过滤孤立污点；细笔可能被扫描成多个小连通块，
+    # 阈值不能过高，否则会把浅墨笔画当成污渍删掉。
+    min_area = int(round(12 + float(getattr(preset, "denoise", 0.5)) * 100))
     mask = _filter_components(mask, height, width, min_area)
     return MaskResult(mask=mask, stroke=stroke, cut=cut, peaks=peaks, spacing=spacing)
 
@@ -97,6 +98,7 @@ def _combine(
     sauvola: np.ndarray,
     in_band: np.ndarray,
     keep_dark_pct: float,
+    denoise: float,
 ) -> np.ndarray:
     mask = np.zeros(image.shape, dtype=bool)
     for start, end in _runs(in_band):
@@ -106,7 +108,14 @@ def _combine(
             cut = 100.0
         else:
             cut = float(np.percentile(image[:, start:end][region_ink], keep_dark_pct))
-        mask[:, start:end] = region_stroke | (region_ink & (image[:, start:end] < cut))
+        region_image = image[:, start:end]
+        strong_ink = region_ink & (region_image < cut)
+        # Sauvola 已经确认是局部笔画、但灰度偏浅的部分不能被 keep_dark_pct 再次删掉。
+        # 这是弱笔候选，不是全局提亮；后面仍经过连通域去噪，孤立污点会被过滤。
+        weak_extra = 72.0 - 28.0 * float(np.clip(denoise, 0.0, 1.0))
+        weak_cut = max(cut + weak_extra, 110.0)
+        weak_ink = region_ink & (region_image < weak_cut)
+        mask[:, start:end] = region_stroke | strong_ink | weak_ink
     outside = ~in_band
     if outside.any():
         mask[:, outside] |= stroke[:, outside] & (image[:, outside] < 60)

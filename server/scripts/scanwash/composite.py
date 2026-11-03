@@ -18,24 +18,38 @@ def composite(gray: np.ndarray, mask: np.ndarray, cut: float, sharpen: float) ->
     solid = _fill_stroke_holes(image)
     smooth = _smooth_edges(solid).astype(np.float32)
     wide = cv2.GaussianBlur(smooth, (0, 0), 0.9)
-    crisp = np.clip(smooth + float(sharpen) * 1.6 * (smooth - wide), 0, 255)
+    # 适度加强局部边缘对比，补回扫描造成的浅笔断续；不做硬阈值，避免把细笔变成锯齿。
+    crisp = np.clip(smooth + float(sharpen) * 2.1 * (smooth - wide), 0, 255)
 
     inside = crisp[mask]
     outside = crisp[~mask]
     black = float(np.percentile(inside, 30))
     paper = float(np.percentile(outside, 40)) if outside.size else black + 80.0
-    white = black + max(paper - black, 24.0) * 0.72
+    # 白底映射不能过早压扁中灰；否则原图仍有信息的淡墨会被推成接近纯白。
+    white = black + max(paper - black, 24.0) * 0.90
     tone = np.clip((crisp - black) / (white - black), 0.0, 1.0)
     ink = 255.0 * tone
 
     # 细笔的灰边贴着墨心，这段过渡要留下来，轮廓才不会收成一个像素。
-    # 远离墨心的浅灰才是透字。
+    # 淡墨笔画可能没有足够深的墨心；已进入文字掩膜的像素同样是文字证据，
+    # 也要参与近邻区域计算，否则后面的刷白会把浅笔画截断。
     core = crisp <= (black + 24.0)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
-    near = cv2.dilate(core.astype(np.uint8), kernel).astype(bool)
+    # 扫描淡笔的有效灰边可能离深色墨心较远，保护带适度放宽，避免被刷白截断。
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
+    near_source = core | mask
+    near = cv2.dilate(near_source.astype(np.uint8), kernel).astype(bool)
     out = ink.copy()
     # 只把远离墨心、且确实接近纸色(偏亮)的浅灰当透字刷白；中等灰度是真笔画，保留
     out[(~near) & (out > 205)] = 255.0
+    # 掩膜内的浅笔画不再保持过淡：只对文字近邻的灰阶做轻微非线性压暗，
+    # 不扩张掩膜、不把背景污渍重新画回来。
+    faint = near & (out < 245.0)
+    ink_power = 1.18 + 0.12 * float(np.clip(sharpen, 0.0, 1.6))
+    out[faint] = 255.0 * np.power(np.clip(out[faint] / 255.0, 0.0, 1.0), ink_power)
+    # 用很小的圆核补回扫描造成的断续边缘，再给文字区域最低可见对比度；
+    # 只扩展 1 像素，不会把整片背景污渍带回来。
+    ink_region = cv2.dilate(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))).astype(bool)
+    out[ink_region] = np.minimum(out[ink_region], 180.0)
     alpha = 1.0 - out / 255.0
     return out.astype(np.float32), alpha
 
