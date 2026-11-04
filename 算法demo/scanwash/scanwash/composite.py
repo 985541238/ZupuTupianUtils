@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 
 
-def composite(gray: np.ndarray, mask: np.ndarray, cut: float, sharpen: float) -> tuple[np.ndarray, np.ndarray]:
+def composite(gray: np.ndarray, mask: np.ndarray, cut: float, sharpen: float, antique_mode: bool = False) -> tuple[np.ndarray, np.ndarray]:
     """返回 float32 成品和同尺寸的不透明度。掩膜外是白纸。
 
     轮廓跟归一化后的灰度走，不跟二值掩膜走。方形掩膜会把撇捺切成棱角，
@@ -44,6 +44,14 @@ def composite(gray: np.ndarray, mask: np.ndarray, cut: float, sharpen: float) ->
     out[faint] = 255.0 * np.power(np.clip(out[faint] / 255.0, 0.0, 1.0), ink_power)
     ink_region = cv2.dilate(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))).astype(bool)
     out[ink_region] = np.minimum(out[ink_region], 195.0)
+    if antique_mode:
+        protect = cv2.dilate(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (17, 17))).astype(bool)
+        dark = (out < 220).astype(np.uint8)
+        h_len = max(31, int(round(image.shape[1] / 24)) | 1)
+        v_len = max(31, int(round(image.shape[0] / 24)) | 1)
+        horizontal = cv2.morphologyEx(dark, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (h_len, 1))).astype(bool)
+        vertical = cv2.morphologyEx(dark, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, v_len))).astype(bool)
+        out[~(protect | horizontal | vertical)] = 255.0
     alpha = 1.0 - out / 255.0
     return out.astype(np.float32), alpha
 

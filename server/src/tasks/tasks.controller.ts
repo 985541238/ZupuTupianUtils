@@ -2,6 +2,7 @@ import sharp from 'sharp';
 import { warmViewProxy } from '../common/view-proxy';
 import {
   Body,
+  BadRequestException,
   Controller,
   Delete,
   Get,
@@ -71,6 +72,10 @@ class CreateTaskDto {
 
   @IsOptional()
   batchCrop?: { enabled?: boolean; quads?: number[][][] } | null;
+
+  @IsOptional()
+  @IsBoolean()
+  processingEnabled?: boolean;
 }
 
 class ProjectDto {
@@ -85,6 +90,14 @@ class ProjectDto {
   @IsOptional()
   @IsString()
   description?: string;
+
+  @IsOptional()
+  @IsString()
+  rootPath?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  autoStart?: boolean;
 }
 
 /** 审阅页预览图：长边最多 2200px 的 PNG（线稿类图片压缩率高），原尺寸成品仍在磁盘上 */
@@ -137,6 +150,11 @@ export class TasksController {
     return this.tasks.deleteProject(req.user.id, pid);
   }
 
+  @Get('projects/:pid/download')
+  downloadProject(@Req() req: any, @Param('pid', ParseIntPipe) pid: number, @Res() res: Response) {
+    return this.tasks.downloadProjectZip(req.user.id, pid, res);
+  }
+
   @Get(':id')
   get(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
     return this.tasks.get(req.user.id, id);
@@ -171,6 +189,15 @@ export class TasksController {
   ) {
     const img = await this.tasks.getImage(req.user.id, id, imageId);
     return this.tasks.imageView(img);
+  }
+
+  @Delete(':id/images/:imageId')
+  deleteImage(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('imageId', ParseIntPipe) imageId: number,
+  ) {
+    return this.tasks.deleteImage(req.user.id, id, imageId);
   }
 
   @Post(':id/images/:imageId/preview')
@@ -280,6 +307,26 @@ export class TasksController {
   ) {
     const img = await this.tasks.reprocessImage(req.user.id, id, imageId, body || {});
     return this.tasks.imageView(img);
+  }
+
+  @Put(':id/images/:imageId/split-crop')
+  async recropSplit(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('imageId', ParseIntPipe) imageId: number,
+    @Body() body: { quads?: number[][][]; rotation?: number; processingEnabled?: boolean },
+  ) {
+    try {
+      return await this.tasks.recropSplitPages(req.user.id, id, imageId, body?.quads || [], body?.rotation || 0, body?.processingEnabled === true);
+    } catch (error: any) {
+      if (error?.getStatus) throw error;
+      throw new BadRequestException(error?.message || '裁剪处理失败');
+    }
+  }
+
+  @Put(':id/images/:imageId/final-crop')
+  finalCrop(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Param('imageId', ParseIntPipe) imageId: number, @Body() body: { source: string; box: any; rotation?: number }) {
+    return this.tasks.applyFinalCrop(req.user.id, id, imageId, body?.source, body?.box, body?.rotation);
   }
 
   /** 切换当前结果：{ mode: 'algo' | 'ai' } */

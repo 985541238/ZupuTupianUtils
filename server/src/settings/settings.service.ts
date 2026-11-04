@@ -63,6 +63,16 @@ export class SettingsService implements OnModuleInit {
         const r = await this.models.update({ purpose: 'clean', prompt: legacy }, { prompt: DEFAULT_CLEAN_PROMPT });
         if (r.affected) this.logger.log(`已把 ${r.affected} 个图片处理模型的提示词升级为新版（只去污渍、整体不变）`);
       }
+      // 早期管理页曾写入英文版默认词。它明确要求 "NOT for regeneration"，
+      // 不会与当前的受约束重绘策略匹配；只识别这一段固定的旧模板，不触碰用户自定义词。
+      const englishLegacy = (await this.models.find({ where: { purpose: 'clean' } })).filter((m) => {
+        const p = String(m.prompt || '').trim().toLowerCase();
+        return p.startsWith('this is a conservative cleaning and restoration task for an ancient genealogical book') && p.includes('not for regeneration');
+      });
+      if (englishLegacy.length) {
+        await this.models.save(englishLegacy.map((m) => ({ ...m, prompt: DEFAULT_CLEAN_PROMPT })));
+        this.logger.log(`已把 ${englishLegacy.length} 个英文旧版图片处理提示词升级为受约束重绘版`);
+      }
       for (const legacy of LEGACY_OCR_PROMPTS) {
         const r = await this.models.update({ purpose: 'ocr', prompt: legacy }, { prompt: DEFAULT_OCR_PROMPT });
         if (r.affected) this.logger.log(`已把 ${r.affected} 个文字识别模型的提示词升级为新版（拆分双行小字、框更紧）`);

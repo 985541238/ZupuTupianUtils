@@ -17,6 +17,7 @@ interface TopNavProps {
   onOpenAccount?: () => void;
   activeTaskName?: string;
   activeTaskProgress?: { reviewed: number; total: number };
+  hideWorkbenchBack?: boolean;
 }
 
 export const TopNav: React.FC<TopNavProps> = ({
@@ -30,6 +31,7 @@ export const TopNav: React.FC<TopNavProps> = ({
   onOpenAccount,
   activeTaskName,
   activeTaskProgress,
+  hideWorkbenchBack = false,
 }) => {
   const navBtn = (active: boolean) =>
     `h-9 px-4 rounded-xl text-sm font-semibold flex items-center gap-2 transition-colors cursor-pointer ${
@@ -42,15 +44,19 @@ export const TopNav: React.FC<TopNavProps> = ({
       <div className="flex items-center gap-5 min-w-0">
         {currentTab === 'workbench' || currentTab === 'ocrReview' ? (
           <div className="flex items-center gap-3 min-w-0">
-            <button
-              onClick={currentTab === 'ocrReview' && onBackToOcr ? onBackToOcr : onBackToTasks}
-              className="flex items-center gap-1.5 h-9 px-3.5 rounded-xl bg-white hover:bg-[#F5F5F7] border border-black/[0.08] text-sm font-semibold text-[#1D1D1F] transition-all cursor-pointer shadow-2xs"
-              title={currentTab === 'ocrReview' ? '返回 OCR 任务列表' : '返回任务列表'}
-            >
-              <ChevronLeft className="w-4 h-4 stroke-[2.2] text-[#0071E3]" />
-              <span>{currentTab === 'ocrReview' ? '返回 OCR 列表' : '返回任务列表'}</span>
-            </button>
-            <div className="h-5 w-px bg-black/[0.08]" />
+            {!(currentTab === 'workbench' && hideWorkbenchBack) && (
+              <>
+                <button
+                  onClick={currentTab === 'ocrReview' && onBackToOcr ? onBackToOcr : onBackToTasks}
+                  className="flex items-center gap-1.5 h-9 px-3.5 rounded-xl bg-white hover:bg-[#F5F5F7] border border-black/[0.08] text-sm font-semibold text-[#1D1D1F] transition-all cursor-pointer shadow-2xs"
+                  title={currentTab === 'ocrReview' ? '返回 OCR 任务列表' : '返回所属项目的卷列表'}
+                >
+                  <ChevronLeft className="w-4 h-4 stroke-[2.2] text-[#0071E3]" />
+                  <span>{currentTab === 'ocrReview' ? '返回 OCR 列表' : '返回卷列表'}</span>
+                </button>
+                <div className="h-5 w-px bg-black/[0.08]" />
+              </>
+            )}
             <div className="flex items-center gap-2 text-sm min-w-0">
               <span className="text-[#86868B] hidden sm:inline">正在审阅：</span>
               <span className="text-[#1D1D1F] font-semibold max-w-[280px] md:max-w-[420px] truncate">

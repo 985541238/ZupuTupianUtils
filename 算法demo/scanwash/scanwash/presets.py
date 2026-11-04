@@ -16,6 +16,7 @@ class Preset:
     crop_text_block: bool
     keep_gutter: bool
     strong_destain: bool = False
+    antique_mode: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)

@@ -23,6 +23,7 @@ class Preset:
     denoise: float = 0.5
     stain: float = 0.4
     strong_destain: bool = False
+    antique_mode: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)

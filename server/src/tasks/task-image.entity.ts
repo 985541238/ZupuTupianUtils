@@ -15,6 +15,14 @@ export class TaskImage {
   @Column({ name: 'source_path', length: 1024 })
   sourcePath: string;
 
+  /** 双页拆分时保留的原始双页文件；单页为空。 */
+  @Column({ name: 'original_source_path', length: 1024, nullable: true })
+  originalSourcePath: string | null;
+
+  /** 双页拆分时本页在原图中的四点框 JSON。 */
+  @Column({ name: 'split_quad', type: 'text', nullable: true })
+  splitQuad: string | null;
+
   @Column({ name: 'result_path', length: 1024, nullable: true })
   resultPath: string | null;
 
@@ -58,6 +66,9 @@ export class TaskImage {
 
   @Column({ name: 'crop_box', type: 'text', nullable: true })
   cropBox: string | null;
+
+  @Column({ name: 'final_crop', type: 'text', nullable: true })
+  finalCrop: string | null;
 
   @Column({ name: 'error_message', type: 'text', nullable: true })
   errorMessage: string | null;

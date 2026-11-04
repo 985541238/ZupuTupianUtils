@@ -27,6 +27,13 @@ def build_mask(gray: np.ndarray, preset: Preset) -> MaskResult:
     in_band, peaks, spacing = _column_bands(sauvola, width)
     cut = _gray_cut(image, sauvola, in_band, preset.keep_dark_pct)
     mask = _combine(image, stroke, sauvola, in_band, preset.keep_dark_pct, preset.denoise)
+    if bool(getattr(preset, "antique_mode", False)):
+        weak = _antique_weak_mask(image)
+        text_neighborhood = cv2.dilate(
+            mask.astype(np.uint8),
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11)),
+        ).astype(bool)
+        mask |= weak & text_neighborhood
     mask = _filter_components(mask, height, width)
     return MaskResult(mask=mask, stroke=stroke, cut=cut, peaks=peaks, spacing=spacing)
 
@@ -39,6 +46,25 @@ def _blackhat(image: np.ndarray) -> np.ndarray:
 
 def _sauvola(image: np.ndarray, k: float) -> np.ndarray:
     window = odd_clamp(min(image.shape) / 45, 31, 81)
+    mean = cv2.boxFilter(image, ddepth=-1, ksize=(window, window), borderType=cv2.BORDER_REFLECT)
+    square = cv2.boxFilter(image * image, ddepth=-1, ksize=(window, window), borderType=cv2.BORDER_REFLECT)
+    deviation = np.sqrt(np.maximum(square - mean * mean, 0))
+    threshold = mean * (1 + k * (deviation / 128.0 - 1))
+    return image < threshold
+
+
+def _antique_weak_mask(image: np.ndarray) -> np.ndarray:
+    fine = _local_sauvola(image, 41, 0.16)
+    coarse = _local_sauvola(image, 81, 0.22)
+    mean = cv2.boxFilter(image, ddepth=-1, ksize=(41, 41), borderType=cv2.BORDER_REFLECT)
+    square = cv2.boxFilter(image * image, ddepth=-1, ksize=(41, 41), borderType=cv2.BORDER_REFLECT)
+    deviation = np.sqrt(np.maximum(square - mean * mean, 0))
+    niblack = image < (mean - 0.10 * deviation)
+    return (fine | coarse | niblack) & (image < 225)
+
+
+def _local_sauvola(image: np.ndarray, window: int, k: float) -> np.ndarray:
+    window = odd_clamp(window, 15, 121)
     mean = cv2.boxFilter(image, ddepth=-1, ksize=(window, window), borderType=cv2.BORDER_REFLECT)
     square = cv2.boxFilter(image * image, ddepth=-1, ksize=(window, window), borderType=cv2.BORDER_REFLECT)
     deviation = np.sqrt(np.maximum(square - mean * mean, 0))

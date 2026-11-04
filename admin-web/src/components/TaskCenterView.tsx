@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { Task, ScanItem } from '../types';
-import { api, downloadUrl, authImageUrl } from '../api/client';
+import { api, downloadUrl, projectDownloadUrl, authImageUrl } from '../api/client';
 import { BatchCropDialog, BatchCropConfig } from './BatchCropDialog';
 import { formatProcessingTime } from '../api/mappers';
 import { inferErrorCode } from './AiProblemDialog';
@@ -8,7 +8,6 @@ import {
   Play,
   Download,
   RotateCcw,
-  Sliders,
   CheckCircle2,
   Plus,
   Clock,
@@ -39,20 +38,18 @@ interface TaskCenterViewProps {
   onShowProblem?: (task: Task) => void;
   /** 打开引导配置；onDone 在配置完成后回调 */
   onOpenSetup?: (platform?: string | null, step?: 1 | 2 | 3, onDone?: () => void) => void;
+  /** 从卷审阅页返回时，直接打开所属项目的卷列表；未归类卷使用 none。 */
+  initialProjectFilter?: 'all' | 'none' | number;
 }
-
-/** 任务卡上的「已通过 / 未通过」下载按钮，暂时隐藏 */
-const SHOW_TASK_DOWNLOAD = false;
 
 type TimeFilterType = 'all' | 'today' | 'week' | 'month' | 'custom';
 
 /** 列表里的阶段：只分三类。未处理、处理中、暂停（失败）都算「待处理」，卡片上的状态标签仍会显示具体情况 */
-type Stage = 'pending' | 'reviewing' | 'completed';
+type Stage = 'pending' | 'completed';
 function stageOf(t: Task): Stage {
   switch (t.nestStatus) {
-    case 'reviewing':
-      return 'reviewing';
     case 'completed':
+    case 'reviewing': // 兼容旧数据：历史“审阅中”现在按已完成展示
       return 'completed';
     default:
       return 'pending';
@@ -62,7 +59,6 @@ function stageOf(t: Task): Stage {
 const STAGE_TABS: { key: 'all' | Stage; label: string; tone: string }[] = [
   { key: 'all', label: '全部', tone: 'text-[#1D1D1F]' },
   { key: 'pending', label: '待处理', tone: 'text-[#FF9500]' },
-  { key: 'reviewing', label: '审阅中', tone: 'text-[#0071E3]' },
   { key: 'completed', label: '已完成', tone: 'text-[#34C759]' },
 ];
 
@@ -97,6 +93,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   onRefresh,
   onShowProblem,
   onOpenSetup,
+  initialProjectFilter = 'all',
 }) => {
   // Filters: Status, Time, Search
   const [statusFilter, setStatusFilter] = useState<'all' | Stage>('all');
@@ -108,14 +105,21 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   type ProjectRow = { id: number; name: string; surname?: string; volumeCount: number; totalPages: number; processing: number; reviewing: number; completed: number };
   const [projects, setProjects] = useState<ProjectRow[]>([]);
   /** 'all' = 项目总览（第一层）；number / 'none' = 进入某个项目看它的卷（第二层） */
-  const [projectFilter, setProjectFilter] = useState<'all' | 'none' | number>('all');
+  const [projectFilter, setProjectFilter] = useState<'all' | 'none' | number>(initialProjectFilter);
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectSurname, setNewProjectSurname] = useState('');
+  const [newProjectRoot, setNewProjectRoot] = useState('');
+  const [projectSearchQuery, setProjectSearchQuery] = useState('');
+  const [currentProjectPage, setCurrentProjectPage] = useState(1);
+  const [pendingProjectFiles, setPendingProjectFiles] = useState<File[]>([]);
+  const [pendingProjectLabel, setPendingProjectLabel] = useState('');
+  const [projectUploadProg, setProjectUploadProg] = useState<{ done: number; total: number } | null>(null);
   const [creatingProject, setCreatingProject] = useState(false);
   const [projectDeleteTarget, setProjectDeleteTarget] = useState<ProjectRow | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Task | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const projectDirInputRef = React.useRef<HTMLInputElement>(null);
 
   // Pagination: 5 items per page
   const [currentPage, setCurrentPage] = useState(1);
@@ -154,6 +158,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   const [browseError, setBrowseError] = useState('');
   const [creating, setCreating] = useState(false);
   const [batchCrop, setBatchCrop] = useState(false);
+  const [imageProcessingEnabled, setImageProcessingEnabled] = useState(true);
   const [batchCropConfig, setBatchCropConfig] = useState<BatchCropConfig | null>(null);
   const [batchCropImageUrl, setBatchCropImageUrl] = useState('');
   const [showBatchCrop, setShowBatchCrop] = useState(false);
@@ -165,6 +170,20 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     [tasks, projectFilter],
   );
   const stageCount = (k: 'all' | Stage) => (k === 'all' ? scopeTasks.length : scopeTasks.filter((t) => stageOf(t) === k).length);
+
+  const filteredProjects = useMemo(() => {
+    const query = projectSearchQuery.trim().toLowerCase();
+    if (!query) return projects;
+    return projects.filter((project) =>
+      [project.name, project.surname || ''].some((value) => value.toLowerCase().includes(query)),
+    );
+  }, [projects, projectSearchQuery]);
+  const projectPageSize = 9;
+  const projectTotalPages = Math.max(1, Math.ceil(filteredProjects.length / projectPageSize));
+  const paginatedProjects = useMemo(() => {
+    const start = (currentProjectPage - 1) * projectPageSize;
+    return filteredProjects.slice(start, start + projectPageSize);
+  }, [filteredProjects, currentProjectPage]);
 
   // Filtered Tasks
   const filteredTasks = useMemo(() => {
@@ -210,6 +229,12 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   React.useEffect(() => {
     setCurrentPage(1);
   }, [statusFilter, timeFilter, searchQuery, dateFrom, dateTo, projectFilter]);
+  React.useEffect(() => {
+    setCurrentProjectPage(1);
+  }, [projectSearchQuery]);
+  React.useEffect(() => {
+    if (currentProjectPage > projectTotalPages) setCurrentProjectPage(projectTotalPages);
+  }, [currentProjectPage, projectTotalPages]);
 
   const loadProjects = React.useCallback(async () => {
     try {
@@ -340,6 +365,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     setGenealogyNote(cur ? cur.surname || '' : '');
     setFolderPath('');
     setBatchCrop(false);
+    setImageProcessingEnabled(true);
     setBatchCropConfig(null);
     setBatchCropImageUrl('');
   };
@@ -361,17 +387,63 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     }
     setCreatingProject(true);
     try {
-      const np = await api.createProject({ name, surname });
+      let rootPath = pendingProjectLabel ? undefined : newProjectRoot.trim() || undefined;
+      if (pendingProjectFiles.length) {
+        const sess = await api.createUploadSession(pendingProjectLabel || name);
+        let next = 0; let done = 0;
+        setProjectUploadProg({ done: 0, total: pendingProjectFiles.length });
+        const worker = async () => {
+          while (next < pendingProjectFiles.length) {
+            const f = pendingProjectFiles[next++];
+            const rel = String((f as any).webkitRelativePath || f.name).split('/').slice(1).join('/') || f.name;
+            await api.uploadImage(sess.id, f, rel);
+            done += 1;
+            setProjectUploadProg({ done, total: pendingProjectFiles.length });
+          }
+        };
+        await Promise.all([worker(), worker(), worker()]);
+        rootPath = sess.dir;
+      }
+      const np = await api.createProject({ name, surname, rootPath, autoStart: true });
       await loadProjects();
       setShowProjectModal(false);
       setNewProjectName('');
       setNewProjectSurname('');
+      setNewProjectRoot('');
+      setPendingProjectFiles([]);
+      setPendingProjectLabel('');
       setProjectFilter(np.id);
     } catch (e: any) {
       alert(e?.message || '创建项目失败');
     } finally {
       setCreatingProject(false);
     }
+  };
+
+  const onProjectDirInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const all = Array.from(e.target.files || []);
+    e.target.value = '';
+    if (!all.length) return;
+    const root = String((all[0] as any).webkitRelativePath || '').split('/')[0] || '';
+    const files = all.filter((f) => IMG_RE.test(f.name));
+    setPendingProjectFiles(files);
+    setPendingProjectLabel(root);
+    setNewProjectRoot(files.length ? `浏览器目录：${root}（创建时上传）` : '浏览器目录为空（创建时直接建立空项目）');
+    if (!newProjectName.trim() && root) setNewProjectName(root);
+  };
+
+  const pickProjectRoot = async () => {
+    if (projectUploadProg) return;
+    // 项目导入优先走浏览器文件夹上传，适用于“服务在服务器、目录在用户电脑”的部署方式。
+    if (projectDirInputRef.current) {
+      projectDirInputRef.current.click();
+      return;
+    }
+    try {
+      const r = await api.pickFolder(newProjectRoot.trim() || undefined);
+      if (r?.path) { setNewProjectRoot(r.path); return; }
+    } catch { /* remote browser falls back to upload */ }
+    projectDirInputRef.current?.click();
   };
 
   const confirmDeleteProject = async () => {
@@ -600,6 +672,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
           cleanModelId: useAiClean ? selectedCleanModelId : null,
           estimatedCost: (useAiClean || useAiRecognition) ? totalEstimate : null,
           batchCrop: batchCrop ? batchCropConfig : null,
+          processingEnabled: imageProcessingEnabled,
           status: 'pending',
           totalPages: 0,
           reviewedPages: 0,
@@ -618,6 +691,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
       setUseAiRecognition(false);
       setUseAiClean(false);
       setBatchCrop(false);
+      setImageProcessingEnabled(true);
       setBatchCropConfig(null);
     } catch (e: any) {
       alert(e?.message || '创建任务失败');
@@ -633,6 +707,20 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     const label = filter === 'passed' ? '已通过' : filter === 'failed' ? '未通过' : '全部';
     setDownloadStatusText(`正在请求${label}净图 ZIP…`);
     window.open(downloadUrl(task.id, filter), '_blank');
+    setDownloadProgress(100);
+    setDownloadStatusText('已开始下载');
+    setTimeout(() => {
+      setDownloadingTaskId(null);
+      setDownloadProgress(0);
+      setDownloadStatusText('');
+    }, 1200);
+  };
+
+  const handleDownloadProjectZip = (projectId: number) => {
+    setDownloadingTaskId(`project-${projectId}`);
+    setDownloadProgress(30);
+    setDownloadStatusText('正在请求项目结果 ZIP…');
+    window.open(projectDownloadUrl(projectId), '_blank');
     setDownloadProgress(100);
     setDownloadStatusText('已开始下载');
     setTimeout(() => {
@@ -668,7 +756,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                     <p className="text-sm text-[#86868B] mt-1 font-medium">
                       {projectFilter === 'none'
                         ? '这些卷创建于「项目」功能上线之前，没有归入任何项目'
-                        : '一卷一个文件夹：在这里新建卷、上传图片，系统会在后台自动处理，处理好就能审阅'}
+                        : '一卷一个文件夹：在这里新建卷、上传图片，系统会在后台自动处理，完成后即可查看和裁剪结果'}
                     </p>
                   </>
                 ) : (
@@ -682,6 +770,17 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
               </div>
 
               <div className="flex items-center gap-2">
+                {typeof projectFilter === 'number' && (
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadProjectZip(projectFilter)}
+                    className="flex items-center gap-1.5 h-10 px-4 bg-white border border-[#0071E3]/25 text-[#0071E3] text-sm font-semibold rounded-xl hover:bg-[#E8F1FC] transition-all cursor-pointer whitespace-nowrap shrink-0"
+                    title="导出当前项目全部结果"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>导出全部</span>
+                  </button>
+                )}
                 {onRefresh && (
                   <button
                     onClick={() => {
@@ -698,6 +797,9 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                     onClick={() => {
                       setNewProjectName('');
                       setNewProjectSurname('');
+                      setNewProjectRoot('');
+                      setPendingProjectFiles([]);
+                      setPendingProjectLabel('');
                       setShowProjectModal(true);
                     }}
                     className="flex items-center gap-1.5 h-10 px-5 bg-[#0071E3] hover:bg-[#0077ED] active:scale-[0.98] text-white text-sm font-semibold rounded-xl shadow-[0_2px_8px_rgba(0,113,227,0.25)] transition-all cursor-pointer whitespace-nowrap shrink-0"
@@ -725,10 +827,37 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
           const newProject = () => {
             setNewProjectName('');
             setNewProjectSurname('');
+            setNewProjectRoot('');
+            setPendingProjectFiles([]);
+            setPendingProjectLabel('');
             setShowProjectModal(true);
           };
           return (
             <div>
+              <div className="flex items-center justify-between gap-4 mb-4">
+                <div className="text-sm text-[#86868B]">
+                  共 <span className="font-semibold text-[#1D1D1F]">{filteredProjects.length}</span> 个项目
+                </div>
+                <div className="relative w-full max-w-[320px]">
+                  <Search className="w-4 h-4 text-[#86868B] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    value={projectSearchQuery}
+                    onChange={(e) => setProjectSearchQuery(e.target.value)}
+                    placeholder="搜索项目名或姓氏"
+                    className="w-full h-10 pl-9 pr-9 bg-white border border-black/[0.08] rounded-xl text-sm text-[#1D1D1F] placeholder:text-[#A1A1A6] focus:outline-none focus:border-[#0071E3]/50 focus:ring-2 focus:ring-[#0071E3]/10"
+                  />
+                  {projectSearchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setProjectSearchQuery('')}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-[#86868B] hover:text-[#1D1D1F] cursor-pointer"
+                      title="清除搜索"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
               {projects.length === 0 ? (
                 <div className="bg-white rounded-3xl border border-black/[0.05] shadow-[0_1px_2px_rgba(0,0,0,0.03)] px-6 py-14 text-center">
                   <div className="w-14 h-14 mx-auto rounded-2xl bg-gradient-to-br from-[#4DA3FF] to-[#0071E3] text-white flex items-center justify-center shadow-[0_8px_20px_rgba(0,113,227,0.25)]">
@@ -744,13 +873,20 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                     新建第一个项目
                   </button>
                 </div>
+              ) : filteredProjects.length === 0 ? (
+                <div className="bg-white rounded-3xl border border-black/[0.05] px-6 py-14 text-center text-sm text-[#86868B]">
+                  没有找到匹配的项目或姓氏
+                  <button type="button" onClick={() => setProjectSearchQuery('')} className="block mx-auto mt-3 text-[#0071E3] font-semibold cursor-pointer hover:underline">
+                    清除筛选
+                  </button>
+                </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
-                  {projects.map((p) => {
+                  {paginatedProjects.map((p) => {
                     const vols = Math.max(1, p.volumeCount);
                     const segs = [
                       { n: p.completed, c: '#34C759' },
-                      { n: p.reviewing, c: '#FF9500' },
+                      { n: 0, c: '#FF9500' },
                       { n: p.processing, c: '#0071E3' },
                     ];
                     return (
@@ -803,9 +939,6 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                                 {p.processing > 0 && (
                                   <span className="inline-flex items-center gap-1"><i className="w-1.5 h-1.5 rounded-full bg-[#0071E3]" />处理中 {p.processing}</span>
                                 )}
-                                {p.reviewing > 0 && (
-                                  <span className="inline-flex items-center gap-1"><i className="w-1.5 h-1.5 rounded-full bg-[#FF9500]" />待审阅 {p.reviewing}</span>
-                                )}
                                 {p.completed > 0 && (
                                   <span className="inline-flex items-center gap-1"><i className="w-1.5 h-1.5 rounded-full bg-[#34C759]" />已完成 {p.completed}</span>
                                 )}
@@ -836,6 +969,36 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                 >
                   另有 {orphan.length} 卷未归类（项目功能上线前创建） · 查看 →
                 </button>
+              )}
+              {filteredProjects.length > 0 && projectTotalPages > 1 && (
+                <div className="mt-5 pt-4 border-t border-black/[0.06] flex items-center justify-between text-xs text-[#86868B]">
+                  <div>
+                    显示第 <span className="font-semibold text-[#1D1D1F]">{(currentProjectPage - 1) * projectPageSize + 1}</span> -{' '}
+                    <span className="font-semibold text-[#1D1D1F]">{Math.min(currentProjectPage * projectPageSize, filteredProjects.length)}</span> 个项目，共{' '}
+                    <span className="font-semibold text-[#1D1D1F]">{filteredProjects.length}</span> 个
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      disabled={currentProjectPage <= 1}
+                      onClick={() => setCurrentProjectPage((page) => Math.max(1, page - 1))}
+                      className="p-1.5 rounded-lg hover:bg-white disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                      title="上一页"
+                    >
+                      <ChevronLeft className="w-4 h-4" />
+                    </button>
+                    <span className="min-w-8 h-8 px-2 rounded-lg bg-[#0071E3] text-white flex items-center justify-center font-semibold">{currentProjectPage}</span>
+                    <button
+                      type="button"
+                      disabled={currentProjectPage >= projectTotalPages}
+                      onClick={() => setCurrentProjectPage((page) => Math.min(projectTotalPages, page + 1))}
+                      className="p-1.5 rounded-lg hover:bg-white disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                      title="下一页"
+                    >
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
               )}
             </div>
           );
@@ -1049,10 +1212,6 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                           <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#FF9500]/12 text-[#FF9500]">
                             {task.nestStatus === 'failed' ? '失败' : '待处理'}
                           </span>
-                        ) : task.status === 'reviewing' ? (
-                          <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#0071E3]/10 text-[#0071E3]">
-                            审阅中
-                          </span>
                         ) : task.status === 'completed' ? (
                           <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#34C759]/12 text-[#34C759]">
                             已完成
@@ -1097,21 +1256,6 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                               已处理 {Math.min(processDoneLabel, total)}/{task.totalPages} 页 · {processPct}%
                             </span>
                           </>
-                        ) : task.status === 'reviewing' ? (
-                          <>
-                            <span className="text-black/15">·</span>
-                            <span className="tabular-nums">
-                              已审阅 {task.reviewedPages}/{task.totalPages}
-                              {confirmed > 0 ? ` · 已确认 ${confirmed}` : ''}
-                            </span>
-                          </>
-                        ) : task.status === 'completed' ? (
-                          <>
-                            <span className="text-black/15">·</span>
-                            <span className="tabular-nums text-[#6E6E73]">
-                              通过 {task.reviewedPages}/{task.totalPages}
-                            </span>
-                          </>
                         ) : null}
                       </div>
 
@@ -1153,20 +1297,10 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         </div>
                       ) : null}
 
-                      {!isProcessing && task.status === 'reviewing' && task.totalPages > 0 && (
-                        <div className="pt-1 max-w-xl">
-                          <div className="w-full bg-[#E5E5EA] rounded-full h-1 overflow-hidden">
-                            <div
-                              className="bg-[#0071E3] h-full rounded-full transition-all duration-300"
-                              style={{ width: `${reviewPct}%` }}
-                            />
-                          </div>
-                        </div>
-                      )}
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-end gap-2 shrink-0 md:pl-2">
+                  <div className="flex items-center justify-end gap-4 shrink-0 md:pl-2">
                     {(task.status === 'pending' || task.nestStatus === 'failed') && !isProcessing && (
                       <button
                         onClick={() => onStartProcessing(task.id)}
@@ -1187,47 +1321,24 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                       </button>
                     )}
 
-                    {!isProcessing && task.status === 'reviewing' && (
-                      <button
-                        onClick={() => onOpenReview(task.id)}
-                        className="h-10 px-5 text-sm font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
-                      >
-                        <span>进入审阅</span>
-                        <ArrowRight className="w-3.5 h-3.5" />
-                      </button>
-                    )}
-
                     {task.status === 'completed' && (
                       <>
                         <button
                           onClick={() => onOpenReview(task.id)}
                           className="h-10 px-4 text-sm font-semibold rounded-full bg-[#F5F5F7] hover:bg-[#EBEBED] text-[#1D1D1F] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
-                          title="查看调参与对比审阅"
+                          title="查看处理结果"
                         >
-                          <Sliders className="w-3.5 h-3.5 text-[#0071E3]" />
-                          <span>查看</span>
-                        </button>
-                        {/* 下载净图 ZIP：暂时隐藏，把 SHOW_TASK_DOWNLOAD 改成 true 即可恢复 */}
-                        {SHOW_TASK_DOWNLOAD && (
-                          <>
-                        <button
-                          onClick={() => handleDownloadTaskZip(task, 'passed')}
-                          className="h-10 px-4 text-sm font-semibold rounded-full bg-[#34C759] hover:bg-[#2EB84E] text-white shadow-[0_2px_8px_rgba(52,199,89,0.25)] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
-                          title="下载已通过净图"
-                        >
-                          <Download className="w-3.5 h-3.5" />
-                          <span>已通过</span>
+                          <ArrowRight className="w-3.5 h-3.5 text-[#0071E3]" />
+                          <span>进入查看</span>
                         </button>
                         <button
-                          onClick={() => handleDownloadTaskZip(task, 'failed')}
-                          className="h-10 px-4 text-sm font-semibold rounded-full bg-white hover:bg-[#FFF5F5] border border-[#FF3B30]/20 text-[#FF3B30] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
-                          title="下载未通过净图"
+                          onClick={() => handleDownloadTaskZip(task, 'all')}
+                          className="h-10 px-4 text-sm font-semibold rounded-full bg-white hover:bg-[#E8F1FC] border border-[#0071E3]/30 text-[#0071E3] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
+                          title="导出本卷当前选中的结果"
                         >
                           <Download className="w-3.5 h-3.5" />
-                          <span>未通过</span>
+                          <span>导出本卷</span>
                         </button>
-                          </>
-                        )}
                       </>
                     )}
                     {onDeleteTask && (
@@ -1342,6 +1453,21 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                   className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
                 />
               </div>
+            </div>
+            <div className="mt-4">
+              <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">族谱根目录（可选）</label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={newProjectRoot}
+                  onChange={(e) => setNewProjectRoot(e.target.value)}
+                  placeholder="选择后自动按一级子目录创建卷"
+                  className="min-w-0 flex-1 px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
+                />
+                <button type="button" onClick={() => void pickProjectRoot()} disabled={!!projectUploadProg} className="shrink-0 px-3 rounded-xl bg-[#F5F5F7] border border-black/[0.06] text-xs font-semibold hover:bg-[#E5E5EA] disabled:opacity-50">{projectUploadProg ? `上传 ${projectUploadProg.done}/${projectUploadProg.total}` : '选择目录'}</button>
+              </div>
+              <input ref={projectDirInputRef} type="file" className="hidden" {...({ webkitdirectory: '', directory: '' } as any)} multiple onChange={(e) => void onProjectDirInputChange(e)} />
+              <p className="text-[11px] text-[#86868B] mt-1.5">服务器部署时会把浏览器选中的图片上传到服务器；多级目录自动跳过，空目录也允许创建。</p>
             </div>
             <p className="text-[11px] text-[#86868B] mt-2">项目名和姓氏建好后，项目里新建的每一卷都会直接带入，卷里不能再改。</p>
             <div className="flex justify-end gap-2 mt-5">
@@ -1527,11 +1653,10 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                   </div>
                   <div className="rounded-xl border border-black/[0.06] bg-[#F5F5F7] px-3.5 py-3">
                     <label className="flex items-center gap-2 text-[13px] font-semibold text-[#1D1D1F] cursor-pointer">
-                      <input type="checkbox" checked={batchCrop} onChange={(e) => { setBatchCrop(e.target.checked); if (e.target.checked) setShowBatchCrop(true); }} className="w-4 h-4 rounded text-[#0071E3] cursor-pointer" />
-                      批量双页裁剪（可选）
+                      <input type="checkbox" checked={imageProcessingEnabled} onChange={(e) => setImageProcessingEnabled(e.target.checked)} className="w-4 h-4 rounded text-[#0071E3] cursor-pointer" />
+                      启用图像增强（去污、去黄、黑白阈值）
                     </label>
-                    <p className="text-[11px] text-[#86868B] mt-1 ml-6">不勾选：按单页逐张处理；勾选后用第一张图设置区域，双页拆成“前页、后页”两张。</p>
-                    {batchCrop ? <button type="button" onClick={() => setShowBatchCrop(true)} className="ml-6 mt-2 h-8 px-3 text-xs font-semibold rounded-lg bg-white border border-black/[0.08] hover:bg-black/[0.03]">{batchCropConfig ? '重新设置裁剪区域' : '设置第一张图裁剪区域'}</button> : null}
+                    <p className="text-[11px] text-[#86868B] mt-1 ml-6">关闭后仍会按裁剪与四点透视校正输出，但保留原图的颜色、纸张与字迹效果。</p>
                   </div>
                 </div>
 

@@ -2,6 +2,7 @@ import { CropRect, ProcessParams } from '../types';
 
 /** Nest ScanWash params */
 export interface NestParams {
+  processingEnabled?: boolean;
   preset: string;
   threshold: number;
   denoise: number;
@@ -9,6 +10,7 @@ export interface NestParams {
   /** 0~1 destain strength */
   stain: number;
   strongDestain?: boolean;
+  antiqueMode?: boolean;
   autoCrop: boolean;
   cropPadding: number;
 }
@@ -24,14 +26,15 @@ export interface NestCropBox {
 const DEFAULT_CROP_PADDING = 16;
 
 export const DEFAULT_UI_PARAMS: ProcessParams = {
+  processingEnabled: true,
   denoiseStrength: 55,
   contrastThreshold: 60,
   sharpenStrength: 35,
   stainStrength: 40,
 };
 
-/** 内置处理模式：选中后套用这组滑块值，用户之后仍可手动微调（变为「自定义」）。 */
-export type ProcessMode = 'auto' | 'standard' | 'stained' | 'faint' | 'strongStain';
+/** 内置处理模式：选中后直接套用一组稳定参数，不向普通用户暴露滑块。 */
+export type ProcessMode = 'auto' | 'standard' | 'stained' | 'faint' | 'antique';
 
 export interface ProcessModeDef {
   key: Exclude<ProcessMode, 'auto'>;
@@ -51,13 +54,13 @@ export const PROCESS_MODES: ProcessModeDef[] = [
     key: 'stained',
     label: '去污渍',
     hint: '发黄/霉斑/脏底：重去渍去污，只留浓墨',
-    params: { contrastThreshold: 72, denoiseStrength: 80, sharpenStrength: 30, stainStrength: 85 },
+      params: { contrastThreshold: 68, denoiseStrength: 68, sharpenStrength: 32, stainStrength: 65 },
   },
   {
-    key: 'strongStain',
-    label: '强力去污',
-    hint: '大片墨渍/黑斑/脏底：强力抬白背景污渍，尽量保留文字结构',
-    params: { contrastThreshold: 78, denoiseStrength: 100, sharpenStrength: 42, stainStrength: 100, strongDestain: true },
+    key: 'antique',
+    label: '古籍增强',
+    hint: '古籍浅墨/旧纸：温和保留细笔，避免文字变浅',
+    params: { contrastThreshold: 58, denoiseStrength: 62, sharpenStrength: 48, stainStrength: 65, antiqueMode: true },
   },
   {
     key: 'faint',
@@ -81,6 +84,7 @@ export function matchMode(p: ProcessParams): Exclude<ProcessMode, 'auto'> | null
       m.params.sharpenStrength === p.sharpenStrength &&
       (m.params.stainStrength ?? 40) === (p.stainStrength ?? 40)
       && Boolean(m.params.strongDestain) === Boolean(p.strongDestain)
+      && Boolean(m.params.antiqueMode) === Boolean(p.antiqueMode)
     ) {
       return m.key;
     }
@@ -93,12 +97,14 @@ export function uiToNestParams(p: ProcessParams): NestParams {
   // Recommended UI marks: denoise 55%→8.8, threshold 60%→168, sharpen 35%→1.52
   const stainPct = typeof p.stainStrength === 'number' ? p.stainStrength : 40;
   return {
+    processingEnabled: p.processingEnabled !== false,
     preset: 'auto',
     denoise: (p.denoiseStrength / 100) * 16,
     threshold: 60 + (p.contrastThreshold / 100) * 180,
     contrast: 0.4 + (p.sharpenStrength / 100) * 3.2,
     stain: Math.max(0, Math.min(1, stainPct / 100)),
-    strongDestain: Boolean(p.strongDestain),
+    strongDestain: false,
+    antiqueMode: Boolean(p.antiqueMode),
     autoCrop: false,
     cropPadding: DEFAULT_CROP_PADDING,
   };
@@ -120,11 +126,13 @@ export function nestToUiParams(raw: any): ProcessParams {
   const contrast = typeof p.contrast === 'number' ? p.contrast : 1.52;
   const stain = typeof p.stain === 'number' ? p.stain : 0.4;
   return {
+    processingEnabled: p.processingEnabled !== false,
     denoiseStrength: Math.round(Math.max(0, Math.min(100, (denoise / 16) * 100))),
     contrastThreshold: Math.round(Math.max(0, Math.min(100, ((threshold - 60) / 180) * 100))),
     sharpenStrength: Math.round(Math.max(0, Math.min(100, ((contrast - 0.4) / 3.2) * 100))),
     stainStrength: Math.round(Math.max(0, Math.min(100, stain * 100))),
-    strongDestain: Boolean(p.strongDestain),
+    strongDestain: false,
+    antiqueMode: Boolean(p.antiqueMode),
   };
 }
 

@@ -52,6 +52,7 @@ export default function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [currentTab, setCurrentTab] = useState<MainViewTab>('tasks');
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [taskListInitialProjectFilter, setTaskListInitialProjectFilter] = useState<'all' | 'none' | number>('all');
   const [tasksLoading, setTasksLoading] = useState(false);
 
   const [processingTaskId, setProcessingTaskId] = useState<string | null>(null);
@@ -158,6 +159,15 @@ export default function App() {
   }, []);
 
   const goToTasks = useCallback(() => {
+    setActiveTaskId(null);
+    setTaskListInitialProjectFilter('all');
+    setCurrentTab('tasks');
+    pushTasksUrl();
+  }, []);
+
+  const backToTaskVolumeList = useCallback((projectId?: number | null) => {
+    setActiveTaskId(null);
+    setTaskListInitialProjectFilter(projectId == null ? 'none' : Number(projectId));
     setCurrentTab('tasks');
     pushTasksUrl();
   }, []);
@@ -223,7 +233,7 @@ export default function App() {
         .then((list) => {
           const mapped = (list || []).map((t) => mapTask(t));
           setTasks((prev) => mergeTasksPreserveItems(prev, mapped));
-          // 发现状态变化：处理中 → 审阅中 = 完成提示；处理中 → 失败（被暂停）= 弹窗说明原因
+          // 发现状态变化：处理中 → 已完成 = 完成提示；处理中 → 失败（被暂停）= 弹窗说明原因
           for (const t of mapped) {
             const prev = statusRef.current.get(t.id);
             if (prev === 'processing' && t.nestStatus !== 'processing') {
@@ -368,6 +378,7 @@ export default function App() {
     const created = await api.createTask({
       name: newTaskPartial.name || '未命名任务',
       sourceFolder: newTaskPartial.folderPath || '',
+      processingEnabled: newTaskPartial.processingEnabled,
       description: newTaskPartial.description,
       genealogyNote: newTaskPartial.genealogyNote || newTaskPartial.surname,
       surname: newTaskPartial.surname || newTaskPartial.genealogyNote,
@@ -529,7 +540,8 @@ export default function App() {
     <div className="h-screen w-screen flex flex-col overflow-hidden bg-[#F5F5F7] font-sans">
       <TopNav
         currentTab={currentTab}
-        onBackToTasks={goToTasks}
+        onBackToTasks={currentTab === 'workbench' ? () => backToTaskVolumeList(activeTask?.projectId) : goToTasks}
+        hideWorkbenchBack={currentTab === 'workbench'}
         onOpenSettings={() => setCurrentTab('settings')}
         onOpenOcr={goToOcr}
         onBackToOcr={backToOcrProject}
@@ -563,6 +575,7 @@ export default function App() {
             onRefresh={loadTasks}
             onShowProblem={showTaskProblem}
             onOpenSetup={openSetup}
+            initialProjectFilter={taskListInitialProjectFilter}
           />
         )}
 
@@ -601,7 +614,7 @@ export default function App() {
             onUpdateTaskItem={handleUpdateTaskItem}
             onBatchApplyParams={handleBatchApplyParams}
             onFinishTaskReview={handleFinishTaskReview}
-            onBack={goToTasks}
+            onBack={() => backToTaskVolumeList(activeTask.projectId)}
             onReloadTask={() => loadTaskDetail(activeTask.id)}
           />
         )}
@@ -648,7 +661,7 @@ export default function App() {
             <div className="min-w-0 flex-1">
               <div className="text-sm font-semibold text-[#1D1D1F] truncate">《{doneNotice.name}》处理完成</div>
               <div className="text-xs text-[#6E6E73] mt-0.5">
-                共 {doneNotice.pages} 页{doneNotice.cost ? ` · 花费约 ¥${doneNotice.cost.toFixed(2)}` : ''}，可以开始审阅了
+                共 {doneNotice.pages} 页{doneNotice.cost ? ` · 花费约 ¥${doneNotice.cost.toFixed(2)}` : ''}，处理结果已就绪
               </div>
               <div className="flex gap-2 mt-3">
                 <button
@@ -660,7 +673,7 @@ export default function App() {
                   }}
                   className="px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-[#0071E3] text-white cursor-pointer"
                 >
-                  进入审阅
+                  查看结果
                 </button>
                 <button
                   type="button"

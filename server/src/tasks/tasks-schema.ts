@@ -17,4 +17,8 @@ export const TASKS_SCHEMA_SQL: string[] = [
 export const TASKS_ALTER_SQL: string[] = [
   "ALTER TABLE `tasks` ADD COLUMN `project_id` BIGINT UNSIGNED NULL COMMENT '所属项目 projects.id' AFTER `user_id`",
   'ALTER TABLE `tasks` ADD KEY `idx_tasks_project` (`project_id`)',
+  'ALTER TABLE `task_images` ADD COLUMN `original_source_path` VARCHAR(1024) NULL AFTER `source_path`',
+  'ALTER TABLE `task_images` ADD COLUMN `split_quad` TEXT NULL AFTER `crop_box`',
+  'ALTER TABLE `task_images` ADD COLUMN `final_crop` TEXT NULL AFTER `split_quad`',
+  'ALTER TABLE `projects` ADD COLUMN `root_path` VARCHAR(1024) NULL AFTER `description`',
 ];

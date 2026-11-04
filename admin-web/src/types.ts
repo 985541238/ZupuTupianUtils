@@ -14,6 +14,8 @@ export interface CropRect {
 }
 
 export interface ProcessParams {
+  /** false 时仅输出裁剪/透视后的原图，不执行去污、去黄或黑白化。 */
+  processingEnabled?: boolean;
   denoiseStrength: number; // 0 - 100
   contrastThreshold: number; // 0 - 100
   sharpenStrength: number; // 0 - 100
@@ -21,6 +23,8 @@ export interface ProcessParams {
   stainStrength: number;
   /** 强力背景去污模式。 */
   strongDestain?: boolean;
+  /** 古籍多尺度局部文字增强模式。 */
+  antiqueMode?: boolean;
 }
 
 export interface PageStats {
@@ -52,11 +56,18 @@ export interface ScanItem {
   /** Nest image status (ready/done/confirmed/...) */
   nestStatus?: string;
   cropBoxRaw?: any;
+  finalCrop?: { source: 'original' | 'result'; box: { x: number; y: number; w: number; h: number } } | null;
+  finalCropBaseUrl?: string;
+  /** 由双页拆分而来时的原始双页和当前四点框。 */
+  splitOriginalUrl?: string;
+  splitSourceKey?: string;
+  splitQuad?: number[][] | null;
   /** 当前结果图来源：algo = 现有算法，ai = 图生图大模型 */
   processMode?: 'algo' | 'ai' | null;
   hasAlgoResult?: boolean;
   hasAiResult?: boolean;
   aiModelId?: number | null;
+  aiWarning?: string | null;
   /** 图片处理费用（元） */
   cleanCost?: number;
   errorMessage?: string | null;
@@ -66,6 +77,7 @@ export interface ScanItem {
 }
 
 export interface Task {
+  processingEnabled?: boolean;
   id: string;
   name: string;
   folderPath: string;

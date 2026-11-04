@@ -3,6 +3,8 @@ import { Task, ScanItem, ProcessParams, CropRect } from '../types';
 import { api, previewImageBlob, previewFastBlob } from '../api/client';
 import { buildPreviewBody, nestCropToUi, PROCESS_MODES, modeParams, matchMode } from '../api/params';
 import { PerspectiveDialog } from './PerspectiveDialog';
+import { BatchCropDialog, BatchCropConfig } from './BatchCropDialog';
+import { FinalCropDialog } from './FinalCropDialog';
 import { mapImage, formatProcessingTime } from '../api/mappers';
 import {
   ChevronLeft,
@@ -26,6 +28,9 @@ import {
   XCircle,
   Clock,
   Image as ImageIcon,
+  AlertTriangle,
+  AlertCircle,
+  Trash2,
 } from 'lucide-react';
 
 interface ReviewWorkbenchProps {
@@ -53,6 +58,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
 
   // Panels visibility
   const [showLeftSidebar, setShowLeftSidebar] = useState(true);
+  // 保留结果查看页的参数调节/大模型处理面板；仅移除人工审阅动作。
   const [showRightInspector, setShowRightInspector] = useState(true);
 
   // Viewer state
@@ -82,6 +88,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
       };
     }
     return {
+      processingEnabled: currentItem.params?.processingEnabled !== false,
       denoiseStrength: currentItem.params?.denoiseStrength ?? 55,
       contrastThreshold: currentItem.params?.contrastThreshold ?? 60,
       sharpenStrength: currentItem.params?.sharpenStrength ?? 35,
@@ -115,6 +122,8 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   /** WeChat-style crop: selecting on original; confirmedCrop drives Nest cropBox */
   const [cropSelecting, setCropSelecting] = useState(false);
   const [perspOpen, setPerspOpen] = useState(false);
+  const [splitCropOpen, setSplitCropOpen] = useState(false);
+  const [finalCropSource, setFinalCropSource] = useState<'original' | 'result' | null>(null);
   const [draftCrop, setDraftCrop] = useState<CropRect | null>(null);
   const [confirmedCrop, setConfirmedCrop] = useState<CropRect | null>(null);
   /** Always-current crop for debounce/in-flight previews (avoids stale closure → full page). */
@@ -138,8 +147,8 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   const [selectedCleanModelId, setSelectedCleanModelId] = useState<number | null>(null);
   /** 每个图片处理模型处理一页大约多少钱（元），下拉里直接比较 */
   const [cleanPerPage, setCleanPerPage] = useState<Record<number, number | null>>({});
-  /** 每页最近一次大模型处理失败的原因：留在面板里，不是弹一下就没了 */
-  const [aiNotes, setAiNotes] = useState<Record<string, string>>({});
+  /** 每页最近一次大模型处理结果的提示/原因：留在面板里，不是弹一下就没了 */
+  const [aiNotes, setAiNotes] = useState<Record<string, { type: 'warning' | 'error'; text: string } | string>>({});
   const [aiProcessBusy, setAiProcessBusy] = useState(false);
   /** 正在后台用大模型处理的页（可同时处理多页，处理期间可翻页） */
   const [aiBusyIds, setAiBusyIds] = useState<string[]>([]);
@@ -237,6 +246,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
     setLocalParams(
       sess?.params
         ? {
+            processingEnabled: sess.params.processingEnabled !== false,
             denoiseStrength: sess.params.denoiseStrength ?? 55,
             contrastThreshold: sess.params.contrastThreshold ?? 60,
             sharpenStrength: sess.params.sharpenStrength ?? 35,
@@ -244,6 +254,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
               typeof sess.params.stainStrength === 'number' ? sess.params.stainStrength : 40,
           }
         : {
+            processingEnabled: currentItem.params?.processingEnabled !== false,
             denoiseStrength: currentItem.params?.denoiseStrength ?? 55,
             contrastThreshold: currentItem.params?.contrastThreshold ?? 60,
             sharpenStrength: currentItem.params?.sharpenStrength ?? 35,
@@ -759,7 +770,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
       await api.aiProcessImage(task.id, item.id, { modelId: selectedCleanModelId || undefined });
     } catch (e: any) {
       finish();
-      setAiNotes((o) => ({ ...o, [item.id]: e?.message || '提交大模型处理失败' }));
+      setAiNotes((o) => ({ ...o, [item.id]: { type: 'error', text: e?.message || '提交大模型处理失败' } }));
       return;
     }
     const started = Date.now();
@@ -779,11 +790,19 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
         if (r.state === 'done' && r.image) {
           applyServerImage(r.image, item);
           const cost = Number(r.image?.cleanCost);
+          setAiNotes((o) => {
+            const n = { ...o };
+            delete n[item.id];
+            return n;
+          });
           triggerToast(
             `第 ${item.pageNumber} 页已用大模型处理完成${Number.isFinite(cost) && cost > 0 ? `，本页累计 ¥${cost.toFixed(2)}` : ''}`,
           );
         } else if (r.state === 'failed') {
-          setAiNotes((o) => ({ ...o, [item.id]: `第 ${item.pageNumber} 页大模型处理失败：${r.error || '未知原因'}` }));
+          setAiNotes((o) => ({
+            ...o,
+            [item.id]: { type: 'error', text: `第 ${item.pageNumber} 页大模型处理失败：${r.error || '未知原因'}` },
+          }));
         } else {
           alert('没有找到这一页的处理记录（服务可能重启过），请重新点击「使用大模型处理」');
         }
@@ -994,6 +1013,99 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
     void runPreview(localParams, null);
   };
 
+  const splitCropInitial = (): BatchCropConfig | null => {
+    if (!currentItem?.splitSourceKey) return null;
+    const pair = task.items.filter((x) => x.splitSourceKey === currentItem.splitSourceKey);
+    if (pair.length === 1 && Array.isArray(currentItem.splitQuad) && currentItem.splitQuad.length === 4) {
+      return { enabled: true, quads: [currentItem.splitQuad] };
+    }
+    if (pair.length !== 2 || !pair.every((x) => Array.isArray(x.splitQuad) && x.splitQuad.length === 4)) return null;
+    const back = pair.find((x) => /(?:-2|-后页)\.[^.]+$/i.test(x.fileName)) || pair[1];
+    const front = pair.find((x) => /(?:-1|-前页)\.[^.]+$/i.test(x.fileName)) || pair[0];
+    return { enabled: true, quads: [back.splitQuad!, front.splitQuad!] };
+  };
+
+  const saveSplitCrop = async (config: BatchCropConfig) => {
+    if (!currentItem) return;
+    try {
+      setIsProcessing(true);
+      const saved = await api.recropSplitPages(task.id, currentItem.id, config.quads, config.rotation, config.processingEnabled);
+      for (const raw of saved) {
+        pageSessionRef.current.delete(String(raw.id));
+        pageUrlCacheRef.current.delete(String(raw.id));
+      }
+      const active = saved.find((raw: any) => String(raw.id) === currentItem.id);
+      if (active) {
+        const mapped = mapImage(active, task.id, currentItem.pageNumber);
+        onUpdateTaskItemRef.current(task.id, mapped);
+        previewUrlRef.current = '';
+        setPreviewDataUrl(mapped.processedUrl || mapped.originalUrl);
+        setDisplayResultSrc(mapped.processedUrl || mapped.originalUrl);
+        setLocalParams(mapped.params);
+        confirmedCropRef.current = null;
+        setConfirmedCrop(null);
+      }
+      syncedPageIdRef.current = null;
+      pageSessionRef.current.delete(currentItem.id);
+      if (config.mode === 'split') setCompareMode('side-by-side');
+      setSplitCropOpen(false);
+      triggerToast(config.mode === 'split' ? '分页完成，前页和后页已加入列表' : '裁剪完成');
+      try {
+        const refreshed = await onReloadTask?.();
+        const nextIndex = refreshed?.items?.findIndex((item: ScanItem) => item.id === currentItem.id);
+        if (typeof nextIndex === 'number' && nextIndex >= 0) setCurrentPageIndex(nextIndex);
+      } catch {
+        triggerToast('裁剪已保存，但列表刷新失败，请重新进入审阅页');
+      }
+    } catch (e: any) {
+      throw new Error(e?.message || '裁剪失败，请重试');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const saveFinalCrop = async (box: { x: number; y: number; w: number; h: number }, rotation = 0) => {
+    if (!currentItem || !finalCropSource) throw new Error('图片不存在');
+    if (isProcessing || paramsDirtyRef.current) throw new Error('图像处理尚未完成，请稍候再裁剪');
+    const raw = await api.applyFinalCrop(task.id, currentItem.id, finalCropSource, box, rotation);
+    const mapped = mapImage(raw, task.id, currentItem.pageNumber);
+    pageSessionRef.current.delete(String(mapped.id));
+    pageUrlCacheRef.current.delete(String(mapped.id));
+    previewUrlRef.current = '';
+    setPreviewDataUrl(mapped.processedUrl || mapped.originalUrl);
+    setDisplayResultSrc(mapped.processedUrl || mapped.originalUrl);
+    onUpdateTaskItemRef.current(task.id, mapped);
+    setFinalCropSource(null);
+    triggerToast('裁剪已生成新的结果页');
+    try {
+      const refreshed = await onReloadTask?.();
+      const nextIndex = refreshed?.items?.findIndex((item: ScanItem) => String(item.id) === String(mapped.id));
+      if (typeof nextIndex === 'number' && nextIndex >= 0) setCurrentPageIndex(nextIndex);
+    } catch {
+      triggerToast('裁剪已保存，但列表刷新失败，请重新进入审阅页');
+    }
+  };
+
+  const deleteDerivedPage = async (item: ScanItem, index: number) => {
+    if (!item.splitSourceKey || isProcessing) return;
+    if (!window.confirm(`确定删除“${item.fileName}”吗？\n这只会删除裁剪/分页结果，原图不会受影响。`)) return;
+    try {
+      setIsProcessing(true);
+      await api.deleteTaskImage(task.id, item.id);
+      pageSessionRef.current.delete(String(item.id));
+      pageUrlCacheRef.current.delete(String(item.id));
+      const refreshed = await onReloadTask?.();
+      const nextItems = refreshed?.items || [];
+      if (nextItems.length) setCurrentPageIndex(Math.min(index, nextItems.length - 1));
+      else setCurrentPageIndex(0);
+      triggerToast('已删除裁剪/分页结果');
+    } catch (e: any) {
+      triggerToast(e?.message || '删除失败，请重试');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
 
   /** Map normalized image-space crop to CSS % of the overlay layer (letterbox-safe). */
   const cropToLayerStyle = (crop: CropRect): React.CSSProperties => {
@@ -1102,6 +1214,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (finalCropSource || splitCropOpen) return;
       if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) {
         return;
       }
@@ -1113,21 +1226,12 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
       }
       if (cropSelecting) return;
 
-      if (e.code === 'Space' || e.key === ' ') {
-        e.preventDefault();
-        if (!cropSelecting) void handlePassCurrentPage();
-      } else if (e.key === 'f' || e.key === 'F') {
-        e.preventDefault();
-        if (!cropSelecting) void handleRejectCurrentPage();
-      } else if (e.key === 'ArrowLeft') {
+      if (e.key === 'ArrowLeft') {
         e.preventDefault();
         setCurrentPageIndex((p) => Math.max(0, p - 1));
       } else if (e.key === 'ArrowRight') {
         e.preventDefault();
         setCurrentPageIndex((p) => Math.min(task.items.length - 1, p + 1));
-      } else if (e.key === 'c' || e.key === 'C') {
-        e.preventDefault();
-        enterCropMode();
       } else if (e.key === 'Tab') {
         e.preventDefault();
         setCompareMode((prev) => (prev === 'split' ? 'side-by-side' : 'split'));
@@ -1136,7 +1240,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentPageIndex, task.items.length, localParams, previewDataUrl, cropSelecting, confirmedCrop, draftCrop, compareMode]);
+  }, [currentPageIndex, task.items.length, localParams, previewDataUrl, cropSelecting, confirmedCrop, draftCrop, compareMode, finalCropSource, splitCropOpen]);
 
   // Split Divider mouse drag
   const handleSplitMouseDown = (e: React.MouseEvent) => {
@@ -1291,10 +1395,10 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
               <button
                 onClick={() => void handleBackToList()}
                 className="flex items-center gap-1 text-xs font-semibold text-[#0071E3] hover:text-[#0077ED] transition-colors cursor-pointer group"
-                title="返回任务与下载中心"
+                title="返回所属项目的卷列表"
               >
                 <ChevronLeft className="w-3.5 h-3.5 transition-transform group-hover:-translate-x-0.5" />
-                <span>返回任务列表</span>
+                <span>返回卷列表</span>
               </button>
               <button
                 onClick={() => setShowLeftSidebar(false)}
@@ -1309,7 +1413,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                 {task.name}
               </div>
               <div className="text-[11px] text-[#86868B] font-mono mt-0.5">
-                已确认 {decidedCount} / {task.totalPages} · 通 {passedCount} · 未通 {failedCount}
+                共 {task.totalPages} 页 · 处理结果可直接查看和裁剪
               </div>
             </div>
           </div>
@@ -1333,8 +1437,6 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
               for (let idx = start; idx < end; idx++) {
                 const item = task.items[idx];
                 const isActive = idx === currentPageIndex;
-                const isPassed = item.reviewStatus === 'passed';
-                const isFailed = item.reviewStatus === 'failed';
                 const thumbSrc = item.thumbnailUrl || item.processedUrl || item.originalUrl;
                 nodes.push(
                   <div
@@ -1364,18 +1466,9 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                         {item.fileName}
                       </div>
                       <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 mt-1">
-                        {isPassed ? (
-                          <span className="inline-flex items-center gap-0.5 text-[10px] text-[#34C759] font-medium">
-                            <CheckCircle2 className="w-3 h-3" />
-                            已通过
-                          </span>
-                        ) : isFailed ? (
-                          <span className="inline-flex items-center gap-0.5 text-[10px] text-[#FF3B30] font-medium">
-                            <XCircle className="w-3 h-3" />
-                            未通过
-                          </span>
-                        ) : item.processedUrl ? (
-                          <span className="text-[10px] text-[#0071E3] font-medium">待审阅</span>
+                        {item.splitSourceKey && <span className="text-[10px] font-semibold text-[#0071E3]">{task.items.filter((page) => page.splitSourceKey === item.splitSourceKey).length === 2 ? '已分页' : '已裁剪'}</span>}
+                        {item.processedUrl ? (
+                          <span className="text-[10px] text-[#0071E3] font-medium">已处理</span>
                         ) : (
                           <span className="text-[10px] text-[#86868B]">未处理</span>
                         )}
@@ -1399,6 +1492,21 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                         ) : null}
                       </div>
                     </div>
+                    {item.splitSourceKey && (
+                      <button
+                        type="button"
+                        title="删除此裁剪/分页结果"
+                        aria-label={`删除${item.fileName}`}
+                        disabled={isProcessing}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void deleteDerivedPage(item, idx);
+                        }}
+                        className={`shrink-0 p-1.5 rounded-lg text-[#86868B] ${isActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} hover:bg-[#FFF1F0] hover:text-[#D70015] disabled:opacity-30 transition-opacity`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                   </div>
                 );
               }
@@ -1421,7 +1529,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
         {/* CENTER COLUMN: Apple Studio Viewer */}
         <main className="flex-1 flex flex-col relative apple-studio-canvas overflow-hidden">
           {/* Top Floating Glass Capsule */}
-          <div className="absolute top-3.5 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1 p-1 apple-glass-heavy border border-black/[0.08] rounded-full shadow-[0_8px_24px_rgba(0,0,0,0.06)]">
+          <div className="absolute top-3.5 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1 p-1 whitespace-nowrap apple-glass-heavy border border-black/[0.08] rounded-full shadow-[0_8px_24px_rgba(0,0,0,0.06)]">
             <div className={`flex items-center p-0.5 bg-[#E5E5EA]/70 rounded-full ${cropSelecting ? 'opacity-40 pointer-events-none' : ''}`}>
               <button
                 onClick={() => setCompareMode('side-by-side')}
@@ -1472,6 +1580,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
 
             <div className="h-4 w-px bg-black/[0.08] mx-1" />
 
+
             <div className="flex items-center gap-0.5 text-[#1D1D1F]">
               <button
                 onClick={() => setZoomLevel((z) => Math.max(0.6, z - 0.2))}
@@ -1501,38 +1610,23 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
 
             <div className="h-4 w-px bg-black/[0.08] mx-1" />
 
+            <button type="button" disabled={isProcessing || !currentItem?.processedUrl} onClick={() => setFinalCropSource('result')} className="px-2.5 py-1 text-xs font-medium rounded-full hover:bg-black/[0.05] disabled:opacity-40" title="在当前处理结果上生成新的裁剪页，可重复使用">结果裁剪</button>
+            <div className="h-4 w-px bg-black/[0.08] mx-1" />
+
             <button
               type="button"
-              onClick={(e) => {
-                if (e.altKey && confirmedCrop && !cropSelecting) {
-                  clearConfirmedCrop();
-                  return;
-                }
-                cropSelecting ? cancelCropSelect() : enterCropMode();
-              }}
+              onClick={() => setSplitCropOpen(true)}
               className={`px-3 py-1 text-xs font-medium rounded-full transition-all flex items-center gap-1 cursor-pointer ${
-                cropSelecting || confirmedCrop
+                cropSelecting || confirmedCrop || currentItem?.splitSourceKey
                   ? 'bg-[#0071E3] text-white shadow-xs'
                   : 'text-[#1D1D1F] hover:bg-black/[0.05]'
               }`}
-              title="微信式裁剪原图：拖拽框选后点确认；Alt+点击清除裁剪 (C)"
+              title="在处理结果上进行裁剪或分页"
             >
               <Crop className="w-3 h-3" />
               <span>
-                {cropSelecting ? '框选中…' : confirmedCrop ? '已裁剪' : '剪裁'}
+                {splitCropOpen ? '裁剪中…' : currentItem?.splitSourceKey ? '重新裁剪' : confirmedCrop ? '已裁剪' : '裁剪 / 分页'}
               </span>
-            </button>
-            <button
-              type="button"
-              disabled={!currentItem || cropSelecting}
-              onClick={() => setPerspOpen(true)}
-              className={`px-3 py-1 text-xs font-medium rounded-full transition-all flex items-center gap-1 cursor-pointer disabled:opacity-40 ${
-                currentItem?.perspectiveApplied ? 'bg-[#0071E3] text-white shadow-xs' : 'text-[#1D1D1F] hover:bg-black/[0.05]'
-              }`}
-              title="页面拍斜/扫歪了：框选四个角，自动拉正成矩形（本地处理，不花钱）"
-            >
-              <Scan className="w-3 h-3" />
-              <span>{currentItem?.perspectiveApplied ? '已透视修正' : '透视修正'}</span>
             </button>
           </div>
 
@@ -1633,7 +1727,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                     className="max-h-[78vh] w-auto object-contain"
                   />
                   <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-[#1D1D1F]/75 text-[10px] font-semibold text-white shadow-2xs">
-                    原图{confirmedCrop ? '（完整，未裁剪）' : ''}
+                    原图
                   </div>
                 </div>
 
@@ -1645,7 +1739,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                     className="max-h-[78vh] w-auto object-contain"
                   />
                   <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-[#0071E3] text-[10px] font-semibold text-white shadow-2xs">
-                    {confirmedCrop ? '裁切后净图' : '还原净图'}
+                    处理结果
                   </div>
                 </div>
               </div>
@@ -1785,19 +1879,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
               </div>
 
               <div className="hidden sm:flex items-center gap-1.5 text-xs font-mono ml-2">
-                {currentItem.reviewStatus === 'passed' ? (
-                  <span className="text-[#34C759] font-medium flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    <span>已通过</span>
-                  </span>
-                ) : currentItem.reviewStatus === 'failed' ? (
-                  <span className="text-[#FF3B30] font-medium flex items-center gap-1">
-                    <XCircle className="w-3.5 h-3.5" />
-                    <span>未通过</span>
-                  </span>
-                ) : (
-                  <span className="text-[#86868B] font-medium">未处理</span>
-                )}
+                <span className="text-[#86868B] font-medium">{currentItem.processedUrl ? '已处理' : '未处理'}</span>
                 {currentItem.processMode ? (
                   <span
                     className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold font-sans whitespace-nowrap ${
@@ -1814,77 +1896,9 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
             {/* Keyboard hints — subtle Apple-style */}
             <div className="hidden 2xl:flex items-center gap-2 text-[11px] text-[#6E6E73]">
               <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full bg-white/80 border border-black/[0.06] shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
-                <kbd className="min-w-[1.4rem] px-1.5 py-0.5 rounded-md bg-[#F5F5F7] border border-black/[0.08] text-[10px] font-semibold text-[#1D1D1F] text-center font-mono">Space</kbd>
-                <span className="font-medium text-[#1D1D1F]">通过</span>
-              </span>
-              <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full bg-white/80 border border-black/[0.06] shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
-                <kbd className="min-w-[1.4rem] px-1.5 py-0.5 rounded-md bg-[#F5F5F7] border border-black/[0.08] text-[10px] font-semibold text-[#1D1D1F] text-center font-mono">F</kbd>
-                <span className="font-medium text-[#1D1D1F]">未通过</span>
-              </span>
-              <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full bg-white/80 border border-black/[0.06] shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
                 <kbd className="px-1.5 py-0.5 rounded-md bg-[#F5F5F7] border border-black/[0.08] text-[10px] font-semibold text-[#1D1D1F] font-mono">←→</kbd>
                 <span>翻页</span>
               </span>
-              <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full bg-white/80 border border-black/[0.06] shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
-                <kbd className="min-w-[1.4rem] px-1.5 py-0.5 rounded-md bg-[#F5F5F7] border border-black/[0.08] text-[10px] font-semibold text-[#1D1D1F] text-center font-mono">C</kbd>
-                <span>剪裁</span>
-              </span>
-            </div>
-<div className="flex items-center gap-2">
-              <button
-                onClick={() => void handleBackToList()}
-                className="px-3 py-2 bg-white hover:bg-[#F5F5F7] active:scale-[0.98] text-[#86868B] hover:text-[#1D1D1F] font-medium text-xs rounded-xl border border-black/[0.08] shadow-2xs transition-all cursor-pointer flex items-center gap-1"
-                title="返回任务与下载中心"
-              >
-                <ChevronLeft className="w-3.5 h-3.5" />
-                <span>返回列表</span>
-              </button>
-
-              <button
-                onClick={() => void handleRejectCurrentPage()}
-                disabled={isProcessing}
-                className="px-3.5 py-2 bg-white hover:bg-[#FFF5F5] active:scale-[0.98] text-[#FF3B30] font-medium text-xs rounded-xl border border-[#FF3B30]/25 shadow-2xs transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
-                title="标记未通过 (F)"
-              >
-                <XCircle className="w-4 h-4" />
-                <span>未通过</span>
-                <kbd className="ml-0.5 px-1 py-0.5 rounded bg-[#F5F5F7] border border-black/[0.06] text-[10px] font-mono text-[#86868B]">F</kbd>
-              </button>
-
-
-              
-              
-
-              <button
-                onClick={() => void handlePassCurrentPage()}
-                disabled={isProcessing}
-                className="px-4 py-2 bg-[#0071E3] hover:bg-[#0077ED] active:scale-[0.98] text-white font-medium text-xs rounded-xl shadow-[0_2px_8px_rgba(0,113,227,0.28)] transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
-                title="本张通过 (空格)"
-              >
-                <Check className="w-4 h-4 stroke-[2.5]" />
-                <span>通过</span>
-                <kbd className="ml-0.5 px-1 py-0.5 rounded bg-white/20 border border-white/30 text-[10px] font-mono text-white/90">Space</kbd>
-              </button>
-
-              <button
-                onClick={() => {
-                  if (!allDecided) {
-                    triggerToast(`还有 ${task.items.length - decidedCount} 张未标记通过/未通过`);
-                    return;
-                  }
-                  onFinishTaskReview(task.id);
-                }}
-                disabled={!allDecided || isProcessing}
-                className={`px-3.5 py-2 font-medium text-xs rounded-xl border shadow-2xs transition-all flex items-center gap-1.5 ${
-                  allDecided
-                    ? 'bg-white hover:bg-[#F5F5F7] active:scale-[0.98] text-[#1D1D1F] border-black/[0.08] cursor-pointer'
-                    : 'bg-[#F5F5F7] text-[#C7C7CC] border-transparent cursor-not-allowed'
-                }`}
-                title={allDecided ? '全部确认后进入下载' : '需全部标记通过或未通过后才可完成'}
-              >
-                <span>确认完成</span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </button>
             </div>
           </footer>
         </main>
@@ -1973,12 +1987,40 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                   <Sparkles className={`w-3.5 h-3.5 ${curAiBusy ? 'animate-spin' : ''}`} />
                   <span>{curAiBusy ? '处理中…（约 20~60 秒）' : currentItem?.hasAiResult ? '用大模型重新处理' : '使用大模型处理'}</span>
                 </button>
-                {currentItem && aiNotes[currentItem.id] && !curAiBusy ? (
-                  <div className="rounded-xl bg-[#FF3B30]/[0.07] border border-[#FF3B30]/20 px-3 py-2.5 text-[12px] text-[#C62828] leading-relaxed">
-                    <p>{aiNotes[currentItem.id]}</p>
-                    <p className="mt-1 text-[11px] text-[#86868B]">失败不会自动重试。可以在上面换一个模型，再点一次。</p>
-                  </div>
-                ) : null}
+                {currentItem && aiNotes[currentItem.id] && !curAiBusy ? (() => {
+                  const rawNote = aiNotes[currentItem.id];
+                  const isError = typeof rawNote === 'object' ? rawNote.type === 'error' : typeof rawNote === 'string' && rawNote.includes('失败');
+                  const text = typeof rawNote === 'object' ? rawNote.text : rawNote;
+                  return (
+                    <div
+                      className={`rounded-xl px-3 py-2.5 text-[12px] leading-relaxed ${
+                        isError
+                          ? 'bg-[#FF3B30]/[0.07] border border-[#FF3B30]/20 text-[#C62828]'
+                          : 'bg-[#FF9500]/10 border border-[#FF9500]/30 text-[#B25E00]'
+                      }`}
+                    >
+                      <div className="flex items-start gap-1.5 font-medium">
+                        {isError ? (
+                          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-[#FF3B30]" />
+                        ) : (
+                          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-[#FF9500]" />
+                        )}
+                        <div className="flex-1">
+                          <p className="font-semibold mb-0.5">{isError ? '处理失败' : '版面差异提示（请人工核对）'}</p>
+                          <p className="text-[11px] leading-relaxed opacity-95">{text}</p>
+                          {!isError && (
+                            <p className="mt-1 text-[11px] text-[#86868B]">
+                              大模型结果已生成并展示。您可以在下方随时切换查看「算法结果」与「大模型结果」，自主决定采用哪个结果。
+                            </p>
+                          )}
+                          {isError && (
+                            <p className="mt-1 text-[11px] text-[#86868B]">失败不会自动重试。可以在上面换一个模型，再点一次。</p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })() : null}
               </div>
               {currentItem ? (
                 <div className="p-3.5 bg-white rounded-2xl border border-black/[0.06] shadow-2xs space-y-3">
@@ -2060,6 +2102,21 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
             </div>
 
             <div className="p-2.5 bg-white rounded-2xl border border-black/[0.06] shadow-2xs">
+              <label className="flex items-center justify-between gap-3 cursor-pointer">
+                <span>
+                  <span className="block text-xs font-semibold text-[#1D1D1F]">图像增强</span>
+                  <span className="block mt-0.5 text-[10px] text-[#86868B]">关闭时仅导出裁剪/透视后的原图内容</span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={localParams.processingEnabled !== false}
+                  onChange={(e) => handleParamChange('processingEnabled', e.target.checked)}
+                  className="w-4 h-4 rounded text-[#0071E3] cursor-pointer"
+                />
+              </label>
+            </div>
+
+            <div className={`p-2.5 bg-white rounded-2xl border border-black/[0.06] shadow-2xs transition-opacity ${localParams.processingEnabled === false ? 'opacity-45 pointer-events-none' : ''}`}>
               <div className="flex items-center justify-between mb-1.5">
                 <div className="text-[11px] font-medium text-[#86868B]">处理模式</div>
                 {detectedMode ? (
@@ -2107,112 +2164,8 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
               </p>
             </div>
 
-            <div className="p-3 bg-white rounded-2xl border border-black/[0.06] shadow-2xs space-y-2">
-              <div className="flex items-center justify-between text-xs">
-                <label className="text-[#1D1D1F] font-semibold">去污渍 / 褶皱消除强度</label>
-                <span className="font-mono text-[#0071E3] font-semibold tabular-nums text-xs">
-                  {localParams.denoiseStrength}%
-                </span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                step="1"
-                value={localParams.denoiseStrength}
-                onChange={(e) =>
-                  handleParamChange('denoiseStrength', parseInt(e.target.value, 10))
-                }
-                className="w-full"
-                style={{ '--pct': `${localParams.denoiseStrength}%` } as React.CSSProperties}
-              />
-              <div className="flex justify-between text-[10px] text-[#86868B] font-mono">
-                <span>轻度</span>
-                <span>标准印刷去渍(55%)</span>
-                <span>深度脱除</span>
-              </div>
-            </div>
-
-            <div className="p-3 bg-white rounded-2xl border border-black/[0.06] shadow-2xs space-y-2">
-              <div className="flex items-center justify-between text-xs">
-                <label className="text-[#1D1D1F] font-semibold">去渍（点渍 / 黄褐斑）</label>
-                <span className="font-mono text-[#0071E3] font-semibold tabular-nums text-xs">
-                  {localParams.stainStrength ?? 40}%
-                </span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                step="1"
-                value={localParams.stainStrength ?? 40}
-                onChange={(e) =>
-                  handleParamChange('stainStrength', parseInt(e.target.value, 10))
-                }
-                className="w-full"
-                style={{ '--pct': `${(localParams.stainStrength ?? 40)}%` } as React.CSSProperties}
-              />
-              <div className="flex justify-between text-[10px] text-[#86868B] font-mono">
-                <span>关闭</span>
-                <span>温和去渍(40%)</span>
-                <span>强去渍</span>
-              </div>
-            </div>
-
-            <div className="p-3 bg-white rounded-2xl border border-black/[0.06] shadow-2xs space-y-2">
-              <div className="flex items-center justify-between text-xs">
-                <label className="text-[#1D1D1F] font-semibold">印刷油墨黑白阈值 (字黑底白)</label>
-                <span className="font-mono text-[#0071E3] font-semibold tabular-nums text-xs">
-                  {localParams.contrastThreshold}%
-                </span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                step="1"
-                value={localParams.contrastThreshold}
-                onChange={(e) =>
-                  handleParamChange('contrastThreshold', parseInt(e.target.value, 10))
-                }
-                className="w-full"
-                style={{ '--pct': `${localParams.contrastThreshold}%` } as React.CSSProperties}
-              />
-              <div className="flex justify-between text-[10px] text-[#86868B] font-mono">
-                <span>淡墨细线</span>
-                <span>浓黑印刷(60%)</span>
-                <span>高黑二值化</span>
-              </div>
-            </div>
-
-            <div className="p-3 bg-white rounded-2xl border border-black/[0.06] shadow-2xs space-y-2">
-              <div className="flex items-center justify-between text-xs">
-                <label className="text-[#1D1D1F] font-semibold">印刷字迹边缘锐度</label>
-                <span className="font-mono text-[#0071E3] font-semibold tabular-nums text-xs">
-                  {localParams.sharpenStrength}%
-                </span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                step="1"
-                value={localParams.sharpenStrength}
-                onChange={(e) =>
-                  handleParamChange('sharpenStrength', parseInt(e.target.value, 10))
-                }
-                className="w-full"
-                style={{ '--pct': `${localParams.sharpenStrength}%` } as React.CSSProperties}
-              />
-              <div className="flex justify-between text-[10px] text-[#86868B] font-mono">
-                <span>原迹平滑</span>
-                <span>清晰排印(35%)</span>
-                <span>高锐利度</span>
-              </div>
-            </div>
-
             <div className="p-3 bg-[#F5F5F7] rounded-2xl border border-black/[0.04] text-[11px] text-[#86868B] leading-relaxed">
-              剪裁请用顶栏「剪裁」或按 <kbd className="px-1 rounded bg-white border border-black/[0.06] font-mono text-[#1D1D1F]">C</kbd>，在原图上框选后确认。原图不变，仅结果图按选区生成。
+              裁剪和分页请使用顶栏「结果裁剪」或「裁剪 / 分页」，操作对象是处理结果，原图保持不变。
             </div>
 
             {currentStats && (
@@ -2265,6 +2218,29 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
           </div>
         </div>
       )}
+
+      {currentItem ? (
+        <FinalCropDialog
+          open={finalCropSource !== null}
+          source={finalCropSource || 'original'}
+          imageUrl={finalCropSource === 'result' ? (currentItem.finalCrop?.source === 'result' ? currentItem.finalCropBaseUrl : currentItem.processedUrl) || currentItem.originalUrl : currentItem.originalUrl}
+          initial={currentItem.finalCrop?.source === finalCropSource ? currentItem.finalCrop.box : null}
+          onClose={() => setFinalCropSource(null)}
+          onApply={saveFinalCrop}
+        />
+      ) : null}
+
+      {currentItem ? (
+        <BatchCropDialog
+          open={splitCropOpen}
+          imageUrl={currentItem.processedUrl || currentItem.correctedUrl || currentItem.originalUrl}
+          cacheKey="zupu-crop-frames:default"
+          initial={splitCropInitial()}
+          initialProcessingEnabled={localParams.processingEnabled}
+          onClose={() => setSplitCropOpen(false)}
+          onConfirm={saveSplitCrop}
+        />
+      ) : null}
 
       {currentItem ? (
         <PerspectiveDialog

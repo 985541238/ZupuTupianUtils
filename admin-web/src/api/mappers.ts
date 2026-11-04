@@ -33,7 +33,8 @@ export function formatTime(t?: string) {
 /** Nest status → prototype Task.status used by UI cards */
 export function mapTaskStatus(status?: string): Task['status'] {
   if (status === 'completed') return 'completed';
-  if (status === 'reviewing' || status === 'processing') return 'reviewing';
+  if (status === 'reviewing') return 'completed'; // 兼容历史数据：不再进入人工审阅
+  if (status === 'processing') return 'reviewing';
   return 'pending'; // pending | failed | unknown
 }
 
@@ -79,10 +80,16 @@ export function mapImage(raw: any, taskId: string | number, pageNumber: number):
     originalHeight: h,
     nestStatus: raw.status,
     cropBoxRaw: raw.cropBox,
+    finalCrop: raw.finalCrop || null,
+    finalCropBaseUrl: raw.finalCropBaseUrl ? viewImageUrl(raw.finalCropBaseUrl) : undefined,
+    splitOriginalUrl: raw.splitOriginalUrl ? viewImageUrl(raw.splitOriginalUrl) : undefined,
+    splitSourceKey: raw.originalSourcePath || undefined,
+    splitQuad: raw.splitQuad || null,
     processMode: raw.processMode || (raw.resultUrl ? 'algo' : null),
     hasAlgoResult: !!raw.hasAlgoResult,
     hasAiResult: !!raw.hasAiResult,
     aiModelId: raw.aiModelId != null ? Number(raw.aiModelId) : null,
+    aiWarning: raw.aiWarning || null,
     cleanCost: raw.cleanCost != null ? Number(raw.cleanCost) || 0 : 0,
     errorMessage: raw.errorMessage || null,
     ocrJson: raw.ocrJson || null,

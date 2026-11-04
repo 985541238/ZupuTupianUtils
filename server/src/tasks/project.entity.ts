@@ -18,6 +18,10 @@ export class Project {
   @Column({ type: 'text', nullable: true })
   description: string | null;
 
+  /** 服务器侧的项目根目录；浏览器上传模式下为上传会话目录。 */
+  @Column({ name: 'root_path', length: 1024, nullable: true })
+  rootPath: string | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

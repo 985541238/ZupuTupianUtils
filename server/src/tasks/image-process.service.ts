@@ -1,4 +1,4 @@
-﻿import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import sharp from 'sharp';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -8,12 +8,15 @@ import { cpuGate } from '../common/cpu-gate';
 import { warmViewProxy } from '../common/view-proxy';
 
 export type ProcessParams = {
+  /** false = only crop/geometry; preserve the source appearance. */
+  processingEnabled?: boolean;
   threshold: number; // 80-220, maps to adaptive C bias around 168
   denoise: number; // 0-12 NLM strength (legacy blur 0-3 still accepted)
   contrast: number; // CLAHE clipLimit ~0.8-3
   /** 0~1 destain strength (mid-scale / LAB blot / round-blob filter). Mild default. */
   stain?: number;
   strongDestain?: boolean;
+  antiqueMode?: boolean;
   autoCrop: boolean;
   cropPadding: number;
   method?: 'adaptive' | 'sauvola' | 'relative';
@@ -24,11 +27,13 @@ export type ProcessParams = {
 export type CropBox = { x: number; y: number; w: number; h: number };
 
 export const DEFAULT_PARAMS: ProcessParams = {
+  processingEnabled: true,
   threshold: 176,
   denoise: 6,
   contrast: 1.5,
   stain: 0.4,
   strongDestain: false,
+  antiqueMode: false,
   // Product: only WeChat/manual cropBox may crop. Never auto content-crop.
   autoCrop: false,
   cropPadding: 16,
@@ -52,12 +57,15 @@ export class ImageProcessService {
       }
       // force-disable autoCrop — cropping only via cropBox
       p.autoCrop = false;
+      p.processingEnabled = p.processingEnabled !== false;
       if (typeof p.stain !== 'number' || Number.isNaN(p.stain)) {
         p.stain = fallback.stain ?? 0.4;
       } else {
         p.stain = Math.max(0, Math.min(1, p.stain));
       }
-      p.strongDestain = p.strongDestain === true;
+      // 不再提供强力去污，统一关闭，避免把谱中文字处理得过浅。
+      p.strongDestain = false;
+      p.antiqueMode = p.antiqueMode === true;
       return p;
     } catch {
       return { ...fallback };
@@ -324,6 +332,7 @@ export class ImageProcessService {
       String(params.cropPadding ?? 16),
     ];
     if (params.strongDestain) args.push('--strong-destain');
+    if (params.antiqueMode) args.push('--antique-mode');
     if (crop && crop.w > 0 && crop.h > 0) {
       args.push('--crop', `${crop.x},${crop.y},${crop.w},${crop.h}`);
     }
@@ -383,8 +392,8 @@ export class ImageProcessService {
   }
 
   /**
-   * 大模型结果「保真合成」（scripts/ai_fuse.py）：笔画全部取自原图，模型结果只用来区分字和污渍。
-   * 返回 ok=false 表示模型结果与原图版面对不上（改了字/版式、丢了内容），不应采用。
+   * 大模型结果「受约束重绘校验」（scripts/ai_fuse.py）：仅当整页文字区的版式和笔画位置
+   * 均通过严格检查时采用模型重绘结果；否则不采用，避免改字、漏字或移位。
    */
   /** 大模型处理前检查（不花钱）：保真合成需要 Python OpenCV，缺了就别去调模型，免得出了图也用不上 */
   async assertFusionReady(): Promise<void> {
@@ -399,7 +408,7 @@ export class ImageProcessService {
     originalPath: string,
     aiRawPath: string,
     outPath: string,
-    /** 算法成品：给了就以它为底，只用模型结果删掉残留污渍（效果不会比算法差） */
+    /** 算法成品：作为漏字/错位区域的保护性回退 */
     basePath?: string,
   ): Promise<{ ok: boolean; recall?: number; coverage?: number; dropped?: number; error?: string }> {
     const bin = await this.detectPython();
@@ -435,7 +444,7 @@ export class ImageProcessService {
           clearTimeout(timer);
           try {
             const meta = JSON.parse(stdout.trim().split(/\r?\n/).filter(Boolean).pop() || '{}');
-            if (meta.ok || meta.error === 'mismatch') resolve(meta);
+            if (meta.ok || meta.error === 'mismatch' || meta.warning) resolve(meta);
             else reject(new Error('保真合成失败：' + (meta.error || stderr || stdout)));
           } catch {
             reject(new Error('保真合成失败：' + (stderr || stdout)));
@@ -462,6 +471,17 @@ export class ImageProcessService {
     const resolved = await this.resolveCropAgainstSource(sourcePath, crop);
     const effectiveCrop = resolved.crop;
     const wantedCrop = !!(crop && crop.w > 0 && crop.h > 0);
+
+    // 裁剪本身也是一种处理。关闭增强时，不调用 ScanWash，直接输出原图内容。
+    if (params.processingEnabled === false) {
+      let passthrough = sharp(sourcePath, { failOn: 'none' }).rotate();
+      if (wantedCrop) {
+        if (!effectiveCrop) throw new Error('裁剪区域无效，请重新框选');
+        passthrough = passthrough.extract({ left: effectiveCrop.x, top: effectiveCrop.y, width: effectiveCrop.w, height: effectiveCrop.h });
+      }
+      const meta = await passthrough.png().toFile(outPath);
+      return { width: meta.width || 0, height: meta.height || 0 };
+    }
 
     // When a manual crop was requested, materialize it with sharp (EXIF-correct)
     // and run the cleaner on THAT file only — never on the full page.

@@ -81,7 +81,7 @@ def process_page(
     gray_in = _destain_gray(
         bgr,
         getattr(preset, "stain", 0.0),
-        bool(getattr(preset, "strong_destain", False)),
+        bool(getattr(preset, "strong_destain", False) or getattr(preset, "antique_mode", False)),
     )
 
     gray = normalize(gray_in, preset)
@@ -94,7 +94,13 @@ def process_page(
         if loss:
             warnings.append("text_loss_risk")
 
-    image, alpha = composite(gray, ink.mask, ink.cut, preset.sharpen)
+    image, alpha = composite(
+        gray,
+        ink.mask,
+        ink.cut,
+        preset.sharpen,
+        antique_mode=bool(getattr(preset, "antique_mode", False)),
+    )
     gutter = False
     if preset.keep_gutter:
         image, gutter = apply_gutter(image, alpha, ink.peaks, ink.spacing)

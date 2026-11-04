@@ -86,13 +86,14 @@ export const api = {
     estimatedCost?: number | null;
     projectId?: number | null;
     batchCrop?: { enabled: true; quads: number[][][] } | null;
+    processingEnabled?: boolean;
   }) => request<any>('/tasks', { method: 'POST', body: JSON.stringify(data) }),
   listProjects: () =>
     request<Array<{ id: number; name: string; surname?: string; volumeCount: number; totalPages: number; processing: number; reviewing: number; completed: number }>>(
       '/tasks/projects',
     ),
-  createProject: (data: { name: string; surname?: string }) =>
-    request<{ id: number; name: string; surname?: string }>('/tasks/projects', {
+  createProject: (data: { name: string; surname?: string; rootPath?: string; autoStart?: boolean }) =>
+    request<{ id: number; name: string; surname?: string; volumeIds?: number[] }>('/tasks/projects', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
@@ -106,6 +107,8 @@ export const api = {
   getTaskImages: (id: string | number) => request<any[]>('/tasks/' + id + '/images'),
   getTaskImage: (taskId: string | number, imageId: string | number) =>
     request<any>(`/tasks/${taskId}/images/${imageId}`),
+  deleteTaskImage: (taskId: string | number, imageId: string | number) =>
+    request<{ ok: boolean; id: number; totalCount: number }>(`/tasks/${taskId}/images/${imageId}`, { method: 'DELETE' }),
   detectPerspective: (taskId: string | number, imageId: string | number, pages: 1 | 2 = 1) =>
     request<{ found: boolean; quad?: number[][]; quads?: number[][][]; method?: string }>(`/tasks/${taskId}/images/${imageId}/perspective/detect`, {
       method: 'POST',
@@ -124,6 +127,12 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
+  recropSplitPages: (taskId: string | number, imageId: string | number, quads: number[][][], rotation = 0, processingEnabled = false) =>
+    request<any[]>(`/tasks/${taskId}/images/${imageId}/split-crop`, {
+      method: 'PUT', body: JSON.stringify({ quads, rotation, processingEnabled }),
+    }),
+  applyFinalCrop: (taskId: string | number, imageId: string | number, source: 'original' | 'result', box: any, rotation = 0) =>
+    request<any>(`/tasks/${taskId}/images/${imageId}/final-crop`, { method: 'PUT', body: JSON.stringify({ source, box, rotation }) }),
   detectMode: (taskId: string | number, imageId: string | number) =>
     request<{ mode: 'standard' | 'stained' | 'faint'; scores: Record<string, number> }>(
       `/tasks/${taskId}/images/${imageId}/detect-mode`,
@@ -299,6 +308,10 @@ export function downloadUrl(
   filter: 'all' | 'passed' | 'failed' = 'all',
 ): string {
   return `${BASE}/tasks/${taskId}/download?filter=${filter}&access_token=${encodeURIComponent(getToken())}`;
+}
+
+export function projectDownloadUrl(projectId: string | number): string {
+  return `${BASE}/tasks/projects/${projectId}/download?access_token=${encodeURIComponent(getToken())}`;
 }
 
 export async function previewImageBlob(

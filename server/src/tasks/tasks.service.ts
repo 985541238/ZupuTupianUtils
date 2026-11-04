@@ -124,8 +124,9 @@ export class TasksService implements OnModuleInit {
       volumeCount: vols.length,
       totalPages: vols.reduce((s, v) => s + (v.totalCount || 0), 0),
       processing: vols.filter((v) => v.status === 'processing').length,
-      reviewing: vols.filter((v) => v.status === 'reviewing').length,
-      completed: vols.filter((v) => v.status === 'completed').length,
+      reviewing: 0,
+      // 历史 reviewing 任务按已完成兼容展示；新任务直接写 completed。
+      completed: vols.filter((v) => v.status === 'completed' || v.status === 'reviewing').length,
     });
     return projects.map((p) => ({
       id: Number(p.id),
@@ -137,20 +138,44 @@ export class TasksService implements OnModuleInit {
     }));
   }
 
-  async createProject(userId: number, dto: { name?: string; surname?: string; description?: string }) {
+  async createProject(userId: number, dto: { name?: string; surname?: string; description?: string; rootPath?: string; autoStart?: boolean }) {
     const name = String(dto.name || dto.surname || '').trim();
     if (!name) throw new BadRequestException('请填写项目名称');
+    const rootPath = dto.rootPath ? path.resolve(String(dto.rootPath)) : null;
+    let volumeDirs: string[] = [];
+    if (rootPath) {
+      if (!fs.existsSync(rootPath) || !fs.statSync(rootPath).isDirectory()) throw new BadRequestException('项目根目录不存在: ' + rootPath);
+      // 只取一级目录；更深层目录按约定跳过，不阻断项目创建。
+      volumeDirs = fs.readdirSync(rootPath, { withFileTypes: true })
+        .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !e.name.startsWith('$'))
+        .map((e) => path.join(rootPath, e.name));
+    }
     const now = new Date();
     const p = this.projects.create({
       userId,
       name,
       surname: String(dto.surname || '').trim(),
       description: dto.description ? String(dto.description).trim() : null,
+      rootPath,
       createdAt: now,
       updatedAt: now,
     });
     const saved = await this.projects.save(p);
-    return { id: Number(saved.id), name: saved.name, surname: saved.surname };
+    const createdVolumes: number[] = [];
+    for (const dir of volumeDirs) {
+      const hasImages = fs.readdirSync(dir).some((name) => IMAGE_EXT.has(path.extname(name).toLowerCase()));
+      if (!hasImages) continue;
+      const volume = await this.create(userId, {
+        name: path.basename(dir),
+        sourceFolder: dir,
+        surname: saved.surname,
+        projectId: Number(saved.id),
+        processingEnabled: true,
+      });
+      createdVolumes.push(Number(volume.id));
+      if (dto.autoStart) this.enqueueVolume(Number(volume.id));
+    }
+    return { id: Number(saved.id), name: saved.name, surname: saved.surname, rootPath, volumeIds: createdVolumes };
   }
 
   async getProject(userId: number, projectId: number) {
@@ -243,6 +268,7 @@ export class TasksService implements OnModuleInit {
       estimatedCost?: number | null;
       projectId?: number | null;
       batchCrop?: { enabled?: boolean; quads?: number[][][] } | null;
+      processingEnabled?: boolean;
     },
   ) {
     const name = dto.name;
@@ -339,44 +365,24 @@ export class TasksService implements OnModuleInit {
       sourceFolder: folder,
       outputFolder,
       status: 'pending',
-      totalCount: batchCrop ? files.length * 2 : files.length,
+      // 裁剪/分页属于处理结果后的派生操作，建卷阶段始终只登记原图。
+      totalCount: files.length,
       doneCount: 0,
       confirmedCount: 0,
-      defaultParams: JSON.stringify(DEFAULT_PARAMS),
+      defaultParams: JSON.stringify({ ...DEFAULT_PARAMS, processingEnabled: dto.processingEnabled !== false }),
       createdAt: now,
       updatedAt: now,
     });
     const saved = await this.tasks.save(task);
 
     const rows = [];
-    const splitRoot = path.join(outputFolder, 'split-sources');
-    if (batchCrop) fs.mkdirSync(splitRoot, { recursive: true });
     for (let i = 0; i < files.length; i++) {
       const fileName = files[i];
       const sourcePath = path.join(folder, fileName);
-      let width: number | null = null;
-      let height: number | null = null;
-      try {
-        const meta = await sharp(sourcePath, { failOn: 'none' }).metadata();
-        width = meta.width || null;
-        height = meta.height || null;
-      } catch {
-        /* ignore */
-      }
-      if (!batchCrop) {
-        rows.push(this.images.create({ taskId: saved.id, fileName, sourcePath, status: 'pending', sortOrder: i, width, height, params: JSON.stringify(DEFAULT_PARAMS), createdAt: now, updatedAt: now }));
-      } else {
-        // UI 顺序为蓝后页、绿前页；落库顺序按用户要求为绿前页、蓝后页。
-        const ordered = [batchCrop.quads![1], batchCrop.quads![0]];
-        const labels = ['前页', '后页'];
-        for (let part = 0; part < 2; part++) {
-          const stem = `${String(i + 1).padStart(4, '0')}-${labels[part]}`;
-          const splitPath = path.join(splitRoot, stem + '.png');
-          await this.processor.warpPerspectivePage(sourcePath, splitPath, ordered[part]);
-          const sm = await sharp(splitPath, { failOn: 'none' }).metadata();
-          rows.push(this.images.create({ taskId: saved.id, fileName: stem + '.png', sourcePath: splitPath, status: 'pending', sortOrder: i * 2 + part, width: sm.width || null, height: sm.height || null, params: JSON.stringify(DEFAULT_PARAMS), createdAt: now, updatedAt: now }));
-        }
-      }
+      // 建卷阶段只登记路径，尺寸在实际处理/预览时按需读取，避免上千张图片阻塞创建。
+      const width: number | null = null;
+      const height: number | null = null;
+      rows.push(this.images.create({ taskId: saved.id, fileName, sourcePath, status: 'pending', sortOrder: i, width, height, params: JSON.stringify({ ...DEFAULT_PARAMS, processingEnabled: dto.processingEnabled !== false }), createdAt: now, updatedAt: now }));
     }
     await this.images.save(rows);
 
@@ -405,7 +411,26 @@ export class TasksService implements OnModuleInit {
         await this.images.save(img);
       }
     }
-    return list;
+    return this.groupSplitPages(list);
+  }
+
+  /** 同一原图的分页相邻展示，沿用每组首次出现的位置。 */
+  private groupSplitPages(list: TaskImage[]): TaskImage[] {
+    const seen = new Set<string>();
+    const grouped: TaskImage[] = [];
+    for (const img of list) {
+      const key = img.originalSourcePath;
+      if (!key) { grouped.push(img); continue; }
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const siblings = list.filter((item) => item.originalSourcePath === key);
+      siblings.sort((a, b) => {
+        const rank = (item: TaskImage) => /(?:-1|-前页)\.[^.]+$/i.test(item.fileName) ? 0 : /(?:-2|-后页)\.[^.]+$/i.test(item.fileName) ? 1 : 2;
+        return rank(a) - rank(b) || a.sortOrder - b.sortOrder;
+      });
+      grouped.push(...siblings);
+    }
+    return grouped;
   }
 
   async getImage(userId: number, taskId: number, imageId: number) {
@@ -413,6 +438,48 @@ export class TasksService implements OnModuleInit {
     const img = await this.images.findOne({ where: { id: imageId, taskId } });
     if (!img) throw new NotFoundException('图片不存在');
     return img;
+  }
+
+  /**
+   * 删除裁剪/分页生成的派生页。原始导入页始终不能通过此接口删除，避免误删用户本地原图。
+   */
+  async deleteImage(userId: number, taskId: number, imageId: number) {
+    const task = await this.get(userId, taskId);
+    const img = await this.getImage(userId, taskId, imageId);
+    let finalCrop: any = null;
+    try { finalCrop = img.finalCrop ? JSON.parse(img.finalCrop) : null; } catch { finalCrop = null; }
+    const isDerived = Boolean(img.originalSourcePath) || finalCrop?.source === 'result';
+    if (!isDerived) {
+      throw new BadRequestException('原始图片不能单独删除，请删除整卷任务');
+    }
+    if (img.status === 'processing') {
+      throw new BadRequestException('图片正在处理中，暂时不能删除');
+    }
+
+    const outputRoot = path.resolve(task.outputFolder || '');
+    const outputPrefix = outputRoot ? outputRoot + path.sep : '';
+    const paths = new Set<string>();
+    for (const candidate of [img.resultPath, img.algoResultPath, img.aiResultPath, img.thumbPath, img.sourcePath]) {
+      if (!candidate) continue;
+      const resolved = path.resolve(candidate);
+      if (resolved === outputRoot || !resolved.startsWith(outputPrefix)) continue;
+      paths.add(resolved);
+    }
+    for (const filePath of paths) {
+      try {
+        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) fs.unlinkSync(filePath);
+      } catch (e) {
+        this.logger.warn(`派生页文件删除失败，继续删除记录: ${filePath}; ${e}`);
+      }
+    }
+
+    await this.images.delete({ id: Number(img.id), taskId: Number(task.id) });
+    const totalCount = await this.images.count({ where: { taskId: Number(task.id) } });
+    const doneCount = await this.images.count({ where: { taskId: Number(task.id), status: 'ready' } })
+      + await this.images.count({ where: { taskId: Number(task.id), status: 'confirmed' } });
+    const confirmedCount = await this.images.count({ where: { taskId: Number(task.id), status: 'confirmed' } });
+    await this.tasks.update(Number(task.id), { totalCount, doneCount, confirmedCount, updatedAt: new Date() });
+    return { ok: true, id: Number(img.id), totalCount };
   }
 
   async processTask(userId: number, taskId: number) {
@@ -608,7 +675,8 @@ export class TasksService implements OnModuleInit {
         task.status = 'failed';
         task.errorMessage = `全部 ${failed} 张处理失败`;
       } else {
-        task.status = 'reviewing';
+        // 图片处理完成即视为完成，不再等待人工审阅/逐页确认。
+        task.status = 'completed';
         task.errorMessage = failed ? `${failed} 张失败，其余已就绪` : null;
       }
       task.doneCount = ok;
@@ -666,7 +734,7 @@ export class TasksService implements OnModuleInit {
   /** 现有算法处理一页（整本处理用） */
   private async algoProcessOne(task: Task, img: TaskImage, defaults: ProcessParams) {
     const params = this.processor.parseParams(img.params, defaults);
-    const crop = this.processor.parseCrop(img.cropBox);
+    const crop = (await this.finalOriginalCrop(img)) || this.processor.parseCrop(img.cropBox);
     const resultPath = this.algoPath(task, img);
     const thumbPath = this.thumbPath(task, img);
     const started = Date.now();
@@ -694,7 +762,7 @@ export class TasksService implements OnModuleInit {
   private async aiProcessOne(task: Task, img: TaskImage, model: AiModel, retry: boolean) {
     await this.restoreOriginalSource(task, img);
     if (!img.sourcePath || !fs.existsSync(img.sourcePath)) throw new Error('原图不存在：' + img.fileName);
-    const crop = this.processor.parseCrop(img.cropBox);
+    const crop = (await this.finalOriginalCrop(img)) || this.processor.parseCrop(img.cropBox);
     let input = img.sourcePath;
     let tmp: string | null = null;
     if (crop && crop.w > 0 && crop.h > 0) {
@@ -725,7 +793,7 @@ export class TasksService implements OnModuleInit {
       let reused = false;
       try {
         const mark = JSON.parse(fs.readFileSync(markPath, 'utf8'));
-        reused = mark?.key === key && mark?.state === 'raw' && fs.existsSync(rawPath);
+        reused = mark?.key === key && (mark?.state === 'raw' || mark?.state === 'mismatch') && fs.existsSync(rawPath);
       } catch {}
 
       let cost = 0;
@@ -758,26 +826,36 @@ export class TasksService implements OnModuleInit {
         } catch {}
       }
 
-      // 保真合成：笔画全部取自原图，模型结果只用来区分字和污渍（AI_FUSE=0 时直接用模型原图）
+      let aiWarning: string | null = null;
       if (process.env.AI_FUSE === '0') {
         fs.copyFileSync(rawPath, resultPath);
       } else {
-        const fuse = await this.processor.fuseAiResult(input, rawPath, resultPath, algoOut);
-        this.logger.log(`AI 保真合成 image=${img.id} ${JSON.stringify(fuse)}`);
-        if (!fuse.ok) {
-          // 这张图对不上，下次要重新出图，不能复用
-          this.writeAiMark(markPath, key, 'mismatch');
-          throw new AiMismatchError(
-            `大模型这次画出的页面和原图大部分对不上（重画了版面或丢了内容），没有采用它的结果，本页保留算法结果` +
-              (fuse.recall != null
-                ? `【对齐度 ${Math.round((fuse.recall || 0) * 100)}%（要求 ≥70%）${(fuse as any).bad_tiles != null ? `，${(fuse as any).bad_tiles}/${(fuse as any).text_tiles} 个字区画错或丢字` : ''}】`
-                : '') +
-              (cost ? `（本次已产生费用 ¥${cost.toFixed(2)}）` : '') +
-              '。可以再试一次，或换一个图片处理模型。',
-          );
+        let fuse: any;
+        try {
+          fuse = await this.processor.fuseAiResult(input, rawPath, resultPath, algoOut);
+          this.logger.log(`AI 保真合成 image=${img.id} ${JSON.stringify(fuse)}`);
+        } catch (fuseErr: any) {
+          this.logger.warn(`AI 保真合成异常 image=${img.id}: ${fuseErr?.message || fuseErr}`);
+          fuse = { ok: false, error: 'fuse_exception' };
+        }
+        // 兜底：如果 resultPath 未生成，直接复用模型的 rawPath
+        if (!fs.existsSync(resultPath) && fs.existsSync(rawPath)) {
+          fs.copyFileSync(rawPath, resultPath);
+        }
+        if (!fuse?.ok) {
+          // 版面/笔画校验未完全通过：给出明确提示，但不拦截结果输出，由客户自主决定是否采用
+          aiWarning =
+            `大模型画出的页面与原图可能存在局部差异` +
+            (fuse?.recall != null
+              ? `【对齐度 ${Math.round((fuse.recall || 0) * 100)}%${fuse.bad_tiles != null ? `，${fuse.bad_tiles}/${fuse.text_tiles} 个字区可能存在偏差` : ''}】`
+              : '') +
+            (cost ? `（本次已产生费用 ¥${cost.toFixed(2)}）` : '') +
+            '。已保留算法结果与大模型结果，请在下方对比并自主决定是否使用大模型结果。';
+          this.writeAiMark(markPath, key, 'done', aiWarning);
+        } else {
+          this.writeAiMark(markPath, key, 'done');
         }
       }
-      this.writeAiMark(markPath, key, 'done');
       await this.processor.makeThumb(resultPath, thumbPath);
       img.aiResultPath = resultPath;
       img.aiModelId = Number(model.id);
@@ -788,6 +866,7 @@ export class TasksService implements OnModuleInit {
       img.status = 'ready';
       img.errorMessage = null;
       img.updatedAt = new Date();
+      return { aiWarning };
     } finally {
       if (tmp) {
         try {
@@ -837,7 +916,7 @@ export class TasksService implements OnModuleInit {
     } catch (e: any) {
       throw new BadRequestException({ message: e?.message || String(e), errorCode: 'config:' });
     }
-    const job: { state: 'running' | 'done' | 'failed'; startedAt: number; finishedAt?: number; error?: string; errorCode?: string; result?: any } = {
+    const job: { state: 'running' | 'done' | 'failed'; startedAt: number; finishedAt?: number; error?: string; errorCode?: string; result?: any; warning?: string } = {
       state: 'running',
       startedAt: Date.now(),
     };
@@ -848,6 +927,9 @@ export class TasksService implements OnModuleInit {
         .then((result) => {
           job.state = 'done';
           job.result = result;
+          if ((result as any)?.aiWarning) {
+            job.warning = (result as any).aiWarning;
+          }
         })
         .catch((e: any) => {
           job.state = 'failed';
@@ -877,6 +959,7 @@ export class TasksService implements OnModuleInit {
       elapsedMs: (job.finishedAt || Date.now()) - job.startedAt,
       error: job.error,
       errorCode: job.errorCode,
+      warning: (job as any)?.warning || (job.result as any)?.aiWarning,
       image: job.result,
     };
   }
@@ -887,8 +970,10 @@ export class TasksService implements OnModuleInit {
       img.algoResultPath = img.resultPath;
     }
     const costBefore = Number(img.cleanCost || 0) || 0;
+    let aiWarning: string | null = null;
     try {
-      await this.aiProcessOne(task, img, model, false);
+      const res = await this.aiProcessOne(task, img, model, false);
+      aiWarning = res?.aiWarning || null;
     } catch (e) {
       {
         // 不管哪种失败，只要模型已出图扣费，费用都照记；页面保持原样
@@ -915,7 +1000,9 @@ export class TasksService implements OnModuleInit {
     if (delta > 0) await this.tasks.increment({ id: task.id }, 'actualCost', delta);
     await this.bumpTaskToReviewingIfNeeded(task);
     await this.refreshConfirmed(Number(task.id));
-    return this.imageView(img, model);
+    const view = this.imageView(img, model);
+    if (aiWarning) (view as any).aiWarning = aiWarning;
+    return view;
   }
 
   /** 在「算法结果」和「大模型结果」之间切换当前结果 */
@@ -945,6 +1032,8 @@ export class TasksService implements OnModuleInit {
     const bust = 't=' + new Date(img.updatedAt || Date.now()).getTime();
     const withBust = (u: string | null) => (u ? u + (u.includes('?') ? '&' : '?') + bust : null);
     const { algoResultPath, aiResultPath, ...rest } = img as any;
+    let finalCrop: any = null;
+    try { finalCrop = img.finalCrop ? JSON.parse(img.finalCrop) : null; } catch { /* ignore malformed legacy data */ }
     // 做过透视修正：sourcePath 是拉正后的图，旁边的 json 里记着真正的原图（选四个点要在原图上选）
     const perspApplied = /[\\/]persp[\\/]/.test(img.sourcePath || '');
     let trueOriginal = img.sourcePath;
@@ -958,18 +1047,232 @@ export class TasksService implements OnModuleInit {
         /* 没有记录就用拉正后的图 */
       }
     }
+    let aiWarning: string | null = null;
+    if (aiResultPath) {
+      try {
+        const rawMark = String(aiResultPath).replace(/\.png$/i, '') + '_raw.png.json';
+        if (fs.existsSync(rawMark)) {
+          const markData = JSON.parse(fs.readFileSync(rawMark, 'utf8'));
+          if (markData?.warning) aiWarning = markData.warning;
+        }
+      } catch {}
+    }
     return {
       ...rest,
       sourceUrl: perspApplied ? withBust(this.fileUrl(img.sourcePath)) : this.fileUrl(img.sourcePath),
       perspectiveApplied: perspApplied,
       perspectiveQuads: perspQuads,
       trueOriginalUrl: perspApplied ? withBust(this.fileUrl(trueOriginal)) : this.fileUrl(trueOriginal),
+      splitOriginalUrl: img.originalSourcePath ? withBust(this.fileUrl(img.originalSourcePath)) : null,
+      splitQuad: img.splitQuad ? (() => { try { return JSON.parse(img.splitQuad!); } catch { return null; } })() : null,
+      finalCrop: finalCrop ? { source: finalCrop.source, box: finalCrop.box } : null,
+      finalCropBaseUrl: finalCrop?.source === 'result' && finalCrop.basePath && fs.existsSync(finalCrop.basePath) ? withBust(this.fileUrl(finalCrop.basePath)) : null,
       resultUrl: withBust(this.fileUrl(img.resultPath)),
       thumbUrl: withBust(this.fileUrl(img.thumbPath)),
       hasAlgoResult: !!(algoResultPath && fs.existsSync(algoResultPath)),
       hasAiResult: !!(aiResultPath && fs.existsSync(aiResultPath)),
       aiModelName: aiModel ? aiModel.displayName : undefined,
+      aiWarning,
     };
+  }
+
+  async applyFinalCrop(userId: number, taskId: number, imageId: number, source: string, box: CropBox, rotation = 0) {
+    if (!['original', 'result'].includes(source) || !box || ![box.x, box.y, box.w, box.h].every(Number.isFinite) || box.x < 0 || box.y < 0 || box.w <= 0 || box.h <= 0 || box.x + box.w > 1.00001 || box.y + box.h > 1.00001) {
+      throw new BadRequestException('裁剪范围无效，请重新选择');
+    }
+    if (!Number.isFinite(Number(rotation)) || Number(rotation) < -360 || Number(rotation) > 360) {
+      throw new BadRequestException('旋转角度无效，请重新选择');
+    }
+    rotation = Number(rotation);
+    const task = await this.get(userId, taskId);
+    const img = await this.getImage(userId, taskId, imageId);
+    let existing: any = null;
+    try { existing = img.finalCrop ? JSON.parse(img.finalCrop) : null; } catch { /* ignore */ }
+    const input = source === 'original' ? img.sourcePath : existing?.source === 'result' && existing.basePath && fs.existsSync(existing.basePath) ? existing.basePath : img.resultPath;
+    if (!input || !fs.existsSync(input)) throw new BadRequestException('裁剪底图不存在，请重新生成处理结果');
+    const dir = path.join(task.outputFolder, 'final-crops');
+    fs.mkdirSync(dir, { recursive: true });
+    const id = crypto.randomBytes(12).toString('hex');
+    let basePath = input;
+    if (source === 'result' && (input !== existing?.basePath || Math.abs(rotation) > 0.001)) {
+      basePath = path.join(dir, `${id}-base.png`);
+      await sharp(input, { failOn: 'none' }).rotate(rotation).png().toFile(basePath);
+    }
+    const outPath = path.join(dir, `${id}-result.png`);
+    const thumbPath = path.join(dir, `${id}-thumb.jpg`);
+    const resolved = await this.processor.resolveCropAgainstSource(basePath, box);
+    if (!resolved.crop) throw new BadRequestException('裁剪区域无效');
+    await this.processor.materializeCrop(basePath, resolved.crop, outPath);
+    await this.processor.makeThumb(outPath, thumbPath);
+    if (source === 'result') {
+      // 结果裁剪是派生页：保留输入结果，允许同一结果连续裁剪多次。
+      const stem = path.basename(img.fileName, path.extname(img.fileName));
+      const siblings = await this.images.find({ where: { taskId, originalSourcePath: img.id.toString() } as any });
+      const nextIndex = siblings.length + 1;
+      const child = this.images.create({
+        taskId,
+        fileName: `${stem}-${nextIndex}.png`,
+        sourcePath: outPath,
+        originalSourcePath: img.id.toString(),
+        resultPath: outPath,
+        algoResultPath: outPath,
+        thumbPath,
+        finalCrop: JSON.stringify({ source: 'result', box, rotation, basePath, parentImageId: Number(img.id) }),
+        params: img.params,
+        status: 'ready',
+        sortOrder: img.sortOrder + nextIndex,
+        width: (await sharp(outPath).metadata()).width || null,
+        height: (await sharp(outPath).metadata()).height || null,
+        processMode: img.processMode || 'algo',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      await this.images.save(child);
+      task.totalCount = await this.images.count({ where: { taskId } });
+      task.updatedAt = new Date();
+      await this.tasks.save(task);
+      return this.imageView(child);
+    }
+    img.finalCrop = JSON.stringify({ source, box, basePath: source === 'result' ? basePath : null });
+    if (source === 'original') {
+      // 后续增强以这块原图区域为输入；旧的 AI 结果来自其他范围，不能继续沿用。
+      img.cropBox = null;
+      img.aiResultPath = null;
+      img.processMode = 'algo';
+    }
+    img.resultPath = outPath;
+    img.thumbPath = thumbPath;
+    img.status = 'ready';
+    img.updatedAt = new Date();
+    await this.images.save(img);
+    await this.bumpTaskToReviewingIfNeeded(task);
+    await this.refreshConfirmed(taskId);
+    return this.imageView(img);
+  }
+
+  private async finalOriginalCrop(img: TaskImage): Promise<CropBox | null> {
+    let saved: any;
+    try { saved = img.finalCrop ? JSON.parse(img.finalCrop) : null; } catch { return null; }
+    if (saved?.source !== 'original' || !saved.box) return null;
+    const resolved = await this.processor.resolveCropAgainstSource(img.sourcePath, saved.box);
+    if (!resolved.crop) throw new BadRequestException('已保存的原图裁剪范围无效，请重新裁剪');
+    return resolved.crop;
+  }
+
+  /** 重新按原始双页图裁剪一对页面。两个子页仍保留同一原图，后续可再次编辑。 */
+  async recropSplitPages(userId: number, taskId: number, imageId: number, quads: number[][][], rotation = 0, processingEnabled = false) {
+    const valid = (q: any) => Array.isArray(q) && q.length === 4 && q.every((p) => Array.isArray(p) && p.length === 2 && Number.isFinite(+p[0]) && Number.isFinite(+p[1]));
+    if (!Array.isArray(quads) || ![1, 2].includes(quads.length) || !quads.every(valid) || !Number.isFinite(Number(rotation)) || Number(rotation) < -360 || Number(rotation) > 360) {
+      throw new BadRequestException('裁剪区域或旋转角度无效');
+    }
+    rotation = Number(rotation);
+    const task = await this.get(userId, taskId);
+    const current = await this.getImage(userId, taskId, imageId);
+    // 分页的输入改为完整处理结果；原图仅作为处理阶段输入，不能在这里再次裁剪。
+    const original = current.resultPath || current.sourcePath;
+    if (!original || !fs.existsSync(original)) throw new BadRequestException('处理结果不存在，无法裁剪');
+    let pages = current.originalSourcePath ? await this.images.find({ where: { taskId, originalSourcePath: current.originalSourcePath } as any, order: { sortOrder: 'ASC' } }) : [current];
+    if (pages.length > 1 && quads.length === 1) throw new BadRequestException('已分页的图片请使用双页分页模式');
+    if (pages.length > 2) throw new BadRequestException('分页记录异常');
+    const normalized = quads.map((q) =>
+      q.map((p) => [
+        Math.max(0, Math.min(1, +p[0])),
+        Math.max(0, Math.min(1, +p[1])),
+      ]),
+    );
+    // 编辑器顺序：蓝色左/后页、绿色右/前页；导出顺序仍是前页、后页。
+    const sourceQuads = normalized.length === 2 ? [normalized[1], normalized[0]] : normalized;
+    const outputDir = path.join(task.outputFolder, 'manual-pages');
+    fs.mkdirSync(outputDir, { recursive: true });
+    const runId = crypto.randomBytes(8).toString('hex');
+    const rotated = path.join(outputDir, `${runId}-rotated.png`);
+    await sharp(original, { failOn: 'none' }).rotate().rotate(rotation).png().toFile(rotated);
+    const generated: { source: string; result: string; thumb: string; width: number; height: number; params: ProcessParams }[] = [];
+    try {
+      for (let i = 0; i < sourceQuads.length; i++) {
+        const source = path.join(outputDir, `${runId}-${i}-source.png`);
+        const result = path.join(outputDir, `${runId}-${i}-result.png`);
+        const thumb = path.join(outputDir, `${runId}-${i}-thumb.jpg`);
+        await this.processor.warpPerspectivePage(rotated, source, sourceQuads[i]);
+        const meta = await sharp(source).metadata();
+        // 分页/裁剪只对处理结果做几何变换，不再重复执行算法或 AI。
+        const params = { ...this.processor.parseParams((pages[i] || current).params), processingEnabled: false };
+        await sharp(source, { failOn: 'none' }).png().toFile(result);
+        await this.processor.makeThumb(result, thumb);
+        generated.push({ source, result, thumb, width: meta.width || 0, height: meta.height || 0, params });
+      }
+    } finally { try { fs.unlinkSync(rotated); } catch {} }
+    if (!current.originalSourcePath) {
+      // 新模型：完整处理结果保留在 current，分页只新增派生页，不改写原图/完整结果记录。
+      const stem = path.basename(current.fileName, path.extname(current.fileName));
+      const now = new Date();
+      const derived = generated.map((out, i) => this.images.create({
+        taskId,
+        fileName: `${stem}-${i + 1}.png`,
+        sourcePath: out.source,
+        originalSourcePath: current.id.toString(),
+        splitQuad: JSON.stringify(sourceQuads[i]),
+        resultPath: out.result,
+        algoResultPath: out.result,
+        thumbPath: out.thumb,
+        params: JSON.stringify(out.params),
+        status: 'ready',
+        sortOrder: current.sortOrder + i + 1,
+        width: out.width || null,
+        height: out.height || null,
+        processMode: current.processMode || 'algo',
+        createdAt: now,
+        updatedAt: now,
+      }));
+      await this.images.manager.transaction(async (manager) => {
+        await manager.getRepository(TaskImage).save(derived);
+        const totalCount = await manager.getRepository(TaskImage).count({ where: { taskId } });
+        const confirmedCount = await manager.getRepository(TaskImage).count({ where: { taskId, status: 'confirmed' } });
+        await manager.getRepository(Task).update(taskId, { totalCount, confirmedCount, updatedAt: now });
+      });
+      return derived.map((p) => this.imageView(p));
+    }
+    const needsBackPage = sourceQuads.length === 2 && pages.length === 1;
+    if (needsBackPage) {
+      const stem = path.basename(original, path.extname(original));
+      const now = new Date();
+      const back = this.images.create({ taskId, fileName: `${stem}-2.png`, sourcePath: generated[1].source, originalSourcePath: original, sortOrder: current.sortOrder + 1, status: 'ready', params: JSON.stringify(generated[1].params), createdAt: now, updatedAt: now });
+      pages = [current, back];
+    }
+    for (let i = 0; i < pages.length; i++) {
+      const page = pages[i];
+      const quad = sourceQuads[i];
+      const out = generated[i];
+      if (pages.length === 2) page.fileName = `${path.basename(original, path.extname(original))}-${i + 1}.png`;
+      page.sourcePath = out.source;
+      page.originalSourcePath = original;
+      page.width = out.width || null;
+      page.height = out.height || null;
+      page.splitQuad = JSON.stringify(quad);
+      page.cropBox = null;
+      page.finalCrop = null;
+      page.aiResultPath = null;
+      page.aiModelId = null;
+      page.params = JSON.stringify(out.params);
+      page.algoResultPath = out.result;
+      page.resultPath = out.result;
+      page.thumbPath = out.thumb;
+      page.processMode = 'algo';
+      page.status = 'ready';
+      page.updatedAt = new Date();
+    }
+    // 页序、结果和任务计数必须一起提交；任一保存失败时回滚，避免留下半组分页。
+    await this.images.manager.transaction(async (manager) => {
+      const repo = manager.getRepository(TaskImage);
+      if (needsBackPage) {
+        await repo.createQueryBuilder().update(TaskImage).set({ sortOrder: () => 'sort_order + 1' }).where('task_id = :taskId AND sort_order > :order', { taskId, order: current.sortOrder }).execute();
+      }
+      await repo.save(pages);
+      const totalCount = await repo.count({ where: { taskId } });
+      const confirmedCount = await repo.count({ where: { taskId, status: 'confirmed' } });
+      await manager.getRepository(Task).update(taskId, { totalCount, confirmedCount, updatedAt: new Date(), ...(task.status === 'completed' ? { status: 'reviewing' } : {}) });
+    });
+    return pages.map((p) => this.imageView(p));
   }
 
   private platformName(code?: string | null) {
@@ -1058,9 +1361,9 @@ export class TasksService implements OnModuleInit {
     return h.digest('hex');
   }
 
-  private writeAiMark(markPath: string, key: string, state: 'raw' | 'mismatch' | 'done') {
+  private writeAiMark(markPath: string, key: string, state: 'raw' | 'mismatch' | 'done', warning?: string | null) {
     try {
-      fs.writeFileSync(markPath, JSON.stringify({ key, state, at: Date.now() }));
+      fs.writeFileSync(markPath, JSON.stringify({ key, state, warning: warning || null, at: Date.now() }));
     } catch {}
   }
 
@@ -1179,6 +1482,7 @@ export class TasksService implements OnModuleInit {
    * Undoes any earlier mistake that baked a crop into outputFolder/sources.
    */
   private async restoreOriginalSource(task: Task, img: TaskImage) {
+    if (img.originalSourcePath && img.sourcePath && fs.existsSync(img.sourcePath)) return;
     const importPath = path.join(task.sourceFolder, img.fileName);
     const sourcesDir = path.join(task.outputFolder, 'sources');
     const baked = path.join(sourcesDir, this.safeName(img.fileName) + '.png');
@@ -1258,6 +1562,7 @@ export class TasksService implements OnModuleInit {
     } else if (body.cropBox === undefined) {
       processCrop = this.processor.parseCrop(img.cropBox);
     }
+    processCrop = (await this.finalOriginalCrop(img)) || processCrop;
     return this.processor.previewBuffer(img.sourcePath, params, processCrop, true);
   }
 
@@ -1298,6 +1603,9 @@ export class TasksService implements OnModuleInit {
     const task = await this.get(userId, taskId);
     const img = await this.getImage(userId, taskId, imageId);
     const prevCrop = img.cropBox || null;
+    if (img.finalCrop) {
+      try { if (JSON.parse(img.finalCrop)?.source !== 'original') img.finalCrop = null; } catch { img.finalCrop = null; }
+    }
     const params = {
       ...DEFAULT_PARAMS,
       ...(body.params || this.processor.parseParams(img.params)),
@@ -1332,6 +1640,8 @@ export class TasksService implements OnModuleInit {
         processCrop = null;
       }
     }
+
+    processCrop = (await this.finalOriginalCrop(img)) || processCrop;
 
     const resultPath = path.join(
       task.outputFolder,
@@ -1380,6 +1690,9 @@ export class TasksService implements OnModuleInit {
     const task = await this.get(userId, taskId);
     const img = await this.getImage(userId, taskId, imageId);
     const prevCrop = img.cropBox || null;
+    if (img.finalCrop) {
+      try { if (JSON.parse(img.finalCrop)?.source !== 'original') img.finalCrop = null; } catch { img.finalCrop = null; }
+    }
     await this.restoreOriginalSource(task, img);
 
     const params = {
@@ -1415,6 +1728,8 @@ export class TasksService implements OnModuleInit {
       processCrop = null;
       img.cropBox = null;
     }
+
+    processCrop = (await this.finalOriginalCrop(img)) || processCrop;
 
     // Persist processed result to disk so leave→re-enter keeps the clean image
     const resultPath = path.join(
@@ -1509,11 +1824,8 @@ export class TasksService implements OnModuleInit {
   }
 
   private async bumpTaskToReviewingIfNeeded(task: Task) {
-    if (task.status === 'completed') {
-      task.status = 'reviewing';
-      task.updatedAt = new Date();
-      await this.tasks.save(task);
-    }
+    // 已取消图片处理的人工审阅状态；结果调整不会把任务重新打开成审阅中。
+    if (task.status === 'completed') return;
   }
 
   private async refreshConfirmed(taskId: number) {
@@ -1532,7 +1844,7 @@ export class TasksService implements OnModuleInit {
       where: { taskId },
       order: { sortOrder: 'ASC' },
     });
-    let ready = imgs.filter((img) => img.resultPath && fs.existsSync(img.resultPath));
+    let ready = this.groupSplitPages(imgs).filter((img) => img.resultPath && fs.existsSync(img.resultPath));
     if (filter === 'passed') {
       ready = ready.filter((img) => img.status === 'confirmed');
     } else if (filter === 'failed') {
@@ -1564,19 +1876,30 @@ export class TasksService implements OnModuleInit {
       archive.file(img.resultPath!, {
         name: 'results/' + this.safeName(img.fileName) + '.png',
       });
-      const importPath = path.join(task.sourceFolder, img.fileName);
-      const original =
-        fs.existsSync(importPath)
-          ? importPath
-          : fs.existsSync(img.sourcePath)
-            ? img.sourcePath
-            : null;
-      if (original && !original.includes(`${path.sep}sources${path.sep}`)) {
-        const ext = path.extname(original) || '.jpg';
-        archive.file(original, {
-          name: 'originals/' + this.safeName(img.fileName) + ext,
-        });
+    }
+    await archive.finalize();
+  }
+
+  /** 按项目导出当前选中的结果图，不导出原图。 */
+  async downloadProjectZip(userId: number, projectId: number, res: any) {
+    const project = await this.getProject(userId, projectId);
+    const volumes = await this.tasks.find({ where: { userId, projectId }, order: { id: 'ASC' } });
+    const entries: Array<{ task: Task; image: TaskImage }> = [];
+    for (const task of volumes) {
+      const imgs = await this.images.find({ where: { taskId: task.id }, order: { sortOrder: 'ASC' } });
+      for (const image of this.groupSplitPages(imgs)) {
+        if (image.resultPath && fs.existsSync(image.resultPath)) entries.push({ task, image });
       }
+    }
+    if (!entries.length) throw new BadRequestException('项目中没有可下载的结果图');
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="project-${project.id}-results.zip"`);
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    archive.on('error', (err) => { throw err; });
+    archive.pipe(res);
+    for (const { task, image } of entries) {
+      const ext = path.extname(image.resultPath || '') || '.png';
+      archive.file(image.resultPath!, { name: `${this.safeName(task.name)}/${this.safeName(image.fileName)}${ext.toLowerCase()}` });
     }
     await archive.finalize();
   }

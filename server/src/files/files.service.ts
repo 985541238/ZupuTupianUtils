@@ -75,15 +75,19 @@ $owner.Close()
     return { id: path.basename(dir), dir };
   }
 
-  /** 把请求体（原始二进制）写成会话目录下的一张图片；只收图片扩展名，文件名去掉路径 */
+  /** 把请求体（原始二进制）写入上传会话，保留相对目录层级。 */
   saveUpload(id: string, name: string, req: NodeJS.ReadableStream): Promise<{ ok: true; size: number }> {
     if (!id || /[\\/]/.test(id) || id.includes('..')) throw new BadRequestException('会话无效');
     const dir = path.join(this.uploadRoot(), id);
     if (!fs.existsSync(dir)) throw new BadRequestException('上传会话不存在，请重新选择文件夹');
-    const base = path.basename(String(name || '').replace(/\\/g, '/'));
+    const rel = String(name || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    if (!rel || rel.includes('..') || /^[A-Za-z]:/.test(rel)) throw new BadRequestException('上传文件路径无效');
+    const base = path.basename(rel);
     const ext = path.extname(base).toLowerCase();
     if (!base || !IMAGE_EXT.has(ext)) throw new BadRequestException('只接受图片文件（jpg/png/tif/bmp/webp）');
-    const target = path.join(dir, base);
+    const target = path.resolve(dir, rel);
+    if (!target.toLowerCase().startsWith(path.resolve(dir).toLowerCase() + path.sep)) throw new BadRequestException('上传文件路径无效');
+    fs.mkdirSync(path.dirname(target), { recursive: true });
     return new Promise((resolve, reject) => {
       const ws = fs.createWriteStream(target);
       let size = 0;

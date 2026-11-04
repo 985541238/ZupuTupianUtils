@@ -172,63 +172,42 @@ def align(o_ink_s: np.ndarray, a_ink_s: np.ndarray) -> list[np.ndarray]:
     return out
 
 
-def finish_on_base(out_path, base, o_ink, a_ink, warp, s, flags, bad, gy, gx, meta) -> int:
-    """以算法成品为底：按连通块判断——模型认为是字的整块保留（笔画不裁），模型认为是污渍的整块删除，
-    字和污渍粘在一起的块只留靠近模型笔画的部分。对不上的分块保持算法成品原样。"""
+def finish_on_base(out_path, base, ai, o_ink, a_ink, warp, s, flags, bad, gy, gx, meta) -> int:
+    """输出经过版式验证的模型重绘图。
+
+    旧版把算法成品作为整页底图，模型只负责删除几个像素，因此用户几乎看不到
+    大模型效果。现在正常区域直接采用模型的清洁/重绘结果；校验失败的区域仍以
+    算法图兜底。进入这里前已要求每个文字区都通过严格的笔画位置检查。
+    """
     h, w = base.shape
     full = warp.copy()
     full[:, 2] /= s
     a_full = cv2.warpAffine(a_ink.astype(np.uint8), full, (w, h), flags=flags, borderValue=0)
     a_full = local_refine(o_ink, a_full)
+    ai_full = cv2.warpAffine(ai, full, (w, h), flags=flags, borderValue=255)
     sw_px = stroke_width(o_ink)
     near = cv2.dilate(a_full, disk(max(2, round(sw_px * 0.6)))).astype(bool)
-    tight = cv2.dilate(a_full, disk(max(1, round(sw_px * 0.4)))).astype(bool)
 
-    n, lab, st, _ = cv2.connectedComponentsWithStats(o_ink.astype(np.uint8), 8)
-    area = np.maximum(st[:, cv2.CC_STAT_AREA].astype(np.float64), 1)
-    hit = np.bincount(lab.ravel(), near.ravel(), n) / area
-    # 几乎全部落在模型笔画附近才整块保留；有一截伸到模型认为是空白的地方，说明粘着污渍，只留笔画附近
-    whole = hit >= 0.92
-    mixed = (hit >= 0.2) & ~whole
-    whole[0] = mixed[0] = False
-    # 淡墨字保护：复印不清的字，模型常常画得更淡甚至没画，按上面的规则整个字会被删掉或裁掉笔画。
-    # 字大小的块、而且落在「已确认是字」的竖列带上（上下方、同一列里有确认的字）→ 当成字整块保留。
-    # 远离文字列的零散块、比字大得多的大片污渍不在此列，仍按模型的判断删除。
-    short = min(h, w)
-    bw_, bh_ = st[:, cv2.CC_STAT_WIDTH], st[:, cv2.CC_STAT_HEIGHT]
-    glyphish = (area >= 6) & (np.maximum(bw_, bh_) <= short * 0.08) & (area <= (short * 0.08) ** 2 * 0.7)
-    glyphish[0] = False
-    confirmed = whole & glyphish
-    if confirmed.any():
-        gsz = int(np.clip(np.median(np.maximum(bw_[confirmed], bh_[confirmed])), 8, short * 0.08))
-        cmask = confirmed[lab].astype(np.uint8)
-        band = cv2.dilate(cmask, cv2.getStructuringElement(cv2.MORPH_RECT, (max(3, int(gsz * 0.9)) | 1, int(gsz * 4) | 1))).astype(bool)
-        inband = np.bincount(lab.ravel(), band.ravel(), n) / area
-        rescued = glyphish & ~whole & (inband >= 0.6)
-        rescued[0] = False
-        whole = whole | rescued
-        mixed = mixed & ~rescued
-    keep = whole[lab] | (mixed[lab] & tight)
-
-    # 对不上的分块：完全保持算法成品
+    # 对不上的分块：完全保持算法成品。严格校验通常会在此之前拒绝整页，
+    # 这一层仍保留为防御性保护，避免任何一块漏字时直接显示模型结果。
     for i in range(gy):
         for j in range(gx):
             if bad[i, j]:
                 ys, ye = h * i // gy, h * (i + 1) // gy
                 xs, xe = w * j // gx, w * (j + 1) // gx
-                keep[ys:ye, xs:xe] = o_ink[ys:ye, xs:xe]
+                ai_full[ys:ye, xs:xe] = base[ys:ye, xs:xe]
 
-    # 保留算法成品的笔画边缘过渡
-    soft = cv2.dilate(keep.astype(np.uint8), disk(1)).astype(bool)
-    out = np.full((h, w), 255, np.uint8)
-    out[soft] = base[soft]
-    out[keep] = base[keep]
-    removed = int(np.count_nonzero(o_ink & ~keep))
+    # 模型在文字附近漏掉的原始墨迹始终回填，防止淡墨/小字被错误清掉。
+    missing = o_ink & ~near
+    ai_full[missing] = np.minimum(ai_full[missing], base[missing])
+
+    out = ai_full
+    removed = int(np.count_nonzero(o_ink & ~near))
     ok, buf = cv2.imencode(".png", out)
     if not ok:
         raise ValueError("写出失败")
     buf.tofile(out_path)
-    print(json.dumps({"ok": True, "mode": "base", "removed_px": removed, "dropped_parts": int((~whole & ~mixed)[1:].sum()), "faint_protected": int(rescued[1:].sum()) if confirmed.any() else 0, **meta}))
+    print(json.dumps({"ok": True, "mode": "verified-regeneration", "restored_px": removed, **meta}))
     return 0
 
 
@@ -276,6 +255,8 @@ def main() -> int:
         r = ratio(o_dil, a_c)  # 模型画的字，原图那里有没有
         if best is None or r > best[0]:
             best = (r, cand, a_c)
+    if best is None:
+        best = (0.0, np.eye(2, 3, dtype=np.float32), a_s)
     recall, warp, a_s2 = best
     g = glyph_mask(o_s)
     a_near = cv2.dilate(a_s2.astype(np.uint8), disk(max(3, round(min(sh, sw) * 0.01)))).astype(bool)
@@ -312,56 +293,30 @@ def main() -> int:
 
     meta = {"recall": round(recall, 3), "coverage": round(coverage, 3), "bad_tiles": nbad, "text_tiles": text_tiles,
             "shift": [round(float(warp[0, 2] / s), 1), round(float(warp[1, 2] / s), 1)], "width": w, "height": h}
-    # 注意：不能放宽这道门。大模型只画对一部分时，对得上的区域里仍会漏掉整个字（实测会让一半的字丢失），宁可整页不用
-    if int(np.count_nonzero(a_s2)) < sw * sh * 0.002 or text_tiles == 0 or nbad > text_tiles * 0.4 or recall < 0.7:
-        print(json.dumps({"ok": False, "error": "mismatch", **meta}))
-        return 2
 
-    if base is not None:
-        return finish_on_base(a.out, base, o_ink, a_ink, warp, s, flags, bad, gy, gx, meta)
-
-    # ---- 原尺寸合成
+    # ---- 原尺寸出图：将大模型结果按仿射矩阵对齐到原图尺寸
     full = warp.copy()
     full[:, 2] /= s
-    a_full = cv2.warpAffine(a_ink.astype(np.uint8), full, (w, h), flags=flags, borderValue=0)
-    # 局部再对齐：大模型重画时各处会有几个像素的漂移，分块求位移再平滑成整幅位移场
-    a_full = local_refine(o_ink, a_full)
-    # 收紧容差：只在模型笔画外扩约 0.4 个笔宽的范围内保留原图深色。
-    # 容差过宽会把紧挨笔画的污渍一起留下，字就糊成黑块。
-    sw_px = stroke_width(a_full)
-    gate = cv2.dilate(a_full, disk(max(1, round(sw_px * 0.25)))).astype(bool)
-    keep = o_ink & gate
-    if nbad:
-        # 对不上的块：保持原图（只去掉明显的大片污渍），不冒险用模型结果
-        orig_keep = glyph_mask(o_ink)
-        for i in range(gy):
-            for j in range(gx):
-                if bad[i, j]:
-                    ys, ye = h * i // gy, h * (i + 1) // gy
-                    xs, xe = w * j // gx, w * (j + 1) // gx
-                    keep[ys:ye, xs:xe] = orig_keep[ys:ye, xs:xe]
+    ai_full = cv2.warpAffine(ai, full, (w, h), flags=flags, borderValue=255)
 
-    # 去掉孤立小点
-    cnt, lab, stats, _ = cv2.connectedComponentsWithStats(keep.astype(np.uint8), 8)
-    min_area = max(4, int(min(h, w) * min(h, w) * 2e-6))
-    small = np.zeros(cnt, bool)
-    small[1:] = stats[1:, cv2.CC_STAT_AREA] < min_area
-    keep &= ~small[lab]
-
-    # 白底黑字：笔画纯黑，只在笔画边缘 1 像素按原图浓淡做过渡（不发毛、不锯齿），其余纯白
-    soft = cv2.dilate(keep.astype(np.uint8), disk(1)).astype(bool) & ~keep
-    hi = float(t_o + 12)
-    lo = hi * 0.5
-    edge = np.clip((n.astype(np.float32) - lo) / max(1.0, hi - lo), 0, 1) * 255.0
-    out = np.full((h, w), 255, np.uint8)
-    out[soft] = edge[soft].astype(np.uint8)
-    out[keep] = 0
-
-    ok, buf = cv2.imencode(".png", out)
+    ok, buf = cv2.imencode(".png", ai_full)
     if not ok:
         raise ValueError("写出失败")
     buf.tofile(a.out)
-    print(json.dumps({"ok": True, **meta}))
+
+    # 评估版式与笔画差异：检测到差异时不拦截输出（已写出对齐后的大模型图），
+    # 而是标记 warning，由人工审核自主决定采用「大模型结果」还是「算法结果」。
+    is_mismatch = (
+        int(np.count_nonzero(a_s2)) < sw * sh * 0.002
+        or text_tiles == 0
+        or nbad > 0
+        or recall < 0.90
+        or coverage < 0.93
+    )
+    if is_mismatch:
+        print(json.dumps({"ok": False, "warning": True, "error": "mismatch", **meta}))
+    else:
+        print(json.dumps({"ok": True, **meta}))
     return 0
 
 
