@@ -85,6 +85,7 @@ export const api = {
     cleanModelId?: number | null;
     estimatedCost?: number | null;
     projectId?: number | null;
+    batchCrop?: { enabled: true; quads: number[][][] } | null;
   }) => request<any>('/tasks', { method: 'POST', body: JSON.stringify(data) }),
   listProjects: () =>
     request<Array<{ id: number; name: string; surname?: string; volumeCount: number; totalPages: number; processing: number; reviewing: number; completed: number }>>(

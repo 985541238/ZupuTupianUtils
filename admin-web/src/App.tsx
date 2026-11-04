@@ -377,6 +377,7 @@ export default function App() {
       cleanModelId: newTaskPartial.cleanModelId ?? null,
       estimatedCost: newTaskPartial.estimatedCost ?? null,
       projectId: newTaskPartial.projectId ?? null,
+      batchCrop: newTaskPartial.batchCrop ?? null,
     });
     await loadTasks();
     goToTasks();

@@ -242,6 +242,7 @@ export class TasksService implements OnModuleInit {
       cleanModelId?: number | null;
       estimatedCost?: number | null;
       projectId?: number | null;
+      batchCrop?: { enabled?: boolean; quads?: number[][][] } | null;
     },
   ) {
     const name = dto.name;
@@ -276,6 +277,11 @@ export class TasksService implements OnModuleInit {
       .filter((f) => IMAGE_EXT.has(path.extname(f).toLowerCase()))
       .sort((a, b) => a.localeCompare(b, 'zh'));
     if (!files.length) throw new BadRequestException('文件夹内没有图片');
+
+    const batchCrop = dto.batchCrop?.enabled && Array.isArray(dto.batchCrop.quads) && dto.batchCrop.quads.length === 2 ? dto.batchCrop : null;
+    if (batchCrop && !dto.batchCrop!.quads!.every((q) => Array.isArray(q) && q.length === 4 && q.every((p) => Array.isArray(p) && p.length === 2 && Number.isFinite(Number(p[0])) && Number.isFinite(Number(p[1]))))) {
+      throw new BadRequestException('批量裁剪区域无效，请重新设置');
+    }
 
     if (dto.useAi) {
       const modelId = Number(dto.ocrModelId);
@@ -333,7 +339,7 @@ export class TasksService implements OnModuleInit {
       sourceFolder: folder,
       outputFolder,
       status: 'pending',
-      totalCount: files.length,
+      totalCount: batchCrop ? files.length * 2 : files.length,
       doneCount: 0,
       confirmedCount: 0,
       defaultParams: JSON.stringify(DEFAULT_PARAMS),
@@ -343,6 +349,8 @@ export class TasksService implements OnModuleInit {
     const saved = await this.tasks.save(task);
 
     const rows = [];
+    const splitRoot = path.join(outputFolder, 'split-sources');
+    if (batchCrop) fs.mkdirSync(splitRoot, { recursive: true });
     for (let i = 0; i < files.length; i++) {
       const fileName = files[i];
       const sourcePath = path.join(folder, fileName);
@@ -355,20 +363,20 @@ export class TasksService implements OnModuleInit {
       } catch {
         /* ignore */
       }
-      rows.push(
-        this.images.create({
-          taskId: saved.id,
-          fileName,
-          sourcePath,
-          status: 'pending',
-          sortOrder: i,
-          width,
-          height,
-          params: JSON.stringify(DEFAULT_PARAMS),
-          createdAt: now,
-          updatedAt: now,
-        }),
-      );
+      if (!batchCrop) {
+        rows.push(this.images.create({ taskId: saved.id, fileName, sourcePath, status: 'pending', sortOrder: i, width, height, params: JSON.stringify(DEFAULT_PARAMS), createdAt: now, updatedAt: now }));
+      } else {
+        // UI 顺序为蓝后页、绿前页；落库顺序按用户要求为绿前页、蓝后页。
+        const ordered = [batchCrop.quads![1], batchCrop.quads![0]];
+        const labels = ['前页', '后页'];
+        for (let part = 0; part < 2; part++) {
+          const stem = `${String(i + 1).padStart(4, '0')}-${labels[part]}`;
+          const splitPath = path.join(splitRoot, stem + '.png');
+          await this.processor.warpPerspectivePage(sourcePath, splitPath, ordered[part]);
+          const sm = await sharp(splitPath, { failOn: 'none' }).metadata();
+          rows.push(this.images.create({ taskId: saved.id, fileName: stem + '.png', sourcePath: splitPath, status: 'pending', sortOrder: i * 2 + part, width: sm.width || null, height: sm.height || null, params: JSON.stringify(DEFAULT_PARAMS), createdAt: now, updatedAt: now }));
+        }
+      }
     }
     await this.images.save(rows);
 

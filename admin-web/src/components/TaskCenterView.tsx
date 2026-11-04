@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { Task, ScanItem } from '../types';
-import { api, downloadUrl } from '../api/client';
+import { api, downloadUrl, authImageUrl } from '../api/client';
+import { BatchCropDialog, BatchCropConfig } from './BatchCropDialog';
 import { formatProcessingTime } from '../api/mappers';
 import { inferErrorCode } from './AiProblemDialog';
 import {
@@ -152,6 +153,10 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   const [browseLoading, setBrowseLoading] = useState(false);
   const [browseError, setBrowseError] = useState('');
   const [creating, setCreating] = useState(false);
+  const [batchCrop, setBatchCrop] = useState(false);
+  const [batchCropConfig, setBatchCropConfig] = useState<BatchCropConfig | null>(null);
+  const [batchCropImageUrl, setBatchCropImageUrl] = useState('');
+  const [showBatchCrop, setShowBatchCrop] = useState(false);
 
   // 各阶段数量
   // 状态页签的数字只统计当前项目里的卷（之前统计的是所有项目，空项目也会显示别的项目的数量）
@@ -303,6 +308,8 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
       try {
         const data = await api.browseFolder(pth);
         if (!off) setPageCountPreview(Number(data?.imageCount) || 0);
+        const first = (data?.entries || []).find((e: any) => e?.isImage);
+        if (!off && first?.path) setBatchCropImageUrl(authImageUrl('/files/local?path=' + encodeURIComponent(String(first.path)) + '&w=1800'));
       } catch {
         if (!off) setPageCountPreview(0);
       } finally {
@@ -332,6 +339,9 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     const cur = typeof projectFilter === 'number' ? projects.find((p) => p.id === projectFilter) : null;
     setGenealogyNote(cur ? cur.surname || '' : '');
     setFolderPath('');
+    setBatchCrop(false);
+    setBatchCropConfig(null);
+    setBatchCropImageUrl('');
   };
 
   const submitNewProject = async () => {
@@ -454,9 +464,26 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
       if (e?.name === 'AbortError') return true; // 用户取消
       return false;
     }
+    try {
+      const permission = await dir.queryPermission?.({ mode: 'read' });
+      if (permission === 'prompt') {
+        const granted = await dir.requestPermission?.({ mode: 'read' });
+        if (granted !== 'granted') return true;
+      } else if (permission === 'denied') {
+        alert('没有获得文件夹读取权限，请重新选择文件夹');
+        return true;
+      }
+    } catch {
+      // 兼容没有 queryPermission 的浏览器版本，直接继续读取。
+    }
     const files: File[] = [];
-    for await (const entry of dir.values()) {
-      if (entry.kind === 'file' && IMG_RE.test(entry.name)) files.push(await entry.getFile());
+    try {
+      for await (const entry of dir.values()) {
+        if (entry.kind === 'file' && IMG_RE.test(entry.name)) files.push(await entry.getFile());
+      }
+    } catch (e: any) {
+      alert('读取文件夹失败：' + (e?.message || '浏览器没有返回图片，请重新选择'));
+      return true;
     }
     files.sort((a, b) => a.name.localeCompare(b.name, 'zh', { numeric: true }));
     if (!files.length) {
@@ -469,29 +496,29 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
 
   const openFolderPicker = async () => {
     if (nativePicking || uploadProg) return;
-    // 没有 showDirectoryPicker（用 IP 走 http 访问、Firefox、Safari）：直接用 webkitdirectory 选文件夹，必须在点击事件里同步触发
+    // 保留浏览器文件夹选择方式；不支持时再使用文件夹上传控件。
     if (typeof (window as any).showDirectoryPicker !== 'function' && dirInputRef.current) {
       dirInputRef.current.click();
       return;
     }
     setNativePicking(true);
     try {
-      // 1) 浏览器自带的选择窗口（Chrome / Edge）；2) 服务端弹系统窗口；3) 网页内目录选择
       if (await pickByBrowser()) return;
+    } catch {
+      // 落到网页内选择
+    } finally {
+      setNativePicking(false);
+    }
+    setNativePicking(true);
+    try {
       const r = await api.pickFolder(folderPath.trim() || undefined);
       if (r?.path) {
         setFolderPath(r.path);
-        try {
-          const data = await api.browseFolder(r.path);
-          setPageCountPreview(Number(data?.imageCount) || 0);
-        } catch {
-          setPageCountPreview(0);
-        }
         return;
       }
       if (r?.cancelled) return;
     } catch {
-      // 落到网页内选择
+      // 落到网页内目录选择
     } finally {
       setNativePicking(false);
     }
@@ -549,6 +576,11 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
       alert('请填写图片文件夹路径');
       return;
     }
+    if (batchCrop && !batchCropConfig) {
+      alert('请先设置第一张图的蓝色/绿色裁剪区域');
+      setShowBatchCrop(true);
+      return;
+    }
     setCreating(true);
     try {
       const projectId: number | null = typeof projectFilter === 'number' ? projectFilter : null;
@@ -567,6 +599,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
           useAiClean: useAiClean,
           cleanModelId: useAiClean ? selectedCleanModelId : null,
           estimatedCost: (useAiClean || useAiRecognition) ? totalEstimate : null,
+          batchCrop: batchCrop ? batchCropConfig : null,
           status: 'pending',
           totalPages: 0,
           reviewedPages: 0,
@@ -584,6 +617,8 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
       setFolderPath('');
       setUseAiRecognition(false);
       setUseAiClean(false);
+      setBatchCrop(false);
+      setBatchCropConfig(null);
     } catch (e: any) {
       alert(e?.message || '创建任务失败');
     } finally {
@@ -1490,6 +1525,14 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                       className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium resize-y leading-relaxed"
                     />
                   </div>
+                  <div className="rounded-xl border border-black/[0.06] bg-[#F5F5F7] px-3.5 py-3">
+                    <label className="flex items-center gap-2 text-[13px] font-semibold text-[#1D1D1F] cursor-pointer">
+                      <input type="checkbox" checked={batchCrop} onChange={(e) => { setBatchCrop(e.target.checked); if (e.target.checked) setShowBatchCrop(true); }} className="w-4 h-4 rounded text-[#0071E3] cursor-pointer" />
+                      批量双页裁剪（可选）
+                    </label>
+                    <p className="text-[11px] text-[#86868B] mt-1 ml-6">不勾选：按单页逐张处理；勾选后用第一张图设置区域，双页拆成“前页、后页”两张。</p>
+                    {batchCrop ? <button type="button" onClick={() => setShowBatchCrop(true)} className="ml-6 mt-2 h-8 px-3 text-xs font-semibold rounded-lg bg-white border border-black/[0.08] hover:bg-black/[0.03]">{batchCropConfig ? '重新设置裁剪区域' : '设置第一张图裁剪区域'}</button> : null}
+                  </div>
                 </div>
 
               </div>
@@ -1697,6 +1740,14 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
           </div>
         </div>
       )}
+
+      <BatchCropDialog
+        open={showBatchCrop && batchCrop}
+        imageUrl={batchCropImageUrl}
+        initial={batchCropConfig}
+        onClose={() => setShowBatchCrop(false)}
+        onConfirm={(cfg) => { setBatchCropConfig(cfg); setShowBatchCrop(false); }}
+      />
 
     </div>
     </div>
