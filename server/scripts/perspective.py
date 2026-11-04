@@ -172,8 +172,9 @@ def cmd_warp(a) -> dict:
             return cv2.resize(o, (max(1, int(round(o.shape[1] * k))), hh), interpolation=cv2.INTER_CUBIC if k > 1 else cv2.INTER_AREA)
 
         out = np.hstack([fit(out), fit(out2)])
-    H0, W0 = img.shape[:2]
-    out = fit_to_size(out, W0, H0)
+    if not a.no_fit:
+        H0, W0 = img.shape[:2]
+        out = fit_to_size(out, W0, H0)
     imwrite_png(a.out, out)
     return {"ok": True, "width": int(out.shape[1]), "height": int(out.shape[0])}
 
@@ -222,6 +223,7 @@ def main() -> int:
     p.add_argument("--out", default="")
     p.add_argument("--quad", default="")
     p.add_argument("--quad2", default="")
+    p.add_argument("--no-fit", action="store_true")
     a = p.parse_args()
     try:
         r = {"detect": cmd_detect, "detect2": cmd_detect2, "warp": cmd_warp}[a.cmd](a)

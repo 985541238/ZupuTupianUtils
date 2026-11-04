@@ -68,6 +68,9 @@ class CreateTaskDto {
   @Type(() => Number)
   @IsNumber()
   projectId?: number;
+
+  @IsOptional()
+  batchCrop?: { enabled?: boolean; quads?: number[][][] } | null;
 }
 
 class ProjectDto {

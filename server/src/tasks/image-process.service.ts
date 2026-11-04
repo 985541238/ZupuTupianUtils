@@ -246,6 +246,19 @@ export class ImageProcessService {
     }
   }
 
+  /** 双页批量裁剪：输出单页实际尺寸，不铺回原图画布。 */
+  async warpPerspectivePage(srcPath: string, outPath: string, quad: number[][]): Promise<{ width: number; height: number }> {
+    const tmp = await this.orientedTmp(srcPath);
+    try {
+      fs.mkdirSync(path.dirname(outPath), { recursive: true });
+      const fmt = quad.map((p) => `${p[0]},${p[1]}`).join(';');
+      const r = await this.runPerspective(['warp', '--no-fit', '--in', tmp, '--out', outPath, '--quad', fmt]);
+      return { width: r.width, height: r.height };
+    } finally {
+      fs.promises.unlink(tmp).catch(() => {});
+    }
+  }
+
   private scriptPath() {
     return path.join(__dirname, '..', '..', 'scripts', 'zupu_clean.py');
   }
