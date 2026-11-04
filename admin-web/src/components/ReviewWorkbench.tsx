@@ -59,6 +59,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   const [compareMode, setCompareMode] = useState<CompareMode>('side-by-side');
   const [splitPercent, setSplitPercent] = useState<number>(50);
   const [zoomLevel, setZoomLevel] = useState<number>(1);
+  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [previewDataUrl, setPreviewDataUrl] = useState<string>('');
   /** Sticky frame shown in compare pane — only advances to a non-empty URL (avoids blank). */
@@ -66,6 +67,11 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   const [currentStats, setCurrentStats] = useState(task.items[currentPageIndex]?.stats);
 
   const currentItem = task.items[currentPageIndex] || task.items[0];
+
+  useEffect(() => {
+    setPanOffset({ x: 0, y: 0 });
+  }, [currentPageIndex]);
+
   const [localParams, setLocalParams] = useState<ProcessParams>(() => {
     if (!currentItem) {
       return {
@@ -91,6 +97,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
 
 
   const isDraggingSplitRef = useRef(false);
+  const panDragRef = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const previewUrlRef = useRef<string>('');
   const previewDataUrlRef = useRef<string>('');
@@ -1134,6 +1141,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   // Split Divider mouse drag
   const handleSplitMouseDown = (e: React.MouseEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     isDraggingSplitRef.current = true;
 
     const handleMouseMove = (moveEvent: MouseEvent) => {
@@ -1158,8 +1166,48 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
     if (cropSelecting) return;
     e.preventDefault();
     const direction = e.deltaY < 0 ? 1 : -1;
-    setZoomLevel((z) => Math.max(0.6, Math.min(2.5, Number((z + direction * 0.1).toFixed(2)))));
+    setZoomLevel((z) => {
+      const next = Math.max(0.6, Math.min(2.5, Number((z + direction * 0.1).toFixed(2))));
+      if (next <= 1) setPanOffset({ x: 0, y: 0 });
+      return next;
+    });
   };
+
+  const handleViewerPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (cropSelecting || e.button !== 0 || zoomLevel <= 1) return;
+    if ((e.target as HTMLElement).closest('button, input, [data-no-pan="true"]')) return;
+    e.preventDefault();
+    panDragRef.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      originX: panOffset.x,
+      originY: panOffset.y,
+    };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+
+  const handleViewerPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = panDragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    e.preventDefault();
+    setPanOffset({
+      x: drag.originX + e.clientX - drag.startX,
+      y: drag.originY + e.clientY - drag.startY,
+    });
+  };
+
+  const handleViewerPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (panDragRef.current?.pointerId !== e.pointerId) return;
+    panDragRef.current = null;
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const viewerTransform = `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoomLevel})`;
 
 
 
@@ -1441,7 +1489,10 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                 <ZoomIn className="w-3.5 h-3.5" />
               </button>
               <button
-                onClick={() => setZoomLevel(1)}
+                onClick={() => {
+                  setZoomLevel(1);
+                  setPanOffset({ x: 0, y: 0 });
+                }}
                 className="p-1 hover:bg-black/[0.05] rounded-full text-[#6E6E73] hover:text-[#1D1D1F]"
               >
                 <Maximize2 className="w-3.5 h-3.5" />
@@ -1488,11 +1539,15 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
           {/* Canvas Viewport */}
           <div
             ref={containerRef}
-            className={`flex-1 flex items-center justify-center p-8 relative overflow-hidden ${
-              cropSelecting ? 'pb-24' : ''
-            }`}
             onWheel={handleViewerWheel}
-            title={cropSelecting ? undefined : '滚动鼠标滚轮缩放图片'}
+            onPointerDown={handleViewerPointerDown}
+            onPointerMove={handleViewerPointerMove}
+            onPointerUp={handleViewerPointerUp}
+            onPointerCancel={handleViewerPointerUp}
+            className={`flex-1 flex items-center justify-center p-8 relative overflow-hidden select-none ${
+              cropSelecting ? 'pb-24' : zoomLevel > 1 ? 'cursor-grab active:cursor-grabbing' : ''
+            }`}
+            title={cropSelecting ? undefined : '滚动鼠标滚轮缩放，放大后拖拽移动图片'}
           >
             {isProcessing && (
               <div className="absolute top-16 right-6 z-30 flex items-center gap-2 px-3 py-1.5 apple-glass-heavy border border-black/[0.08] rounded-full text-[#1D1D1F] text-xs shadow-sm">
@@ -1518,7 +1573,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
             {compareMode === 'split' && (
               <div
                 className="relative max-h-[80vh] max-w-[85vw] flex items-center justify-center apple-doc-shadow rounded-lg overflow-hidden bg-white transition-transform duration-100 ease-out"
-                style={{ transform: `scale(${zoomLevel})` }}
+                style={{ transform: viewerTransform }}
               >
                 {/* 1. Underlying: Clean Processed Image */}
                 <img
@@ -1569,7 +1624,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
             {compareMode === 'side-by-side' && (
               <div
                 className="flex items-center justify-center gap-6 max-h-[80vh] transition-transform duration-100 ease-out"
-                style={{ transform: `scale(${zoomLevel})` }}
+                style={{ transform: viewerTransform }}
               >
                 <div className="relative apple-doc-shadow rounded-lg overflow-hidden bg-white max-h-[78vh]">
                   <img
@@ -1600,7 +1655,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
             {compareMode === 'clean-only' && (
               <div
                 className="max-h-[80vh] apple-doc-shadow rounded-lg overflow-hidden bg-white transition-transform duration-100 ease-out"
-                style={{ transform: `scale(${zoomLevel})` }}
+                style={{ transform: viewerTransform }}
               >
                 <img
                   src={shownResultSrc}
@@ -1617,7 +1672,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                 className={`relative max-h-[80vh] apple-doc-shadow rounded-lg overflow-visible bg-white transition-transform duration-100 ease-out ${
                   cropSelecting ? 'ring-2 ring-[#0071E3]/40' : 'overflow-hidden'
                 }`}
-                style={{ transform: `scale(${zoomLevel})` }}
+                style={{ transform: viewerTransform }}
               >
                 <div className="relative inline-block max-h-[78vh]">
                   <img
