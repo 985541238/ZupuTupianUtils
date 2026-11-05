@@ -77,7 +77,7 @@ export class OcrService implements OnModuleInit {
   // ---------------- 任务 ----------------
 
   private async getTask(userId: number, id: number) {
-    const t = await this.tasks.findOne({ where: { id, userId } });
+    const t = await this.tasks.findOne({ where: { id } });
     if (!t) throw new NotFoundException('OCR 任务不存在');
     return t;
   }
@@ -89,7 +89,7 @@ export class OcrService implements OnModuleInit {
   }
 
   async list(userId: number) {
-    const list = await this.tasks.find({ where: { userId }, order: { createdAt: 'DESC' } });
+    const list = await this.tasks.find({ order: { createdAt: 'DESC' } });
     const sums = list.length
       ? await this.pages
           .createQueryBuilder('p')
@@ -171,7 +171,7 @@ export class OcrService implements OnModuleInit {
 
   /** 项目下所有「通过」且有结果图的页：按卷（创建先后）→ 页序排好 */
   private async projectUsable(userId: number, projectId: number) {
-    const vols = await this.srcTasks.find({ where: { userId, projectId }, order: { id: 'ASC' } });
+    const vols = await this.srcTasks.find({ where: { projectId }, order: { id: 'ASC' } });
     const out: { img: TaskImage; vol: Task }[] = [];
     const volStat: { id: number; name: string; usable: number; passed: number; total: number; status: string; completed: boolean }[] = [];
     for (const v of vols) {
@@ -187,8 +187,8 @@ export class OcrService implements OnModuleInit {
 
   /** 能建 OCR 任务的项目：列出每个项目下各卷的可识别页数，以及是否已经建过 */
   async sources(userId: number) {
-    const projs = await this.projects.find({ where: { userId }, order: { updatedAt: 'DESC' } });
-    const existing = await this.tasks.find({ where: { userId } });
+    const projs = await this.projects.find({ order: { updatedAt: 'DESC' } });
+    const existing = await this.tasks.find();
     const out = [];
     for (const p of projs) {
       const { items, volStat } = await this.projectUsable(userId, Number(p.id));
@@ -261,9 +261,9 @@ export class OcrService implements OnModuleInit {
   async create(userId: number, body: { name?: string; projectId?: number; ocrModelId?: number }) {
     const pid = Number(body.projectId);
     if (!pid) throw new BadRequestException('请选择一个项目');
-    const proj = await this.projects.findOne({ where: { id: pid, userId } });
+    const proj = await this.projects.findOne({ where: { id: pid } });
     if (!proj) throw new BadRequestException('所选项目不存在');
-    const dup = await this.tasks.findOne({ where: { userId, projectId: pid } });
+    const dup = await this.tasks.findOne({ where: { projectId: pid } });
     if (dup) throw new BadRequestException(`「${proj.name}」已经有 OCR 项目了，后面完成的卷会自动并入`);
     const { items, vols } = await this.projectUsable(userId, pid);
     // 允许先建：此时还没有已完成的卷也行，之后有卷完成会自动并入

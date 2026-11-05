@@ -4,6 +4,7 @@ import { api } from '../api/client';
 import { formatProcessingTime, mapOcrSource } from '../api/mappers';
 import { inferErrorCode } from './AiProblemDialog';
 import { OcrModelPicker } from './OcrModelPicker';
+import { appAlert } from './AppDialog';
 import {
   Play,
   Plus,
@@ -150,7 +151,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
       const def = enabled.find((m: any) => m.isDefault) || enabled[0];
       setModelId(def ? Number(def.id) : null);
     } catch (e: any) {
-      alert(e?.message || '加载失败');
+      void appAlert(e?.message || '加载失败');
     } finally {
       setSourcesLoading(false);
     }
@@ -210,7 +211,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
   }, [openId, openTask?.totalCount, openTask?.doneCount, openTask?.confirmedCount, loadDetail]);
 
   const submit = async (startAfter: boolean) => {
-    if (!sourceId) return alert('请先选择一个项目');
+    if (!sourceId) { void appAlert('请先选择一个项目'); return; }
     setCreating(true);
     try {
       const created = await onCreate({ name: taskName.trim(), projectId: sourceId, ocrModelId: modelId });
@@ -218,7 +219,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
       if (startAfter) onStart(created.id);
       else if (created?.id) setOpenId(created.id); // 建好直接进项目，看各卷
     } catch (e: any) {
-      alert(e?.message || '创建任务失败');
+      void appAlert(e?.message || '创建任务失败');
     } finally {
       setCreating(false);
     }
@@ -849,7 +850,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                       await onDelete(deleteTarget.id);
                       setDeleteTarget(null);
                     } catch (e: any) {
-                      alert(e?.message || '删除失败');
+                      void appAlert(e?.message || '删除失败');
                     } finally {
                       setDeleting(false);
                     }

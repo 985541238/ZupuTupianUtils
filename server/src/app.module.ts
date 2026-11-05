@@ -14,6 +14,8 @@ import { AiModel } from './settings/ai-model.entity';
 import { OcrModule } from './ocr/ocr.module';
 import { OcrTask } from './ocr/ocr-task.entity';
 import { OcrPage } from './ocr/ocr-page.entity';
+import { AiUsageRecord } from './usage/ai-usage-record.entity';
+import { UsageModule } from './usage/usage.module';
 
 @Module({
   imports: [
@@ -24,7 +26,7 @@ import { OcrPage } from './ocr/ocr-page.entity';
       username: process.env.DB_USER || 'zupu',
       password: process.env.DB_PASS || 'zupu123',
       database: process.env.DB_NAME || 'zupu_scan',
-      entities: [User, Task, TaskImage, Project, Setting, AiModel, OcrTask, OcrPage],
+      entities: [User, Task, TaskImage, Project, Setting, AiModel, OcrTask, OcrPage, AiUsageRecord],
       synchronize: false,
       charset: 'utf8mb4',
     }),
@@ -34,6 +36,7 @@ import { OcrPage } from './ocr/ocr-page.entity';
     FilesModule,
     SettingsModule,
     OcrModule,
+    UsageModule,
   ],
 })
 export class AppModule {}

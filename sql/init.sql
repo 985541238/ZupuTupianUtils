@@ -35,6 +35,9 @@ CREATE TABLE `users` (
   `username` VARCHAR(64) NOT NULL,
   `password_hash` VARCHAR(255) NOT NULL,
   `display_name` VARCHAR(64) NOT NULL DEFAULT '',
+  `role` VARCHAR(16) NOT NULL DEFAULT 'user',
+  `enabled` TINYINT(1) NOT NULL DEFAULT 1,
+  `deleted_at` DATETIME NULL,
   `created_at` DATETIME NOT NULL,
   `updated_at` DATETIME NOT NULL,
   PRIMARY KEY (`id`),
@@ -90,5 +93,5 @@ CREATE TABLE `task_images` (
   CONSTRAINT `fk_images_task` FOREIGN KEY (`task_id`) REFERENCES `tasks` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-INSERT INTO `users` (`username`, `password_hash`, `display_name`, `created_at`, `updated_at`) VALUES
-('admin', '$2b$10$kjjkvV0mf.dLP7FWPhJgm.pxdHnlVicMsRDuxsZ0qC/oru6i/OqTm', '管理员', NOW(), NOW());
+INSERT INTO `users` (`username`, `password_hash`, `display_name`, `role`, `enabled`, `created_at`, `updated_at`) VALUES
+('admin', '$2b$10$kjjkvV0mf.dLP7FWPhJgm.pxdHnlVicMsRDuxsZ0qC/oru6i/OqTm', '管理员', 'admin', 1, NOW(), NOW());

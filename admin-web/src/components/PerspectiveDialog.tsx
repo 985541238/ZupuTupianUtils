@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Loader2, Wand2, X } from 'lucide-react';
 import { api } from '../api/client';
+import { appConfirm } from './AppDialog';
 
 type Pt = { x: number; y: number };
 const DEFAULT_QUAD: Pt[] = [
@@ -214,7 +215,7 @@ export const PerspectiveDialog: React.FC<{
               </button>
               {applied ? (
                 <button
-                  onClick={() => window.confirm('恢复成没有透视修正的原图？裁剪框会一并清除。') && void run('reset')}
+                  onClick={() => void appConfirm('恢复成没有透视修正的原图？裁剪框会一并清除。').then((ok) => ok && run('reset'))}
                   disabled={!!busy}
                   className="h-9 px-4 text-xs font-semibold rounded-full bg-[#FF3B30]/10 hover:bg-[#FF3B30]/15 text-[#C62828] cursor-pointer disabled:opacity-50"
                 >

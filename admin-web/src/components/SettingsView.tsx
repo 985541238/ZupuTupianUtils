@@ -6,6 +6,7 @@ import { SecretInput } from './SecretInput';
 import { looksTextOnly } from './OcrModelPicker';
 import { BaiduOcrPanel } from './BaiduOcrPanel';
 import { Plus, Save, Trash2, RefreshCw, ScanText, Wand2, CheckCircle2, AlertCircle, X, KeyRound, ExternalLink } from 'lucide-react';
+import { appAlert, appConfirm } from './AppDialog';
 
 type AiModel = {
   id: number;
@@ -674,12 +675,12 @@ export const SettingsView: React.FC<{ onBack?: () => void; initialTab?: 'ocr' | 
   };
 
   const removeModel = async (id: number) => {
-    if (!confirm('确定删除该模型？')) return;
+    if (!(await appConfirm('确定删除该模型？'))) return;
     try {
       await api.deleteModel(id);
       await load();
     } catch (e: any) {
-      alert(e?.message || '删除失败');
+      void appAlert(e?.message || '删除失败');
     }
   };
 

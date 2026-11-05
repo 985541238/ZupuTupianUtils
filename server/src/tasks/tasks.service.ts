@@ -27,6 +27,7 @@ import { SettingsService } from '../settings/settings.service';
 import { AliyunService, AiConfigError, AiChargedError } from '../ai/aliyun.service';
 import { AiModel } from '../settings/ai-model.entity';
 import { getPlatformDef } from '../settings/platforms';
+import { UsageService } from '../usage/usage.service';
 
 const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp']);
 
@@ -45,16 +46,23 @@ export class TasksService implements OnModuleInit {
   private readonly detectCache = new Map<string, { mode: 'standard' | 'stained' | 'faint'; scores: Record<string, number> }>();
   private readonly volQueue: number[] = [];
   private readonly volQueued = new Set<number>();
+  /** 发起本次批量处理的用户；项目可共享，但用量记录按实际操作者归属。 */
+  private readonly volActors = new Map<number, number>();
   private volActive = 0;
   private readonly maxVolActive = Math.max(1, Number(process.env.VOLUME_CONCURRENCY) || 1);
 
   /** 把一卷排进全局队列（已在跑或已排队则忽略），并尝试启动 */
-  private enqueueVolume(taskId: number) {
+  private async enqueueVolume(taskId: number, actorUserId?: number) {
     const id = Number(taskId);
-    if (this.running.has(id) || this.volQueued.has(id)) return;
+    if (this.running.has(id) || this.volQueued.has(id)) return false;
+    if (actorUserId != null) this.volActors.set(id, Number(actorUserId));
+    const waiting = this.volActive >= this.maxVolActive || this.volQueue.length > 0;
+    // 自动按卷顺序处理时，后续卷必须持久化为 queued，前端才能禁用重复点击。
+    await this.tasks.update(id, { status: waiting ? 'queued' : 'processing', updatedAt: new Date() });
     this.volQueued.add(id);
     this.volQueue.push(id);
     this.pumpVolumes();
+    return waiting;
   }
 
   /** 队列泵：在并发上限内取出排队的卷依次处理 */
@@ -63,10 +71,12 @@ export class TasksService implements OnModuleInit {
       const id = this.volQueue.shift()!;
       this.volQueued.delete(id);
       if (this.cancelled.has(id)) continue;
+      const actorUserId = this.volActors.get(id);
+      this.volActors.delete(id);
       this.volActive++;
       this.running.add(id);
       setImmediate(() =>
-        this.runProcess(id)
+        this.runProcess(id, actorUserId)
           .catch((e) => this.logger.error(`runProcess ${id}: ${e}`))
           .finally(() => {
             this.running.delete(id);
@@ -84,6 +94,7 @@ export class TasksService implements OnModuleInit {
     private readonly processor: ImageProcessService,
     private readonly settings: SettingsService,
     private readonly aliyun: AliyunService,
+    private readonly usage: UsageService,
   ) {}
 
   async onModuleInit() {
@@ -112,8 +123,8 @@ export class TasksService implements OnModuleInit {
 
   /** 项目列表，带每个项目下的卷数与聚合状态 */
   async listProjects(userId: number) {
-    const projects = await this.projects.find({ where: { userId }, order: { id: 'DESC' } });
-    const tasks = await this.tasks.find({ where: { userId }, order: { id: 'DESC' } });
+    const projects = await this.projects.find({ order: { id: 'DESC' } });
+    const tasks = await this.tasks.find({ order: { id: 'DESC' } });
     const byProject = new Map<number, Task[]>();
     for (const t of tasks) {
       const pid = t.projectId == null ? 0 : Number(t.projectId);
@@ -173,13 +184,13 @@ export class TasksService implements OnModuleInit {
         processingEnabled: true,
       });
       createdVolumes.push(Number(volume.id));
-      if (dto.autoStart) this.enqueueVolume(Number(volume.id));
+      if (dto.autoStart) await this.enqueueVolume(Number(volume.id), userId);
     }
     return { id: Number(saved.id), name: saved.name, surname: saved.surname, rootPath, volumeIds: createdVolumes };
   }
 
   async getProject(userId: number, projectId: number) {
-    const p = await this.projects.findOne({ where: { id: projectId, userId } });
+    const p = await this.projects.findOne({ where: { id: projectId } });
     if (!p) throw new NotFoundException('项目不存在');
     return p;
   }
@@ -201,7 +212,7 @@ export class TasksService implements OnModuleInit {
   /** 删除项目：连同项目下的所有卷一起删（卷的文件也清理） */
   async deleteProject(userId: number, projectId: number) {
     await this.getProject(userId, projectId);
-    const vols = await this.tasks.find({ where: { userId, projectId } });
+    const vols = await this.tasks.find({ where: { projectId } });
     for (const v of vols) {
       try {
         await this.deleteTask(userId, Number(v.id));
@@ -211,11 +222,11 @@ export class TasksService implements OnModuleInit {
     }
     // 该项目的 OCR 项目一并清掉（页随外键级联删除），避免留下指向已删除卷的残留
     try {
-      await this.tasks.query('DELETE FROM ocr_tasks WHERE project_id = ? AND user_id = ?', [projectId, userId]);
+      await this.tasks.query('DELETE FROM ocr_tasks WHERE project_id = ?', [projectId]);
     } catch (e) {
       this.logger.warn(`deleteProject: clear ocr tasks failed: ${e}`);
     }
-    await this.projects.delete({ id: projectId, userId });
+    await this.projects.delete({ id: projectId });
     return { ok: true, deletedVolumes: vols.length };
   }
 
@@ -236,19 +247,19 @@ export class TasksService implements OnModuleInit {
         .where('task_id = :tid AND status = :st', { tid: task.id, st: 'processing' })
         .execute();
       // 走全局队列恢复，避免重启时所有中断任务一拥而上
-      this.enqueueVolume(Number(task.id));
+      await this.enqueueVolume(Number(task.id), Number(task.userId));
     }
   }
 
   list(userId: number) {
     return this.tasks.find({
-      where: { userId },
+      where: {},
       order: { id: 'DESC' },
     });
   }
 
   async get(userId: number, id: number) {
-    const task = await this.tasks.findOne({ where: { id, userId } });
+    const task = await this.tasks.findOne({ where: { id } });
     if (!task) throw new NotFoundException('任务不存在');
     return task;
   }
@@ -411,7 +422,45 @@ export class TasksService implements OnModuleInit {
         await this.images.save(img);
       }
     }
-    return this.groupSplitPages(list);
+    const ordered = await this.repairDerivedImageOrder(list);
+    return this.groupSplitPages(ordered);
+  }
+
+  /** 修复历史裁剪/分页页：派生页必须紧跟其父图，不能按旧的绝对序号落到后续原图之后。 */
+  private async repairDerivedImageOrder(list: TaskImage[]): Promise<TaskImage[]> {
+    const byId = new Map(list.map((item) => [String(item.id), item]));
+    const children = new Map<string, TaskImage[]>();
+    const childIds = new Set<number>();
+    for (const item of list) {
+      const parentKey = item.originalSourcePath && /^\d+$/.test(String(item.originalSourcePath)) ? String(item.originalSourcePath) : '';
+      if (!parentKey || !byId.has(parentKey)) continue;
+      const group = children.get(parentKey) || [];
+      group.push(item);
+      children.set(parentKey, group);
+      childIds.add(Number(item.id));
+    }
+    const compare = (a: TaskImage, b: TaskImage) => a.sortOrder - b.sortOrder || Number(a.id) - Number(b.id);
+    for (const group of children.values()) group.sort(compare);
+    const roots = list.filter((item) => !childIds.has(Number(item.id))).sort(compare);
+    const ordered: TaskImage[] = [];
+    const visiting = new Set<number>();
+    const visit = (item: TaskImage) => {
+      const id = Number(item.id);
+      if (visiting.has(id)) return;
+      visiting.add(id);
+      ordered.push(item);
+      for (const child of children.get(String(item.id)) || []) visit(child);
+    };
+    roots.forEach(visit);
+    // 孤立派生页保留在末尾，避免历史脏数据导致图片丢失。
+    list.filter((item) => !visiting.has(Number(item.id))).sort(compare).forEach(visit);
+
+    const changed = ordered.some((item, index) => item.sortOrder !== index);
+    if (changed) {
+      ordered.forEach((item, index) => { item.sortOrder = index; });
+      await this.images.save(ordered);
+    }
+    return ordered;
   }
 
   /** 同一原图的分页相邻展示，沿用每组首次出现的位置。 */
@@ -505,11 +554,6 @@ export class TasksService implements OnModuleInit {
           errorCode: 'model:',
         });
       }
-      try {
-        await this.processor.assertFusionReady();
-      } catch (e: any) {
-        throw new BadRequestException({ message: e?.message || String(e), errorCode: 'config:' });
-      }
       const creds = await this.settings.resolveCredentials(m);
       if (!creds.apiKey) {
         throw new BadRequestException({
@@ -526,14 +570,19 @@ export class TasksService implements OnModuleInit {
     await this.tasks.save(task);
 
     // 进全局队列：空闲就立即开始，有别的卷在跑就排队等候
-    this.enqueueVolume(id);
-    const waiting = this.volActive >= this.maxVolActive;
+    const waiting = await this.enqueueVolume(id, userId);
     return { message: waiting ? '已加入处理队列' : '已开始处理', task };
   }
 
-  private async runProcess(taskId: number) {
+  private async runProcess(taskId: number, actorUserId?: number) {
     const task = await this.tasks.findOne({ where: { id: taskId } });
     if (!task) return;
+    if (task.status !== 'processing') {
+      task.status = 'processing';
+      task.updatedAt = new Date();
+      await this.tasks.save(task);
+    }
+    const effectiveActorUserId = Number(actorUserId || task.userId);
 
     const DONE_OK = new Set(['ready', 'confirmed']);
     let imgs: TaskImage[] = [];
@@ -607,7 +656,7 @@ export class TasksService implements OnModuleInit {
 
             if (cleanModel) {
               try {
-                await this.aiProcessOne(task, img, cleanModel, true);
+                await this.aiProcessOne(task, img, cleanModel, true, effectiveActorUserId);
               } catch (e) {
                 if (!(e instanceof AiMismatchError)) throw e;
                 // 模型改了字/版式：不采用，本页改用算法处理，保证不改字
@@ -759,7 +808,7 @@ export class TasksService implements OnModuleInit {
    * 图生图大模型处理一页：按裁剪框取图 → 模型出图 → 存为 AI 结果并设为当前结果。
    * 临时性失败自动重试 1 次；配置错误（AiConfigError）直接抛出。
    */
-  private async aiProcessOne(task: Task, img: TaskImage, model: AiModel, retry: boolean) {
+  private async aiProcessOne(task: Task, img: TaskImage, model: AiModel, retry: boolean, actorUserId: number) {
     await this.restoreOriginalSource(task, img);
     if (!img.sourcePath || !fs.existsSync(img.sourcePath)) throw new Error('原图不存在：' + img.fileName);
     const crop = (await this.finalOriginalCrop(img)) || this.processor.parseCrop(img.cropBox);
@@ -778,11 +827,8 @@ export class TasksService implements OnModuleInit {
     const thumbPath = this.thumbPath(task, img);
     const started = Date.now();
     try {
-      // 先做不花钱的检查：合成环境不全就不去调模型
-      await this.processor.assertFusionReady();
-
-      // 先跑现有算法（不花钱）：算法成品作为合成的底图，大模型只负责删掉算法没去干净的污渍。
-      // 算法失败就不去调模型。算法成品同时作为本页的「算法结果」，可随时切换。
+      // 先跑现有算法（不花钱）并保留为备用结果；大模型结果不再经过自动判定或拦截，
+      // 用户已经为本次调用付费，最终是否采用由用户在工作台自行决定。
       const algoOut = this.algoPath(task, img);
       const pageParams = this.processor.parseParams(img.params, this.processor.parseParams(task.defaultParams));
       await this.processor.processToFile(img.sourcePath, algoOut, pageParams, crop && crop.w > 0 && crop.h > 0 ? crop : null);
@@ -809,6 +855,7 @@ export class TasksService implements OnModuleInit {
             const c = this.settings.toCny(model, this.aliyun.cost(model, { tokensIn: 0, tokensOut: 0, images: (e as any).images || 1 })) ?? 0;
             img.cleanCost = String((Number(img.cleanCost || 0) || 0) + c);
             task.actualCost = String((Number(task.actualCost || 0) || 0) + c);
+            await this.recordImageGeneration(actorUserId, task, img, model, c);
             throw e;
           }
           // 只有模型还没出图的失败（网络、超时、平台 5xx）才自动重试一次；配置问题不重试
@@ -821,41 +868,16 @@ export class TasksService implements OnModuleInit {
         cost = this.settings.toCny(model, this.aliyun.cost(model, usage)) ?? 0;
         img.cleanCost = String((Number(img.cleanCost || 0) || 0) + cost);
         task.actualCost = String((Number(task.actualCost || 0) || 0) + cost);
+        await this.recordImageGeneration(actorUserId, task, img, model, cost);
         try {
           fs.writeFileSync(markPath, JSON.stringify({ key, state: 'raw', at: Date.now() }));
         } catch {}
       }
 
-      let aiWarning: string | null = null;
-      if (process.env.AI_FUSE === '0') {
-        fs.copyFileSync(rawPath, resultPath);
-      } else {
-        let fuse: any;
-        try {
-          fuse = await this.processor.fuseAiResult(input, rawPath, resultPath, algoOut);
-          this.logger.log(`AI 保真合成 image=${img.id} ${JSON.stringify(fuse)}`);
-        } catch (fuseErr: any) {
-          this.logger.warn(`AI 保真合成异常 image=${img.id}: ${fuseErr?.message || fuseErr}`);
-          fuse = { ok: false, error: 'fuse_exception' };
-        }
-        // 兜底：如果 resultPath 未生成，直接复用模型的 rawPath
-        if (!fs.existsSync(resultPath) && fs.existsSync(rawPath)) {
-          fs.copyFileSync(rawPath, resultPath);
-        }
-        if (!fuse?.ok) {
-          // 版面/笔画校验未完全通过：给出明确提示，但不拦截结果输出，由客户自主决定是否采用
-          aiWarning =
-            `大模型画出的页面与原图可能存在局部差异` +
-            (fuse?.recall != null
-              ? `【对齐度 ${Math.round((fuse.recall || 0) * 100)}%${fuse.bad_tiles != null ? `，${fuse.bad_tiles}/${fuse.text_tiles} 个字区可能存在偏差` : ''}】`
-              : '') +
-            (cost ? `（本次已产生费用 ¥${cost.toFixed(2)}）` : '') +
-            '。已保留算法结果与大模型结果，请在下方对比并自主决定是否使用大模型结果。';
-          this.writeAiMark(markPath, key, 'done', aiWarning);
-        } else {
-          this.writeAiMark(markPath, key, 'done');
-        }
-      }
+      const aiWarning: string | null = null;
+      // 不做保真检查、不做自动融合：rawPath 就是用户付费得到的大模型结果。
+      fs.copyFileSync(rawPath, resultPath);
+      this.writeAiMark(markPath, key, 'done');
       await this.processor.makeThumb(resultPath, thumbPath);
       img.aiResultPath = resultPath;
       img.aiModelId = Number(model.id);
@@ -874,6 +896,16 @@ export class TasksService implements OnModuleInit {
         } catch {}
       }
     }
+  }
+
+  private async recordImageGeneration(actorUserId: number, task: Task, img: TaskImage, model: AiModel, cost: number) {
+    try {
+      const project = task.projectId ? await this.projects.findOne({ where: { id: task.projectId } }) : null;
+      await this.usage.record({
+        userId: Number(actorUserId), taskId: Number(task.id), imageId: Number(img.id), projectId: task.projectId == null ? null : Number(task.projectId),
+        projectName: project?.name || '', taskName: task.name || '', imageName: img.fileName || '', modelName: model.displayName || model.model || '', cost: String(cost || 0),
+      });
+    } catch (e) { this.logger.warn(`记录生图使用记录失败 image=${img.id}: ${(e as any)?.message || e}`); }
   }
 
   /** 单页大模型处理的后台任务（按图片 id）；服务重启会丢失，前端轮询到 none 时提示重试 */
@@ -911,11 +943,6 @@ export class TasksService implements OnModuleInit {
         errorCode: 'auth:' + (creds.platform || ''),
       });
     }
-    try {
-      await this.processor.assertFusionReady();
-    } catch (e: any) {
-      throw new BadRequestException({ message: e?.message || String(e), errorCode: 'config:' });
-    }
     const job: { state: 'running' | 'done' | 'failed'; startedAt: number; finishedAt?: number; error?: string; errorCode?: string; result?: any; warning?: string } = {
       state: 'running',
       startedAt: Date.now(),
@@ -923,7 +950,7 @@ export class TasksService implements OnModuleInit {
     this.aiJobs.set(Number(img.id), job);
     const m = model;
     setImmediate(() => {
-      this.runAiProcess(task, img, m)
+      this.runAiProcess(task, img, m, userId)
         .then((result) => {
           job.state = 'done';
           job.result = result;
@@ -964,7 +991,7 @@ export class TasksService implements OnModuleInit {
     };
   }
 
-  private async runAiProcess(task: Task, img: TaskImage, model: AiModel) {
+  private async runAiProcess(task: Task, img: TaskImage, model: AiModel, actorUserId: number) {
     // 当前是算法结果时先记下来，便于「恢复算法结果」
     if (img.processMode !== 'ai' && img.resultPath && fs.existsSync(img.resultPath) && !img.algoResultPath) {
       img.algoResultPath = img.resultPath;
@@ -972,7 +999,7 @@ export class TasksService implements OnModuleInit {
     const costBefore = Number(img.cleanCost || 0) || 0;
     let aiWarning: string | null = null;
     try {
-      const res = await this.aiProcessOne(task, img, model, false);
+      const res = await this.aiProcessOne(task, img, model, false, actorUserId);
       aiWarning = res?.aiWarning || null;
     } catch (e) {
       {
@@ -1127,10 +1154,14 @@ export class TasksService implements OnModuleInit {
         createdAt: new Date(),
         updatedAt: new Date(),
       });
-      await this.images.save(child);
-      task.totalCount = await this.images.count({ where: { taskId } });
-      task.updatedAt = new Date();
-      await this.tasks.save(task);
+      await this.images.manager.transaction(async (manager) => {
+        const repo = manager.getRepository(TaskImage);
+        // 新裁剪页紧跟当前页，先给后续图片腾出位置，避免被下一张原图隔开。
+        await repo.createQueryBuilder().update(TaskImage).set({ sortOrder: () => 'sort_order + 1' }).where('task_id = :taskId AND sort_order >= :order', { taskId, order: child.sortOrder }).execute();
+        await repo.save(child);
+        const totalCount = await repo.count({ where: { taskId } });
+        await manager.getRepository(Task).update(taskId, { totalCount, updatedAt: new Date() });
+      });
       return this.imageView(child);
     }
     img.finalCrop = JSON.stringify({ source, box, basePath: source === 'result' ? basePath : null });
@@ -1225,9 +1256,12 @@ export class TasksService implements OnModuleInit {
         updatedAt: now,
       }));
       await this.images.manager.transaction(async (manager) => {
-        await manager.getRepository(TaskImage).save(derived);
-        const totalCount = await manager.getRepository(TaskImage).count({ where: { taskId } });
-        const confirmedCount = await manager.getRepository(TaskImage).count({ where: { taskId, status: 'confirmed' } });
+        const repo = manager.getRepository(TaskImage);
+        // 分页结果也要紧跟当前页，后面的原图顺序整体后移。
+        await repo.createQueryBuilder().update(TaskImage).set({ sortOrder: () => `sort_order + ${generated.length}` }).where('task_id = :taskId AND sort_order >= :order', { taskId, order: current.sortOrder + 1 }).execute();
+        await repo.save(derived);
+        const totalCount = await repo.count({ where: { taskId } });
+        const confirmedCount = await repo.count({ where: { taskId, status: 'confirmed' } });
         await manager.getRepository(Task).update(taskId, { totalCount, confirmedCount, updatedAt: now });
       });
       return derived.map((p) => this.imageView(p));
@@ -1424,11 +1458,12 @@ export class TasksService implements OnModuleInit {
 
     // Stop in-flight processing if any
     this.cancelled.add(id);
+    this.volActors.delete(id);
     this.running.delete(id);
 
     try {
       await this.images.delete({ taskId: id });
-      await this.tasks.delete({ id, userId });
+      await this.tasks.delete({ id });
       this.safeRemoveOutputFolder(task.outputFolder, task.sourceFolder);
       this.logger.log(`Deleted task ${id} (${task.name})`);
       return { ok: true, id };
@@ -1514,11 +1549,8 @@ export class TasksService implements OnModuleInit {
   }
 
   /**
-   * 算法重新出图后决定「当前结果」：
-   * - 已有大模型结果、当前用的是它、裁剪框没变 → 继续用大模型结果（优先 AI），算法图只更新备用
-   * - 裁剪框变了 → 旧的大模型结果对应旧区域，作废；改用新的算法结果
-   * - 其他 → 用算法结果
-   * 返回当前结果是否为大模型结果。
+   * 算法重新出图后，当前结果统一切换为算法结果。
+   * 大模型结果仍保留，用户可以在结果面板中手动切回。
    */
   private async settleAfterAlgo(task: Task, img: TaskImage, algoPath: string, thumbPath: string, prevCrop: string | null) {
     img.algoResultPath = algoPath;
@@ -1527,12 +1559,6 @@ export class TasksService implements OnModuleInit {
     if (hasAi && cropChanged) {
       this.logger.log(`image ${img.id} 裁剪框已改，旧的大模型结果作废`);
       img.aiResultPath = null as any;
-    }
-    if (hasAi && !cropChanged && img.processMode === 'ai') {
-      img.resultPath = img.aiResultPath;
-      await this.processor.makeThumb(img.aiResultPath!, thumbPath); // 缩略图仍显示大模型结果
-      img.thumbPath = thumbPath;
-      return true;
     }
     img.resultPath = algoPath;
     img.processMode = 'algo';
@@ -1883,7 +1909,7 @@ export class TasksService implements OnModuleInit {
   /** 按项目导出当前选中的结果图，不导出原图。 */
   async downloadProjectZip(userId: number, projectId: number, res: any) {
     const project = await this.getProject(userId, projectId);
-    const volumes = await this.tasks.find({ where: { userId, projectId }, order: { id: 'ASC' } });
+    const volumes = await this.tasks.find({ where: { projectId }, order: { id: 'ASC' } });
     const entries: Array<{ task: Task; image: TaskImage }> = [];
     for (const task of volumes) {
       const imgs = await this.images.find({ where: { taskId: task.id }, order: { sortOrder: 'ASC' } });

@@ -2,8 +2,9 @@ export interface User {
   id: string;
   username: string;
   displayName: string;
-  role: 'admin' | 'archivist' | 'reviewer';
+  role: 'admin' | 'user' | 'archivist' | 'reviewer';
   avatarUrl: string;
+  enabled?: boolean;
 }
 
 export interface CropRect {

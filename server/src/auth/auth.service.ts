@@ -13,6 +13,7 @@ export class AuthService {
   async login(username: string, password: string) {
     const user = await this.users.findByUsername(username);
     if (!user) throw new UnauthorizedException('用户名或密码错误');
+    if (user.enabled === false || user.deletedAt) throw new UnauthorizedException('账号已被禁用');
     const ok = await bcrypt.compare(password, user.passwordHash);
     if (!ok) throw new UnauthorizedException('用户名或密码错误');
     const payload = { sub: Number(user.id), username: user.username };
@@ -23,6 +24,8 @@ export class AuthService {
         id: Number(user.id),
         username: user.username,
         displayName: user.displayName,
+        role: user.username === 'admin' ? 'admin' : 'user',
+        enabled: Boolean(user.enabled),
       },
     };
   }
@@ -55,7 +58,7 @@ export class AuthService {
     const token = await this.jwt.signAsync({ sub: Number(user.id), username: user.username });
     return {
       token,
-      user: { id: Number(user.id), username: user.username, displayName: user.displayName },
+      user: { id: Number(user.id), username: user.username, displayName: user.displayName, role: user.username === 'admin' ? 'admin' : 'user', enabled: Boolean(user.enabled) },
     };
   }
 }

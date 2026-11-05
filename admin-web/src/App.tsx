@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { User, Task, ScanItem, ProcessParams, OcrTask } from './types';
+import { User, Task, ScanItem, OcrTask } from './types';
 import { LoginView } from './components/LoginView';
 import { TopNav, MainViewTab } from './components/TopNav';
 import { AccountDialog } from './components/AccountDialog';
+import { AccountManagementView } from './components/AccountManagementView';
 import { TaskCenterView } from './components/TaskCenterView';
 import { ReviewWorkbench } from './components/ReviewWorkbench';
 import { SettingsView } from './components/SettingsView';
@@ -12,6 +13,7 @@ import { AiSetupWizard } from './components/AiSetupWizard';
 import { AiProblemDialog, AiProblem, inferErrorCode } from './components/AiProblemDialog';
 import { api, clearAuth, getStoredUser, getToken } from './api/client';
 import { mapTask, mapUser, mapOcrTask } from './api/mappers';
+import { appAlert } from './components/AppDialog';
 
 function parseReviewPath(pathname: string): string | null {
   const m = pathname.match(/^\/tasks\/([^/]+)\/review\/?$/);
@@ -180,7 +182,7 @@ export default function App() {
         setCurrentTab('workbench');
         if (syncUrl) pushReviewUrl(taskId);
       } catch (e: any) {
-        alert(e?.message || '加载任务失败');
+        void appAlert(e?.message || '加载任务失败');
         goToTasks();
       }
     },
@@ -227,7 +229,7 @@ export default function App() {
     const timer = window.setInterval(() => {
       if (document.hidden) return;
       taskTick++;
-      const taskBusy = Array.from(statusRef.current.values()).some((s) => s === 'processing');
+          const taskBusy = Array.from(statusRef.current.values()).some((s) => s === 'processing' || s === 'queued');
       if (!taskBusy && taskTick % 4 !== 0) return;
       api.getTasks()
         .then((list) => {
@@ -345,7 +347,7 @@ export default function App() {
         const t = tasks.find((x) => x.id === taskId);
         setAiProblem({ taskId, taskName: t?.name, message: e.message, errorCode: e.errorCode });
       } else {
-        alert(e?.message || '开始处理失败');
+        void appAlert(e?.message || '开始处理失败');
       }
       await loadTasks();
     }
@@ -413,36 +415,13 @@ export default function App() {
     );
   };
 
-  const handleBatchApplyParams = (
-    taskId: string,
-    startFromIndex: number,
-    params: ProcessParams
-  ) => {
-    setTasks((prev) =>
-      prev.map((task) => {
-        if (task.id !== taskId) return task;
-        const newItems = task.items.map((it, idx) => {
-          if (idx >= startFromIndex && it.reviewStatus !== 'passed') {
-            return {
-              ...it,
-              params: { ...params },
-              reviewStatus: 'pending' as const,
-            };
-          }
-          return it;
-        });
-        return { ...task, items: newItems };
-      })
-    );
-  };
-
   const handleFinishTaskReview = async (taskId: string) => {
     try {
       await api.confirmTask(taskId);
       await loadTasks();
       goToTasks();
     } catch (e: any) {
-      alert(e?.message || '确认完成失败');
+      void appAlert(e?.message || '确认完成失败');
     }
   };
 
@@ -490,7 +469,7 @@ export default function App() {
         const t = ocrTasks.find((x) => x.id === taskId);
         setAiProblem({ kind: 'ocr', taskId, taskName: t?.name, message: e.message, errorCode: e.errorCode });
       } else {
-        alert(e?.message || '开始识别失败');
+      void appAlert(e?.message || '开始识别失败');
       }
       await loadOcrTasks();
     }
@@ -513,7 +492,7 @@ export default function App() {
       await loadOcrTasks();
       goToOcr();
     } catch (e: any) {
-      alert(e?.message || '完成任务失败');
+      void appAlert(e?.message || '完成任务失败');
     }
   };
 
@@ -542,7 +521,8 @@ export default function App() {
         currentTab={currentTab}
         onBackToTasks={currentTab === 'workbench' ? () => backToTaskVolumeList(activeTask?.projectId) : goToTasks}
         hideWorkbenchBack={currentTab === 'workbench'}
-        onOpenSettings={() => setCurrentTab('settings')}
+        onOpenSettings={currentUser.role === 'admin' ? () => setCurrentTab('settings') : undefined}
+        onOpenAccountManagement={currentUser.role === 'admin' ? () => setCurrentTab('accounts') : undefined}
         onOpenOcr={goToOcr}
         onBackToOcr={backToOcrProject}
         user={currentUser}
@@ -581,6 +561,8 @@ export default function App() {
 
         {currentTab === 'settings' && <SettingsView key={settingsTab || 'default'} initialTab={settingsTab} />}
 
+        {currentTab === 'accounts' && currentUser.role === 'admin' && <AccountManagementView />}
+
         {currentTab === 'ocr' && (
           <OcrTaskCenterView
             tasks={ocrTasks}
@@ -612,7 +594,6 @@ export default function App() {
           <ReviewWorkbench
             task={activeTask}
             onUpdateTaskItem={handleUpdateTaskItem}
-            onBatchApplyParams={handleBatchApplyParams}
             onFinishTaskReview={handleFinishTaskReview}
             onBack={() => backToTaskVolumeList(activeTask.projectId)}
             onReloadTask={() => loadTaskDetail(activeTask.id)}

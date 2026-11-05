@@ -1,8 +1,8 @@
 import React from 'react';
 import { User } from '../types';
-import { BookOpen, LogOut, ChevronLeft, Settings, Image as ImageIcon, ScanText } from 'lucide-react';
+import { BookOpen, LogOut, ChevronLeft, Settings, Image as ImageIcon, ScanText, Users } from 'lucide-react';
 
-export type MainViewTab = 'tasks' | 'workbench' | 'ocr' | 'ocrReview' | 'settings';
+export type MainViewTab = 'tasks' | 'workbench' | 'ocr' | 'ocrReview' | 'settings' | 'accounts';
 
 interface TopNavProps {
   currentTab: MainViewTab;
@@ -15,6 +15,7 @@ interface TopNavProps {
   user: User;
   onLogout: () => void;
   onOpenAccount?: () => void;
+  onOpenAccountManagement?: () => void;
   activeTaskName?: string;
   activeTaskProgress?: { reviewed: number; total: number };
   hideWorkbenchBack?: boolean;
@@ -29,6 +30,7 @@ export const TopNav: React.FC<TopNavProps> = ({
   user,
   onLogout,
   onOpenAccount,
+  onOpenAccountManagement,
   activeTaskName,
   activeTaskProgress,
   hideWorkbenchBack = false,
@@ -92,6 +94,12 @@ export const TopNav: React.FC<TopNavProps> = ({
                 <button type="button" onClick={onOpenSettings} className={navBtn(currentTab === 'settings')}>
                   <Settings className="w-4 h-4" />
                   模型配置
+                </button>
+              ) : null}
+              {onOpenAccountManagement ? (
+                <button type="button" onClick={onOpenAccountManagement} className={navBtn(currentTab === 'accounts')}>
+                  <Users className="w-4 h-4" />
+                  账号管理
                 </button>
               ) : null}
             </nav>

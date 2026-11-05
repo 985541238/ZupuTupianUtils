@@ -6,6 +6,7 @@ import { PerspectiveDialog } from './PerspectiveDialog';
 import { BatchCropDialog, BatchCropConfig } from './BatchCropDialog';
 import { FinalCropDialog } from './FinalCropDialog';
 import { mapImage, formatProcessingTime } from '../api/mappers';
+import { appAlert, appConfirm } from './AppDialog';
 import {
   ChevronLeft,
   ChevronRight,
@@ -36,7 +37,6 @@ import {
 interface ReviewWorkbenchProps {
   task: Task;
   onUpdateTaskItem: (taskId: string, item: ScanItem) => void;
-  onBatchApplyParams: (taskId: string, startFromPage: number, params: ProcessParams) => void;
   onFinishTaskReview: (taskId: string) => void;
   onBack: () => void;
   onReloadTask?: () => Promise<any> | void;
@@ -49,7 +49,6 @@ type PageSession = { crop: CropRect | null; previewUrl: string; params?: Process
 export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   task,
   onUpdateTaskItem,
-  onBatchApplyParams,
   onFinishTaskReview,
   onBack,
   onReloadTask,
@@ -98,7 +97,6 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
           : 40,
     };
   });
-  const [applyScope, setApplyScope] = useState<'current' | 'remaining'>('current');
   /** 自动检测出的推荐模式（脏污/字迹不清/标准），仅用于提示与「自动」按钮 */
   const [detectedMode, setDetectedMode] = useState<'standard' | 'stained' | 'faint' | null>(null);
 
@@ -395,9 +393,6 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
         const previewStartedAt = performance.now();
         const blob = await previewImageBlob(task.id, pageIdAtStart, body);
         const clientPreviewMs = Math.round(performance.now() - previewStartedAt);
-        if ((blob as any).resultMode === 'ai') {
-          triggerToast('这一页以大模型结果为准：调整参数只更新备用的算法结果。如需改用算法结果，请在右侧「大模型处理」里切换');
-        }
         // Always stash under the page that requested preview (even if user navigated away).
         const url = URL.createObjectURL(blob);
         const prevSess = pageSessionRef.current.get(pageIdAtStart);
@@ -750,14 +745,14 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   const handleAiProcessPage = async () => {
     if (!currentItem || aiBusyIds.includes(currentItem.id)) return;
     if (!cleanModels.length) {
-      alert('暂无可用的图片处理模型，请先到「模型配置」添加');
+      void appAlert('暂无可用的图片处理模型，请先到「模型配置」添加');
       return;
     }
     const item = currentItem;
     if (item.hasAiResult) {
       const m = cleanModels.find((x: any) => Number(x.id) === Number(selectedCleanModelId));
       const per = selectedCleanModelId != null ? cleanPerPage[selectedCleanModelId] : null;
-      if (!window.confirm(`这一页已经有大模型结果了。用「${m?.displayName || '所选模型'}」重新处理会再收一次费${per != null ? `（约 ¥${per.toFixed(2)}）` : ''}，处理成功后会替换现在的大模型结果。继续吗？`)) return;
+      if (!(await appConfirm(`这一页已经有大模型结果了。用「${m?.displayName || '所选模型'}」重新处理会再收一次费${per != null ? `（约 ¥${per.toFixed(2)}）` : ''}，处理成功后会替换现在的大模型结果。继续吗？`))) return;
     }
     setAiNotes((o) => {
       const n = { ...o };
@@ -780,7 +775,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
         if (r.state === 'running') {
           if (Date.now() - started > 15 * 60 * 1000) {
             finish();
-            alert('大模型处理时间过长，请稍后刷新页面查看结果');
+            void appAlert('大模型处理时间过长，请稍后刷新页面查看结果');
             return;
           }
           window.setTimeout(poll, 2000);
@@ -804,14 +799,14 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
             [item.id]: { type: 'error', text: `第 ${item.pageNumber} 页大模型处理失败：${r.error || '未知原因'}` },
           }));
         } else {
-          alert('没有找到这一页的处理记录（服务可能重启过），请重新点击「使用大模型处理」');
+          void appAlert('没有找到这一页的处理记录（服务可能重启过），请重新点击「使用大模型处理」');
         }
       } catch (e: any) {
         // 网络抖动：继续等
         if (Date.now() - started < 15 * 60 * 1000) window.setTimeout(poll, 4000);
         else {
           finish();
-          alert(e?.message || '查询处理结果失败');
+          void appAlert(e?.message || '查询处理结果失败');
         }
       }
     };
@@ -837,7 +832,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
       applyServerImage(r, item);
       triggerToast(mode === 'ai' ? '已切换为大模型结果' : '已切换为算法结果');
     } catch (e: any) {
-      alert(e?.message || '切换失败');
+      void appAlert(e?.message || '切换失败');
     } finally {
       setAiProcessBusy(false);
     }
@@ -864,7 +859,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
       });
       triggerToast('本页 AI 识别完成');
     } catch (e: any) {
-      alert(e?.message || 'AI 识别失败');
+      void appAlert(e?.message || 'AI 识别失败');
     } finally {
       setAiRecognizeBusy(false);
     }
@@ -928,21 +923,12 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
     markParamsDirty();
     const nextParams = { ...localParams, [key]: value };
     setLocalParams(nextParams);
-
-    if (applyScope === 'remaining') {
-      onBatchApplyParams(task.id, currentPageIndex, nextParams);
-      triggerToast('参数已同步到后续未审页面');
-    }
   };
 
   /** 选中内置模式：一次套用整组滑块值，触发一次预览；之后仍可手动微调 */
   const applyMode = (next: ProcessParams) => {
     markParamsDirty();
     setLocalParams(next);
-    if (applyScope === 'remaining') {
-      onBatchApplyParams(task.id, currentPageIndex, next);
-      triggerToast('模式已同步到后续未审页面');
-    }
   };
   const activeMode = matchMode(localParams);
 
@@ -1088,7 +1074,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
 
   const deleteDerivedPage = async (item: ScanItem, index: number) => {
     if (!item.splitSourceKey || isProcessing) return;
-    if (!window.confirm(`确定删除“${item.fileName}”吗？\n这只会删除裁剪/分页结果，原图不会受影响。`)) return;
+    if (!(await appConfirm(`确定删除“${item.fileName}”吗？\n这只会删除裁剪/分页结果，原图不会受影响。`))) return;
     try {
       setIsProcessing(true);
       await api.deleteTaskImage(task.id, item.id);
@@ -2071,36 +2057,6 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
             </div>
           ) : (
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
-            <div className="p-2.5 bg-white rounded-2xl border border-black/[0.06] shadow-2xs">
-              <div className="text-[11px] font-medium text-[#86868B] mb-1.5">
-                调参作用范围
-              </div>
-              <div className="grid grid-cols-2 gap-1 p-1 bg-[#E5E5EA]/70 rounded-xl">
-                <button
-                  type="button"
-                  onClick={() => setApplyScope('current')}
-                  className={`py-1 text-xs font-medium rounded-lg transition-all cursor-pointer ${
-                    applyScope === 'current'
-                      ? 'bg-white text-[#1D1D1F] shadow-xs font-semibold'
-                      : 'text-[#6E6E73] hover:text-[#1D1D1F]'
-                  }`}
-                >
-                  仅当前页
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setApplyScope('remaining')}
-                  className={`py-1 text-xs font-medium rounded-lg transition-all cursor-pointer ${
-                    applyScope === 'remaining'
-                      ? 'bg-[#0071E3] text-white shadow-xs font-semibold'
-                      : 'text-[#6E6E73] hover:text-[#1D1D1F]'
-                  }`}
-                >
-                  后续未审页 (批量)
-                </button>
-              </div>
-            </div>
-
             <div className="p-2.5 bg-white rounded-2xl border border-black/[0.06] shadow-2xs">
               <label className="flex items-center justify-between gap-3 cursor-pointer">
                 <span>

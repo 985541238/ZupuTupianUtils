@@ -44,7 +44,7 @@ export function mapUser(raw: any): User {
     id: String(raw?.id ?? 'usr_admin'),
     username,
     displayName: raw?.displayName || raw?.nickname || (username === 'admin' ? '管理员' : username),
-    role: (raw?.role as User['role']) || 'admin',
+    role: (raw?.role as User['role']) || (username === 'admin' ? 'admin' : 'user'),
     avatarUrl:
       raw?.avatarUrl ||
       `https://api.dicebear.com/7.x/notionists/svg?seed=${encodeURIComponent(username)}`,

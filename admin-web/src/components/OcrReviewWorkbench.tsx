@@ -3,6 +3,7 @@ import { OcrTask, OcrPage, OcrColumn, OcrChar, OcrTextPage } from '../types';
 import { api } from '../api/client';
 import { mapOcrPage, mapOcrTextPage } from '../api/mappers';
 import { OcrModelPicker } from './OcrModelPicker';
+import { appAlert, appConfirm } from './AppDialog';
 import {
   CheckCircle2,
   ChevronLeft,
@@ -122,7 +123,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
         const first = list.find((p) => p.status === 'ready') || list.find((p) => p.status !== 'confirmed') || list[0];
         setCurId(first ? first.id : null);
       })
-      .catch((e) => alert(e?.message || '加载页面失败'))
+      .catch((e) => { void appAlert(e?.message || '加载页面失败'); })
       .finally(() => !off && setLoadingList(false));
     return () => {
       off = true;
@@ -477,11 +478,11 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
   };
 
   /** 删除一整列（模型把页边印章、杂点当成了文字列，或把一列拆多了） */
-  const removeColumn = (col: number) => {
+  const removeColumn = async (col: number) => {
     if (!columns) return;
     const c = columns[col];
     const text = c.chars.map((x) => x.t).join('');
-    if (!window.confirm(`删除第 ${col + 1} 列「${text.slice(0, 12)}${text.length > 12 ? '…' : ''}」（${c.chars.length} 字）？这一步不能撤销。`)) return;
+    if (!(await appConfirm(`删除第 ${col + 1} 列「${text.slice(0, 12)}${text.length > 12 ? '…' : ''}」（${c.chars.length} 字）？这一步不能撤销。`))) return;
     applyColumns(columns.filter((_, i) => i !== col).map((x, i) => ({ ...x, id: i })));
     setSel(null);
   };
@@ -533,7 +534,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
       showToast(`第 ${cur.pageNumber} 页开始识别，完成后会自动显示${columns ? '（旧的这一版会保留，可随时恢复）' : ''}`);
     } catch (e: any) {
       if (e?.errorCode && onOpenSetup) {
-        alert(e.message);
+      void appAlert(e.message);
         onOpenSetup(null, 1);
       } else {
         showToast(e?.message || '识别失败');
@@ -1818,7 +1819,7 @@ const OcrOverview: React.FC<{ taskId: string; onJump: (pageId: string) => void }
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1800);
     } catch {
-      alert('复制失败，请手动选中文字复制');
+      void appAlert('复制失败，请手动选中文字复制');
     }
   };
 

@@ -71,6 +71,12 @@ export const api = {
 
   updateAccount: (data: { currentPassword: string; newUsername?: string; newPassword?: string; displayName?: string }) =>
     request<{ token: string; user: any }>('/auth/account', { method: 'POST', body: JSON.stringify(data) }),
+  listUsers: () => request<any[]>('/users'),
+  createUser: (data: { username: string; password: string; displayName?: string }) => request<any>('/users', { method: 'POST', body: JSON.stringify(data) }),
+  resetUserPassword: (id: string | number, password: string) => request<any>(`/users/${id}/reset-password`, { method: 'POST', body: JSON.stringify({ password }) }),
+  setUserEnabled: (id: string | number, enabled: boolean) => request<any>(`/users/${id}/enabled`, { method: 'PATCH', body: JSON.stringify({ enabled }) }),
+  deleteUser: (id: string | number) => request<any>(`/users/${id}/delete`, { method: 'POST', body: '{}' }),
+  listImageUsage: () => request<any[]>('/usage/image-generation?limit=300'),
 
   getTasks: () => request<any[]>('/tasks'),
   createTask: (data: {
@@ -154,20 +160,40 @@ export const api = {
   createUploadSession: (label?: string) =>
     request<{ id: string; dir: string }>('/files/upload-session', { method: 'POST', body: JSON.stringify({ label }) }),
   uploadImage: async (sessionId: string, file: File, name?: string) => {
-    const res = await fetch(`${BASE}/files/upload/${encodeURIComponent(sessionId)}?name=${encodeURIComponent(name || file.name)}`, {
-      method: 'PUT',
-      headers: { Authorization: 'Bearer ' + getToken(), 'Content-Type': 'application/octet-stream' },
-      body: file,
-    });
-    if (!res.ok) {
-      let msg = `上传失败（${res.status}）`;
+    const url = `${BASE}/files/upload/${encodeURIComponent(sessionId)}?name=${encodeURIComponent(name || file.name)}`;
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 120_000);
       try {
-        const j = await res.json();
-        if (j?.message) msg = Array.isArray(j.message) ? j.message.join('；') : String(j.message);
-      } catch {
-        /* ignore */
+        const res = await fetch(url, {
+          method: 'PUT',
+          headers: { Authorization: 'Bearer ' + getToken(), 'Content-Type': 'application/octet-stream' },
+          body: file,
+          signal: controller.signal,
+        });
+        if (res.ok) return;
+        let msg = `上传失败（${res.status}）`;
+        try {
+          const j = await res.json();
+          if (j?.message) msg = Array.isArray(j.message) ? j.message.join('；') : String(j.message);
+        } catch {
+          /* ignore */
+        }
+        throw new Error(msg);
+      } catch (e: any) {
+        if (e?.name === 'AbortError') {
+          lastError = new Error(`上传超时（120 秒）：${name || file.name}`);
+        } else if (e instanceof TypeError && /failed to fetch/i.test(String(e?.message || ''))) {
+          lastError = new Error(`网络连接中断：${name || file.name}。请检查后端服务是否重启或网络是否断开`);
+        } else {
+          lastError = e;
+        }
+        if (attempt < 3) continue;
+        throw lastError;
+      } finally {
+        window.clearTimeout(timer);
       }
-      throw new Error(msg);
     }
   },
   pickFolder: (start?: string) =>
