@@ -25,7 +25,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   async validate(payload: any) {
     const user = await this.users.findById(payload.sub);
     if (!user) throw new UnauthorizedException();
-    if (user.enabled === false || user.deletedAt) throw new UnauthorizedException('账号已被禁用');
+    // MySQL 驱动返回 tinyint 为数字 0/1，不能用 === false 判断
+    if (!user.enabled || user.deletedAt) throw new UnauthorizedException('账号已被禁用');
     return {
       id: Number(user.id),
       username: user.username,

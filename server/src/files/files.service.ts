@@ -66,20 +66,37 @@ $owner.Close()
     return process.env.UPLOAD_ROOT || path.join(process.cwd(), '..', 'data', 'uploads');
   }
 
-  createUploadSession(label?: string) {
+  createUploadSession(label?: string, files?: { path: string; size: number; lastModified?: number }[], sourceKey?: string, parentSessionId?: string) {
     const safe = String(label || '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').trim().slice(0, 40);
     const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
     const id = `${stamp}-${Math.random().toString(36).slice(2, 8)}`;
-    const dir = path.join(this.uploadRoot(), safe ? `${id}_${safe}` : id);
+    const uploadRoot = path.resolve(this.uploadRoot());
+    let base = uploadRoot;
+    if (parentSessionId) {
+      const parentRel = String(parentSessionId).replace(/\\/g, '/').replace(/^\/+/, '');
+      if (!parentRel || parentRel.includes('..') || /^[A-Za-z]:/.test(parentRel)) throw new BadRequestException('父上传会话无效');
+      base = path.resolve(uploadRoot, parentRel);
+      const baseRel = path.relative(uploadRoot, base);
+      if (!baseRel || baseRel.startsWith('..') || path.isAbsolute(baseRel) || !fs.existsSync(base) || !fs.statSync(base).isDirectory()) {
+        throw new BadRequestException('父上传会话不存在');
+      }
+    }
+    const dir = path.join(base, parentSessionId ? (safe || id) : (safe ? `${id}_${safe}` : id));
     fs.mkdirSync(dir, { recursive: true });
-    return { id: path.basename(dir), dir };
+    if (Array.isArray(files)) {
+      fs.writeFileSync(path.join(dir, '.upload-manifest.json'), JSON.stringify({ version: 1, label: label || '', sourceKey: sourceKey || '', files }, null, 2), 'utf8');
+    }
+    return { id: path.relative(uploadRoot, dir).replace(/\\/g, '/'), dir };
   }
 
-  /** 把请求体（原始二进制）写入上传会话，保留相对目录层级。 */
-  saveUpload(id: string, name: string, req: NodeJS.ReadableStream): Promise<{ ok: true; size: number }> {
-    if (!id || /[\\/]/.test(id) || id.includes('..')) throw new BadRequestException('会话无效');
-    const dir = path.join(this.uploadRoot(), id);
-    if (!fs.existsSync(dir)) throw new BadRequestException('上传会话不存在，请重新选择文件夹');
+  private uploadTarget(id: string, name: string) {
+    const uploadRoot = path.resolve(this.uploadRoot());
+    const relId = String(id || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    if (!relId || relId.includes('..') || /^[A-Za-z]:/.test(relId)) throw new BadRequestException('会话无效');
+    const dir = path.resolve(uploadRoot, relId);
+    const dirRel = path.relative(uploadRoot, dir);
+    if (!dirRel || dirRel.startsWith('..') || path.isAbsolute(dirRel)) throw new BadRequestException('会话无效');
+    if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) throw new BadRequestException('上传会话不存在，请重新选择文件夹');
     const rel = String(name || '').replace(/\\/g, '/').replace(/^\/+/, '');
     if (!rel || rel.includes('..') || /^[A-Za-z]:/.test(rel)) throw new BadRequestException('上传文件路径无效');
     const base = path.basename(rel);
@@ -88,16 +105,54 @@ $owner.Close()
     const target = path.resolve(dir, rel);
     if (!target.toLowerCase().startsWith(path.resolve(dir).toLowerCase() + path.sep)) throw new BadRequestException('上传文件路径无效');
     fs.mkdirSync(path.dirname(target), { recursive: true });
+    return { target, part: `${target}.part` };
+  }
+
+  uploadStatus(id: string, name: string) {
+    const { target, part } = this.uploadTarget(id, name);
+    if (fs.existsSync(target)) {
+      return { offset: fs.statSync(target).size, complete: true };
+    }
+    return { offset: fs.existsSync(part) ? fs.statSync(part).size : 0, complete: false };
+  }
+
+  /** 把请求体（原始二进制）按偏移写入上传会话，断线后保留 .part 文件。 */
+  saveUpload(id: string, name: string, req: NodeJS.ReadableStream): Promise<{ ok: true; size: number }> {
+    const { target, part } = this.uploadTarget(id, name);
+    const h = (req as any).headers || {};
+    const offsetHeader = Number(h['x-upload-offset'] ?? 0);
+    const totalHeader = Number(h['x-upload-total'] ?? 0);
+    const offset = Number.isFinite(offsetHeader) && offsetHeader >= 0 ? offsetHeader : 0;
+    const total = Number.isFinite(totalHeader) && totalHeader > 0 ? totalHeader : 0;
+    if (fs.existsSync(target)) {
+      const size = fs.statSync(target).size;
+      if (!total || size === total) return Promise.resolve({ ok: true, size });
+      throw new BadRequestException('文件已存在但大小不一致，请重新上传');
+    }
+    const current = fs.existsSync(part) ? fs.statSync(part).size : 0;
+    if (offset !== current) throw new BadRequestException(`上传偏移不匹配，服务器已接收 ${current} 字节`);
     return new Promise((resolve, reject) => {
-      const ws = fs.createWriteStream(target);
-      let size = 0;
-      req.on('data', (c: Buffer) => (size += c.length));
+      const ws = fs.createWriteStream(part, { flags: offset === 0 ? 'w' : 'r+', start: offset });
+      let size = offset;
+      req.on('data', (c: Buffer) => {
+        size += c.length;
+        if (total && size > total) ws.destroy(new Error('上传数据超过文件大小'));
+      });
       req.pipe(ws);
-      ws.on('finish', () => resolve({ ok: true, size }));
+      ws.on('finish', () => {
+        if (total && size === total) {
+          fs.renameSync(part, target);
+        }
+        resolve({ ok: true, size });
+      });
       ws.on('error', (e) => reject(new BadRequestException('写入失败：' + e.message)));
       req.on('error', (e) => {
         ws.destroy();
         reject(new BadRequestException('上传中断：' + e.message));
+      });
+      req.on('aborted', () => {
+        ws.destroy();
+        reject(new BadRequestException('上传连接中断，已保留断点'));
       });
     });
   }

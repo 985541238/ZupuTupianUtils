@@ -13,7 +13,8 @@ export class AuthService {
   async login(username: string, password: string) {
     const user = await this.users.findByUsername(username);
     if (!user) throw new UnauthorizedException('用户名或密码错误');
-    if (user.enabled === false || user.deletedAt) throw new UnauthorizedException('账号已被禁用');
+    // MySQL 驱动返回 tinyint 为数字 0/1，不能用 === false 判断
+    if (!user.enabled || user.deletedAt) throw new UnauthorizedException('账号已被禁用');
     const ok = await bcrypt.compare(password, user.passwordHash);
     if (!ok) throw new UnauthorizedException('用户名或密码错误');
     const payload = { sub: Number(user.id), username: user.username };

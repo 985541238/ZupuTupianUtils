@@ -44,10 +44,20 @@ async function bootstrap() {
       }
       next();
     });
-    app.use(express.static(adminDist, { index: 'index.html', maxAge: '1h' }));
+    app.use(express.static(adminDist, {
+      index: 'index.html',
+      maxAge: '1h',
+      setHeaders: (res, filePath) => {
+        // index.html 引用带 hash 的前端资源，入口本身绝不能缓存，否则桌面版更新后仍会加载旧 JS。
+        if (path.basename(filePath).toLowerCase() === 'index.html') {
+          res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        }
+      },
+    }));
     app.use((req: any, res: any, next: any) => {
       const accepts = String(req.headers.accept || '');
       if (req.method === 'GET' && accepts.includes('text/html') && !path.extname(req.path)) {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
         return res.sendFile(path.join(adminDist, 'index.html'));
       }
       next();

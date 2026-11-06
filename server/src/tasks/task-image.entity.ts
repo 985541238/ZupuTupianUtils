@@ -15,6 +15,10 @@ export class TaskImage {
   @Column({ name: 'source_path', length: 1024 })
   sourcePath: string;
 
+  /** 原图是否已从审阅列表中移除；原文件仍保留，结果图可独立保留。 */
+  @Column({ name: 'original_deleted', type: 'boolean', default: false })
+  originalDeleted: boolean;
+
   /** 双页拆分时保留的原始双页文件；单页为空。 */
   @Column({ name: 'original_source_path', length: 1024, nullable: true })
   originalSourcePath: string | null;
@@ -25,6 +29,10 @@ export class TaskImage {
 
   @Column({ name: 'result_path', length: 1024, nullable: true })
   resultPath: string | null;
+
+  /** 结果图是否已删除；原图可独立保留并重新处理。 */
+  @Column({ name: 'result_deleted', type: 'boolean', default: false })
+  resultDeleted: boolean;
 
   /** 当前结果图来源：algo = 现有算法，ai = 图生图大模型 */
   @Column({ name: 'process_mode', length: 16, nullable: true })

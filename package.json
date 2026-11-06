@@ -12,6 +12,7 @@
     "build:server:test": "npm --prefix server run build:test",
     "build:admin:prod": "npm --prefix admin-web run build",
     "build:admin:test": "npm --prefix admin-web run build",
+    "build:desktop": "npm --prefix desktop run dist",
     "start:prod": "npm --prefix server run start:prod"
   }
 }

@@ -60,13 +60,13 @@ export const TopNav: React.FC<TopNavProps> = ({
               </>
             )}
             <div className="flex items-center gap-2 text-sm min-w-0">
-              <span className="text-[#86868B] hidden sm:inline">正在审阅：</span>
+              <span className="text-[#86868B] hidden sm:inline">{currentTab === 'ocrReview' ? '正在审阅：' : '正在处理：'}</span>
               <span className="text-[#1D1D1F] font-semibold max-w-[280px] md:max-w-[420px] truncate">
                 {activeTaskName || '未命名'}
               </span>
-              {activeTaskProgress && (
+              {currentTab === 'ocrReview' && activeTaskProgress && (
                 <span className="font-mono text-xs px-2 py-0.5 rounded-full bg-[#0071E3]/10 text-[#0071E3] font-semibold shrink-0">
-                  {activeTaskProgress.reviewed}/{activeTaskProgress.total} {currentTab === 'ocrReview' ? '页已确认' : '页已核'}
+                  {activeTaskProgress.reviewed}/{activeTaskProgress.total} 页已确认
                 </span>
               )}
             </div>

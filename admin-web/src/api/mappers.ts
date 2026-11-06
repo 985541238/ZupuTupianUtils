@@ -67,10 +67,14 @@ export function mapImage(raw: any, taskId: string | number, pageNumber: number):
     pageNumber,
     fileName: raw.fileName || raw.name || `page_${pageNumber}.jpg`,
     // 原图永远是真正的原图：做过透视修正也不变，只有结果图变；裁剪要在拉正后的图上框选，用 correctedUrl
-    originalUrl: viewImageUrl(raw.perspectiveApplied && raw.trueOriginalUrl ? raw.trueOriginalUrl : raw.sourceUrl),
+    originalUrl: raw.originalDeleted ? undefined : viewImageUrl(raw.perspectiveApplied && raw.trueOriginalUrl ? raw.trueOriginalUrl : raw.sourceUrl),
     correctedUrl: viewImageUrl(raw.sourceUrl),
-    processedUrl: raw.resultUrl ? viewImageUrl(raw.resultUrl) : undefined,
+    processedUrl: raw.resultDeleted ? undefined : raw.resultUrl ? viewImageUrl(raw.resultUrl) : undefined,
     thumbnailUrl: raw.thumbUrl ? authImageUrl(raw.thumbUrl) : viewThumbUrl(raw.sourceUrl, 256),
+    originalThumbnailUrl: raw.originalDeleted ? undefined : viewThumbUrl(raw.perspectiveApplied && raw.trueOriginalUrl ? raw.trueOriginalUrl : raw.sourceUrl, 256),
+    resultThumbnailUrl: raw.resultDeleted ? undefined : raw.thumbUrl ? authImageUrl(raw.thumbUrl) : raw.resultUrl ? viewThumbUrl(raw.resultUrl, 256) : undefined,
+    originalDeleted: !!raw.originalDeleted,
+    resultDeleted: !!raw.resultDeleted,
     trueOriginalUrl: authImageUrl(raw.trueOriginalUrl || raw.sourceUrl),
     perspectiveApplied: !!raw.perspectiveApplied,
     perspectiveQuads: raw.perspectiveQuads || null,
@@ -112,6 +116,15 @@ export function mapImage(raw: any, taskId: string | number, pageNumber: number):
 export function mapTask(raw: any, images?: any[]): Task {
   const id = String(raw.id);
   const items = (images || []).map((img, i) => mapImage(img, id, i + 1));
+  // 裁剪/分页派生页的左侧对比图始终回溯到父页最初的原图，而不是派生结果自身。
+  const originalsById = new Map(items.map((item) => [item.id, item]));
+  for (const item of items) {
+    if (!item.splitSourceKey) continue;
+    const parent = originalsById.get(String(item.splitSourceKey));
+    item.originalUrl = parent?.originalUrl || item.splitOriginalUrl || item.originalUrl;
+    item.originalThumbnailUrl = parent?.originalThumbnailUrl || item.originalThumbnailUrl;
+    item.trueOriginalUrl = parent?.trueOriginalUrl || item.trueOriginalUrl;
+  }
   const totalPages = raw.totalCount ?? raw.totalPages ?? items.length;
   const reviewedPages = items.length
     ? items.filter((x) => x.reviewStatus === 'passed' || x.reviewStatus === 'failed').length
@@ -124,6 +137,8 @@ export function mapTask(raw: any, images?: any[]): Task {
     genealogyNote: raw.genealogyNote || raw.surname || undefined,
     surname: raw.surname || raw.genealogyNote || undefined,
     projectId: raw.projectId != null ? Number(raw.projectId) : null,
+    clientType: raw.clientType || 'web',
+    clientDeviceId: raw.clientDeviceId || null,
     useAi: !!raw.ocrModelId,
     ocrModelId: raw.ocrModelId != null ? Number(raw.ocrModelId) : null,
     useAiClean: !!raw.cleanModelId,

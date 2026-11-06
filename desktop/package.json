@@ -1,0 +1,30 @@
+{
+  "name": "zupu-workbench-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "族谱清晰化工作台 Windows 桌面启动器",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.zupu.workbench",
+    "productName": "族谱清晰化工作台",
+    "asar": true,
+    "files": ["main.cjs", "preload.cjs"],
+    "extraResources": [
+      { "from": "../server/dist", "to": "server/dist" },
+      { "from": "../server/scripts", "to": "server/scripts" },
+      { "from": "../server/node_modules", "to": "server/node_modules" },
+      { "from": "../server/.env.production", "to": "server/.env.production" },
+      { "from": "../admin-web/dist", "to": "admin-web/dist" }
+    ],
+    "win": { "target": [{ "target": "nsis", "arch": ["x64"] }], "signAndEditExecutable": false },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "createDesktopShortcut": true }
+  }
+}

@@ -327,6 +327,21 @@ export default function App() {
     pushTasksUrl();
   };
 
+  // 服务端 401 强制下线（账号被禁用 / 登录过期）：提示并回到登录页
+  const handleAuthExpired = useCallback((message: string) => {
+    handleLogout();
+    void appAlert(message);
+  }, []);
+
+  useEffect(() => {
+    const onAuthExpired = (e: Event) => {
+      const msg = (e as CustomEvent<string>).detail || '登录已失效，请重新登录';
+      handleAuthExpired(msg);
+    };
+    window.addEventListener('zupu:auth-expired', onAuthExpired);
+    return () => window.removeEventListener('zupu:auth-expired', onAuthExpired);
+  }, [handleAuthExpired]);
+
   /**
    * 开始处理：只负责提交，进度由任务列表轮询展示。
    * 不再前台等待（之前最多等 6 分钟就报「超时」），处理完也不强制跳进审核页，而是弹出提示。
@@ -368,6 +383,12 @@ export default function App() {
         window.history.pushState({}, '', '/');
       }
     }
+  };
+
+  const handleRescanTask = async (taskId: string) => {
+    const result = await api.rescanTask(taskId, true);
+    await loadTasks();
+    void appAlert(result.addedImages ? `重新扫描完成，新增 ${result.addedImages} 张图片` : '重新扫描完成，没有发现新增图片');
   };
 
   const handleCreateTask = async (
@@ -548,6 +569,7 @@ export default function App() {
             onCreateTask={handleCreateTask}
             onOpenReview={handleOpenReview}
             onDeleteTask={handleDeleteTask}
+            onRescanTask={handleRescanTask}
             processingTaskId={processingTaskId}
             processingProgress={processingProgress}
             processingStatusText={processingStatusText}

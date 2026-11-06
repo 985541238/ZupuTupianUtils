@@ -31,13 +31,14 @@ def imwrite_png(path: str, img: np.ndarray) -> None:
 
 def order_quad(pts: np.ndarray) -> np.ndarray:
     pts = np.asarray(pts, dtype=np.float32).reshape(4, 2)
-    s = pts.sum(axis=1)
-    d = (pts[:, 0] - pts[:, 1])
-    tl = pts[np.argmin(s)]
-    br = pts[np.argmax(s)]
-    tr = pts[np.argmax(d)]
-    bl = pts[np.argmin(d)]
-    return np.array([tl, tr, br, bl], dtype=np.float32)
+    # 不能用 x+y / x-y 判断旋转后的四边形角点：旋转超过约 45° 后会交换角点。
+    # 先按中心点极角排序（屏幕坐标 y 向下时仍得到左上、右上、右下、左下），
+    # 再从最靠左上的点开始，保证透视矩阵输入顺序稳定。
+    center = pts.mean(axis=0)
+    angles = np.arctan2(pts[:, 1] - center[1], pts[:, 0] - center[0])
+    ordered = pts[np.argsort(angles)]
+    start = int(np.argmin(ordered[:, 0] + ordered[:, 1]))
+    return np.concatenate([ordered[start:], ordered[:start]], axis=0).astype(np.float32)
 
 
 def detect_paper(gray: np.ndarray) -> np.ndarray | None:

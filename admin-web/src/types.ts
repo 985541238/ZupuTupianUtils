@@ -40,10 +40,14 @@ export interface ScanItem {
   pageNumber: number;
   fileName: string;
   /** 真正的原图（做过透视修正也不变） */
-  originalUrl: string;
+  originalUrl?: string;
   /** 处理所用的图：做过透视修正则是拉正后的图，否则同原图；裁剪在它上面框选 */
   correctedUrl?: string;
   processedUrl?: string;
+  originalThumbnailUrl?: string;
+  resultThumbnailUrl?: string;
+  originalDeleted?: boolean;
+  resultDeleted?: boolean;
   thumbnailUrl?: string;
   /** 没做过透视修正的原图（透视修正选点用） */
   trueOriginalUrl?: string;
@@ -57,7 +61,7 @@ export interface ScanItem {
   /** Nest image status (ready/done/confirmed/...) */
   nestStatus?: string;
   cropBoxRaw?: any;
-  finalCrop?: { source: 'original' | 'result'; box: { x: number; y: number; w: number; h: number } } | null;
+  finalCrop?: { source: 'original' | 'result'; quad?: number[][]; box?: { x: number; y: number; w: number; h: number } } | null;
   finalCropBaseUrl?: string;
   /** 由双页拆分而来时的原始双页和当前四点框。 */
   splitOriginalUrl?: string;
@@ -90,6 +94,9 @@ export interface Task {
   surname?: string;
   /** 所属项目（家族/姓氏），null/undefined = 未归类 */
   projectId?: number | null;
+  /** 创建入口及设备；桌面任务的原图只存在创建设备本地。 */
+  clientType?: 'web' | 'desktop' | string;
+  clientDeviceId?: string | null;
   /** 建任务时是否选用 AI 识别 */
   useAi?: boolean;
   useAiClean?: boolean;

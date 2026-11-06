@@ -119,6 +119,12 @@ async function shrinkForView(buf: Buffer): Promise<Buffer> {
 export class TasksController {
   constructor(private readonly tasks: TasksService) {}
 
+  private clientMeta(req: any) {
+    const type = String(req.headers?.['x-zupu-client'] || '').toLowerCase() === 'desktop' ? 'desktop' : 'web';
+    const deviceId = String(req.headers?.['x-zupu-device'] || '').trim().slice(0, 128) || null;
+    return { clientType: type, clientDeviceId: deviceId };
+  }
+
   @Get()
   list(@Req() req: any) {
     return this.tasks.list(req.user.id);
@@ -126,7 +132,7 @@ export class TasksController {
 
   @Post()
   create(@Req() req: any, @Body() dto: CreateTaskDto) {
-    return this.tasks.create(req.user.id, dto);
+    return this.tasks.create(req.user.id, { ...dto, ...this.clientMeta(req) });
   }
 
   // ===== 项目（声明在 :id 路由之前，避免 projects 被当成 id）=====
@@ -137,7 +143,22 @@ export class TasksController {
 
   @Post('projects')
   createProject(@Req() req: any, @Body() dto: ProjectDto) {
-    return this.tasks.createProject(req.user.id, dto);
+    return this.tasks.createProject(req.user.id, { ...dto, ...this.clientMeta(req) });
+  }
+
+  @Post('projects/match-source')
+  matchProjectSource(@Req() req: any, @Body() body: { label?: string; sourceKey?: string; paths?: string[] }) {
+    return this.tasks.matchProjectSource(req.user.id, body?.label, body?.sourceKey, body?.paths);
+  }
+
+  @Post('projects/:pid/rescan')
+  rescanProject(@Req() req: any, @Param('pid', ParseIntPipe) pid: number, @Body() body: { autoStart?: boolean }) {
+    return this.tasks.rescanProject(req.user.id, pid, body?.autoStart !== false);
+  }
+
+  @Post(':id/rescan')
+  rescanTask(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Body() body: { autoStart?: boolean; sourceFolder?: string }) {
+    return this.tasks.rescanTask(req.user.id, id, body?.autoStart !== false, body?.sourceFolder);
   }
 
   @Put('projects/:pid')
@@ -152,6 +173,7 @@ export class TasksController {
 
   @Get('projects/:pid/download')
   downloadProject(@Req() req: any, @Param('pid', ParseIntPipe) pid: number, @Res() res: Response) {
+    res.setTimeout(0);
     return this.tasks.downloadProjectZip(req.user.id, pid, res);
   }
 
@@ -181,6 +203,25 @@ export class TasksController {
     return list.map((img) => this.tasks.imageView(img));
   }
 
+  @Post(':id/images/append')
+  appendImage(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: { uploadSessionId?: string; fileName?: string },
+  ) {
+    return this.tasks.appendUploadedImage(req.user.id, id, String(body?.uploadSessionId || ''), String(body?.fileName || ''));
+  }
+
+  @Put(':id/images/:imageId/replace')
+  replaceImage(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('imageId', ParseIntPipe) imageId: number,
+    @Body() body: { uploadSessionId?: string; fileName?: string },
+  ) {
+    return this.tasks.replaceUploadedImage(req.user.id, id, imageId, String(body?.uploadSessionId || ''), String(body?.fileName || ''));
+  }
+
   @Get(':id/images/:imageId')
   async image(
     @Req() req: any,
@@ -196,8 +237,9 @@ export class TasksController {
     @Req() req: any,
     @Param('id', ParseIntPipe) id: number,
     @Param('imageId', ParseIntPipe) imageId: number,
+    @Query('asset') asset?: string,
   ) {
-    return this.tasks.deleteImage(req.user.id, id, imageId);
+    return this.tasks.deleteImage(req.user.id, id, imageId, asset);
   }
 
   @Post(':id/images/:imageId/preview')
@@ -325,8 +367,8 @@ export class TasksController {
   }
 
   @Put(':id/images/:imageId/final-crop')
-  finalCrop(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Param('imageId', ParseIntPipe) imageId: number, @Body() body: { source: string; box: any; rotation?: number }) {
-    return this.tasks.applyFinalCrop(req.user.id, id, imageId, body?.source, body?.box, body?.rotation);
+  finalCrop(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Param('imageId', ParseIntPipe) imageId: number, @Body() body: { source: string; quad?: number[][]; rotation?: number }) {
+    return this.tasks.applyFinalCrop(req.user.id, id, imageId, body?.source, body?.quad, body?.rotation);
   }
 
   /** 切换当前结果：{ mode: 'algo' | 'ai' } */
@@ -370,6 +412,7 @@ export class TasksController {
     @Query('filter') filter: string,
     @Res() res: Response,
   ) {
+    res.setTimeout(0);
     const f = filter === 'passed' || filter === 'failed' ? filter : 'all';
     return this.tasks.downloadZip(req.user.id, id, res, f);
   }

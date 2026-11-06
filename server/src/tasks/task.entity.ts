@@ -38,6 +38,14 @@ export class Task {
   @Column({ name: 'source_folder', length: 1024 })
   sourceFolder: string;
 
+  /** 创建入口：web = 浏览器，desktop = 本地桌面程序。 */
+  @Column({ name: 'client_type', length: 16, default: 'web' })
+  clientType: string;
+
+  /** 创建设备标识；账号由 userId 记录。 */
+  @Column({ name: 'client_device_id', length: 128, nullable: true })
+  clientDeviceId: string | null;
+
   @Column({ name: 'output_folder', length: 1024 })
   outputFolder: string;
 

@@ -28,16 +28,37 @@ async function request<T = any>(path: string, options: RequestInit = {}): Promis
   const headers: Record<string, string> = {
     ...(options.headers as Record<string, string>),
   };
+  const desktopShell = typeof window !== 'undefined' && !!(window as any).zupuDesktop;
+  let deviceId = '';
+  try {
+    deviceId = localStorage.getItem('zupu_device_id') || '';
+    if (!deviceId && typeof crypto !== 'undefined' && crypto.randomUUID) {
+      deviceId = crypto.randomUUID();
+      localStorage.setItem('zupu_device_id', deviceId);
+    }
+  } catch { /* ignore unavailable storage */ }
+  headers['X-Zupu-Client'] = desktopShell ? 'desktop' : 'web';
+  if (deviceId) headers['X-Zupu-Device'] = deviceId;
   if (options.body && !headers['Content-Type']) {
     headers['Content-Type'] = 'application/json';
   }
   const token = getToken();
+  const hadToken = !!token;
   if (token) headers.Authorization = 'Bearer ' + token;
 
   const res = await fetch(BASE + path, { ...options, headers });
   if (res.status === 401) {
-    clearAuth();
-    throw new Error('未登录或登录已过期');
+    let msg = '未登录或登录已过期';
+    try {
+      const data = await res.json();
+      if (data?.message) msg = Array.isArray(data.message) ? data.message.join('；') : String(data.message);
+    } catch { /* ignore */ }
+    // 登录接口的 401（密码错误/账号禁用）不触发强制退出，交给登录页正常提示
+    if (hadToken && !path.startsWith('/auth/login')) {
+      clearAuth();
+      try { window.dispatchEvent(new CustomEvent('zupu:auth-expired', { detail: msg })); } catch { /* ignore */ }
+    }
+    throw new Error(msg);
   }
   if (!res.ok) {
     let msg = '请求失败';
@@ -95,7 +116,7 @@ export const api = {
     processingEnabled?: boolean;
   }) => request<any>('/tasks', { method: 'POST', body: JSON.stringify(data) }),
   listProjects: () =>
-    request<Array<{ id: number; name: string; surname?: string; volumeCount: number; totalPages: number; processing: number; reviewing: number; completed: number }>>(
+    request<Array<{ id: number; name: string; surname?: string; volumeCount: number; totalPages: number; processing: number; reviewing: number; completed: number; localOnly?: boolean; localDeviceIds?: string[]; sourceKey?: string; importStatus?: 'uploading' | 'scan_pending' | 'ready'; canRescan?: boolean; uploadSessionId?: string; expectedFileCount?: number; uploadedFileCount?: number; expectedVolumeCount?: number; uploadedVolumeCount?: number }>>(
       '/tasks/projects',
     ),
   createProject: (data: { name: string; surname?: string; rootPath?: string; autoStart?: boolean }) =>
@@ -103,18 +124,42 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+  matchProjectSource: (data: { label: string; sourceKey: string; paths: string[] }) =>
+    request<{ id: number; name: string; surname?: string; uploadSessionId?: string } | null>('/tasks/projects/match-source', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  rescanProject: (pid: number, autoStart = true) =>
+    request<{ projectId: number; createdVolumeIds: number[]; addedImages: number }>(`/tasks/projects/${pid}/rescan`, {
+      method: 'POST',
+      body: JSON.stringify({ autoStart }),
+    }),
   deleteProject: (pid: number) =>
     request<{ ok: boolean; deletedVolumes: number }>('/tasks/projects/' + pid, { method: 'DELETE' }),
   getTask: (id: string | number) => request<any>('/tasks/' + id),
   processTask: (id: string | number) =>
     request<any>('/tasks/' + id + '/process', { method: 'POST', body: '{}' }),
+  rescanTask: (id: string | number, autoStart = true, sourceFolder?: string) =>
+    request<{ taskId: number; addedImages: number }>(`/tasks/${id}/rescan`, {
+      method: 'POST', body: JSON.stringify({ autoStart, sourceFolder }),
+    }),
   deleteTask: (id: string | number) =>
     request<{ ok: boolean; id: number }>('/tasks/' + id, { method: 'DELETE' }),
   getTaskImages: (id: string | number) => request<any[]>('/tasks/' + id + '/images'),
+  appendTaskImage: (taskId: string | number, uploadSessionId: string, fileName: string) =>
+    request<any>(`/tasks/${taskId}/images/append`, {
+      method: 'POST',
+      body: JSON.stringify({ uploadSessionId, fileName }),
+    }),
+  replaceTaskImage: (taskId: string | number, imageId: string | number, uploadSessionId: string, fileName: string) =>
+    request<any>(`/tasks/${taskId}/images/${imageId}/replace`, {
+      method: 'PUT',
+      body: JSON.stringify({ uploadSessionId, fileName }),
+    }),
   getTaskImage: (taskId: string | number, imageId: string | number) =>
     request<any>(`/tasks/${taskId}/images/${imageId}`),
-  deleteTaskImage: (taskId: string | number, imageId: string | number) =>
-    request<{ ok: boolean; id: number; totalCount: number }>(`/tasks/${taskId}/images/${imageId}`, { method: 'DELETE' }),
+  deleteTaskImage: (taskId: string | number, imageId: string | number, asset: 'original' | 'result' | 'all' = 'all') =>
+    request<{ ok: boolean; id: number; totalCount: number }>(`/tasks/${taskId}/images/${imageId}?asset=${asset}`, { method: 'DELETE' }),
   detectPerspective: (taskId: string | number, imageId: string | number, pages: 1 | 2 = 1) =>
     request<{ found: boolean; quad?: number[][]; quads?: number[][][]; method?: string }>(`/tasks/${taskId}/images/${imageId}/perspective/detect`, {
       method: 'POST',
@@ -127,7 +172,7 @@ export const api = {
   reprocessImage: (
     taskId: string | number,
     imageId: string | number,
-    body: { params: any; cropBox?: any }
+    body: { params?: any; cropBox?: any }
   ) =>
     request<any>(`/tasks/${taskId}/images/${imageId}/reprocess`, {
       method: 'PUT',
@@ -137,8 +182,8 @@ export const api = {
     request<any[]>(`/tasks/${taskId}/images/${imageId}/split-crop`, {
       method: 'PUT', body: JSON.stringify({ quads, rotation, processingEnabled }),
     }),
-  applyFinalCrop: (taskId: string | number, imageId: string | number, source: 'original' | 'result', box: any, rotation = 0) =>
-    request<any>(`/tasks/${taskId}/images/${imageId}/final-crop`, { method: 'PUT', body: JSON.stringify({ source, box, rotation }) }),
+  applyFinalCrop: (taskId: string | number, imageId: string | number, source: 'original' | 'result', quad: number[][], rotation = 0) =>
+    request<any>(`/tasks/${taskId}/images/${imageId}/final-crop`, { method: 'PUT', body: JSON.stringify({ source, quad, rotation }) }),
   detectMode: (taskId: string | number, imageId: string | number) =>
     request<{ mode: 'standard' | 'stained' | 'faint'; scores: Record<string, number> }>(
       `/tasks/${taskId}/images/${imageId}/detect-mode`,
@@ -157,44 +202,93 @@ export const api = {
     request(`/tasks/${taskId}/confirm`, { method: 'POST', body: '{}' }),
   browseFolder: (path?: string) =>
     request<any>('/files/browse' + (path != null ? '?path=' + encodeURIComponent(path) : '')),
-  createUploadSession: (label?: string) =>
-    request<{ id: string; dir: string }>('/files/upload-session', { method: 'POST', body: JSON.stringify({ label }) }),
-  uploadImage: async (sessionId: string, file: File, name?: string) => {
-    const url = `${BASE}/files/upload/${encodeURIComponent(sessionId)}?name=${encodeURIComponent(name || file.name)}`;
+  createUploadSession: (label?: string, files?: { path: string; size: number; lastModified?: number }[], sourceKey?: string, parentSessionId?: string) =>
+    request<{ id: string; dir: string }>('/files/upload-session', { method: 'POST', body: JSON.stringify({ label, sourceKey, parentSessionId, files }) }),
+  // 单个文件失败不能让批量上传 worker 直接退出；重试时由 uploadImageOnce
+  // 重新读取服务端偏移，既能续传，也能覆盖请求超时/连接被重置的情况。
+  uploadImage: async (sessionId: string, file: File, name?: string): Promise<{ uploaded: boolean; skipped: boolean }> => {
     let lastError: unknown;
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      const controller = new AbortController();
-      const timer = window.setTimeout(() => controller.abort(), 120_000);
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
       try {
-        const res = await fetch(url, {
-          method: 'PUT',
-          headers: { Authorization: 'Bearer ' + getToken(), 'Content-Type': 'application/octet-stream' },
-          body: file,
-          signal: controller.signal,
-        });
-        if (res.ok) return;
-        let msg = `上传失败（${res.status}）`;
-        try {
-          const j = await res.json();
-          if (j?.message) msg = Array.isArray(j.message) ? j.message.join('；') : String(j.message);
-        } catch {
-          /* ignore */
-        }
-        throw new Error(msg);
-      } catch (e: any) {
-        if (e?.name === 'AbortError') {
-          lastError = new Error(`上传超时（120 秒）：${name || file.name}`);
-        } else if (e instanceof TypeError && /failed to fetch/i.test(String(e?.message || ''))) {
-          lastError = new Error(`网络连接中断：${name || file.name}。请检查后端服务是否重启或网络是否断开`);
-        } else {
-          lastError = e;
-        }
-        if (attempt < 3) continue;
-        throw lastError;
-      } finally {
-        window.clearTimeout(timer);
+        return await api.uploadImageOnce(sessionId, file, name);
+      } catch (e) {
+        lastError = e;
+        if (attempt < 5) await new Promise((resolve) => window.setTimeout(resolve, Math.min(1000 * attempt, 4000)));
       }
     }
+    throw lastError instanceof Error ? lastError : new Error('文件上传失败，请重试');
+  },
+  uploadImageOnce: async (sessionId: string, file: File, name?: string): Promise<{ uploaded: boolean; skipped: boolean }> => {
+    const safeName = name || file.name;
+    const base = `${BASE}/files/upload/${encodeURIComponent(sessionId)}`;
+    const chunkSize = 8 * 1024 * 1024;
+    const getStatus = async () => {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 30_000);
+      try {
+        return await request<{ offset: number; complete: boolean }>(
+          `/files/upload/${encodeURIComponent(sessionId)}/status?name=${encodeURIComponent(safeName)}`,
+          { signal: controller.signal },
+        );
+      } finally { window.clearTimeout(timer); }
+    };
+    let status = await getStatus();
+    if (status.complete && status.offset === file.size) return { uploaded: false, skipped: true };
+    let offset = Math.max(0, Number(status.offset) || 0);
+    for (;;) {
+      if (offset >= file.size) break;
+      let lastError: unknown;
+      // 重新读取分块，避免失败后服务器只落盘了部分数据时继续使用旧分块/旧偏移。
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const end = Math.min(file.size, offset + chunkSize);
+        const chunk = file.slice(offset, end);
+        const requestOffset = offset;
+        const controller = new AbortController();
+        const timer = window.setTimeout(() => controller.abort(), 120_000);
+        try {
+          const res = await fetch(`${base}?name=${encodeURIComponent(safeName)}`, {
+            method: 'PUT',
+            headers: {
+              Authorization: 'Bearer ' + getToken(),
+              'Content-Type': 'application/octet-stream',
+              'X-Upload-Offset': String(requestOffset),
+              'X-Upload-Total': String(file.size),
+            },
+            body: chunk,
+            signal: controller.signal,
+          });
+          if (!res.ok) {
+            let msg = `上传失败（${res.status}）`;
+            try { const j = await res.json(); if (j?.message) msg = Array.isArray(j.message) ? j.message.join('；') : String(j.message); } catch { /* ignore */ }
+            throw new Error(msg);
+          }
+          const result = await res.json();
+          const serverOffset = Number(result?.size);
+          offset = Number.isFinite(serverOffset) && serverOffset >= requestOffset ? serverOffset : end;
+          lastError = undefined;
+          break;
+        } catch (e: any) {
+          lastError = e?.name === 'AbortError' ? new Error(`上传分块超时：${safeName}`) : e;
+          if (attempt < 3) {
+            status = await getStatus().catch(() => ({ offset: requestOffset, complete: false }));
+            const remoteOffset = Math.max(0, Number(status.offset) || 0);
+            // 无论服务器偏移变大还是变小，都以服务器状态为准；否则会在偏移不匹配时原地重试并卡住。
+            if (status.complete && remoteOffset === file.size) {
+              offset = file.size;
+              lastError = undefined;
+              break;
+            }
+            if (remoteOffset !== requestOffset) {
+              offset = Math.min(remoteOffset, file.size);
+              lastError = undefined;
+              break;
+            }
+          }
+        } finally { window.clearTimeout(timer); }
+      }
+      if (lastError) throw lastError;
+    }
+    return { uploaded: true, skipped: false };
   },
   pickFolder: (start?: string) =>
     request<{ path?: string; cancelled?: boolean; unsupported?: boolean }>('/files/pick-folder', {
@@ -309,6 +403,7 @@ export function authImageUrl(url?: string | null): string {
   if (!url) return '';
   if (url.startsWith('blob:') || url.startsWith('data:')) return url;
   const full = url.startsWith('http') ? url : BASE + url;
+  if (/[?&]access_token=/.test(full)) return full;
   const sep = full.includes('?') ? '&' : '?';
   return full + sep + 'access_token=' + encodeURIComponent(getToken());
 }
@@ -321,7 +416,8 @@ export function viewImageUrl(
 ): string {
   const u = authImageUrl(url);
   if (!u || u.startsWith('blob:') || u.startsWith('data:') || !u.includes('/files/local')) return u;
-  return u + '&w=' + maxSide + (prio === 'low' ? '&prio=low' : '');
+  const normalized = u.replace(/([?&])w=\d+/g, '$1').replace(/([?&])prio=[^&]*/g, '$1');
+  return normalized + (normalized.includes('?') ? '&' : '?') + 'w=' + maxSide + (prio === 'low' ? '&prio=low' : '');
 }
 
 /** 左侧列表/卡片封面的缩略图：固定小尺寸、低优先级，绝不与审阅主图抢服务器资源 */

@@ -6,7 +6,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as crypto from 'crypto';
@@ -16,6 +16,7 @@ import archiver from 'archiver';
 import { Task } from './task.entity';
 import { TaskImage } from './task-image.entity';
 import { Project } from './project.entity';
+import { User } from '../users/user.entity';
 import { TASKS_ALTER_SQL, TASKS_SCHEMA_SQL } from './tasks-schema';
 import {
   DEFAULT_PARAMS,
@@ -28,6 +29,7 @@ import { AliyunService, AiConfigError, AiChargedError } from '../ai/aliyun.servi
 import { AiModel } from '../settings/ai-model.entity';
 import { getPlatformDef } from '../settings/platforms';
 import { UsageService } from '../usage/usage.service';
+import { clearViewProxyCache } from '../common/view-proxy';
 
 const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp']);
 
@@ -41,6 +43,8 @@ export class TasksService implements OnModuleInit {
   private readonly running = new Set<number>();
   /** Tasks cancelled via delete while runProcess is mid-loop */
   private readonly cancelled = new Set<number>();
+  /** 正在执行的卷处理任务；删除卷时必须等待它结束，避免删除后又写回文件/数据库。 */
+  private readonly activeRuns = new Map<number, Promise<void>>();
 
   /** 全局处理队列：多卷按序排队，一次只跑 VOLUME_CONCURRENCY 卷，避免同时处理拖垮机器（低占用） */
   private readonly detectCache = new Map<string, { mode: 'standard' | 'stained' | 'faint'; scores: Record<string, number> }>();
@@ -65,25 +69,61 @@ export class TasksService implements OnModuleInit {
     return waiting;
   }
 
-  /** 队列泵：在并发上限内取出排队的卷依次处理 */
-  private pumpVolumes() {
-    while (this.volActive < this.maxVolActive && this.volQueue.length) {
-      const id = this.volQueue.shift()!;
-      this.volQueued.delete(id);
-      if (this.cancelled.has(id)) continue;
-      const actorUserId = this.volActors.get(id);
-      this.volActors.delete(id);
-      this.volActive++;
-      this.running.add(id);
-      setImmediate(() =>
-        this.runProcess(id, actorUserId)
-          .catch((e) => this.logger.error(`runProcess ${id}: ${e}`))
-          .finally(() => {
-            this.running.delete(id);
-            this.volActive = Math.max(0, this.volActive - 1);
-            this.pumpVolumes();
-          }),
-      );
+  private pumpingVolumes = false;
+
+  /** 后创建的项目必须等更早项目的所有卷都结束后才能开始。 */
+  private async hasEarlierUnfinishedProject(taskId: number) {
+    const task = await this.tasks.findOne({ select: ['id', 'projectId'], where: { id: taskId } });
+    const projectId = Number(task?.projectId || 0);
+    if (!projectId) return false;
+    const count = await this.tasks.createQueryBuilder('t')
+      .where('t.project_id IS NOT NULL')
+      .andWhere('t.project_id < :projectId', { projectId })
+      .andWhere('t.status NOT IN (:...done)', { done: ['completed', 'reviewing', 'failed'] })
+      .getCount();
+    return count > 0;
+  }
+
+  /** 队列泵：按项目创建顺序取卷；同一时间只处理一个卷。 */
+  private async pumpVolumes() {
+    if (this.pumpingVolumes) return;
+    this.pumpingVolumes = true;
+    try {
+      while (this.volActive < this.maxVolActive && this.volQueue.length) {
+        let queueIndex = -1;
+        for (let i = 0; i < this.volQueue.length; i += 1) {
+          const candidate = this.volQueue[i];
+          if (!await this.hasEarlierUnfinishedProject(candidate)) {
+            queueIndex = i;
+            break;
+          }
+        }
+        // 后续项目被更早项目挡住；等更早项目完成/入队后再次触发泵。
+        if (queueIndex < 0) break;
+        const id = this.volQueue.splice(queueIndex, 1)[0];
+        this.volQueued.delete(id);
+        if (this.cancelled.has(id)) continue;
+        const actorUserId = this.volActors.get(id);
+        this.volActors.delete(id);
+        this.volActive++;
+        this.running.add(id);
+        const run = new Promise<void>((resolve) => {
+          setImmediate(() => {
+            this.runProcess(id, actorUserId)
+              .catch((e) => this.logger.error(`runProcess ${id}: ${e}`))
+              .finally(() => {
+                this.running.delete(id);
+                this.volActive = Math.max(0, this.volActive - 1);
+                this.activeRuns.delete(id);
+                void this.pumpVolumes();
+                resolve();
+              });
+          });
+        });
+        this.activeRuns.set(id, run);
+      }
+    } finally {
+      this.pumpingVolumes = false;
     }
   }
 
@@ -91,11 +131,30 @@ export class TasksService implements OnModuleInit {
     @InjectRepository(Task) private readonly tasks: Repository<Task>,
     @InjectRepository(TaskImage) private readonly images: Repository<TaskImage>,
     @InjectRepository(Project) private readonly projects: Repository<Project>,
+    @InjectRepository(User) private readonly usersRepo: Repository<User>,
     private readonly processor: ImageProcessService,
     private readonly settings: SettingsService,
     private readonly aliyun: AliyunService,
     private readonly usage: UsageService,
   ) {}
+
+  /** 账号隔离：普通用户只能看到/操作自己的项目和卷；管理员（role=admin）可以看到和操作全部。结果缓存 60 秒。 */
+  private readonly adminCache = new Map<number, { admin: boolean; at: number }>();
+  private async isAdminUser(userId: number): Promise<boolean> {
+    const id = Number(userId);
+    if (!Number.isFinite(id) || id <= 0) return false;
+    const cached = this.adminCache.get(id);
+    if (cached && Date.now() - cached.at < 60_000) return cached.admin;
+    let admin = false;
+    try {
+      const u = await this.usersRepo.findOne({ where: { id } });
+      admin = !!u && (u.role === 'admin' || u.username === 'admin');
+    } catch {
+      admin = false;
+    }
+    this.adminCache.set(id, { admin, at: Date.now() });
+    return admin;
+  }
 
   async onModuleInit() {
     // 自动建表/补列（可重复执行），老库升级无需手工导 SQL
@@ -114,17 +173,28 @@ export class TasksService implements OnModuleInit {
     // Nest restart / crash leaves status=processing forever — resume remaining pages.
     try {
       await this.recoverInterruptedProcessing();
+      await this.recoverQueuedVolumes();
     } catch (e) {
-      this.logger.error(`recoverInterruptedProcessing failed: ${e}`);
+      this.logger.error(`recover unfinished volume queue failed: ${e}`);
     }
+  }
+
+  /** 服务重启后 queued 状态仍在数据库，但内存队列已丢失，需要重新入队。 */
+  private async recoverQueuedVolumes() {
+    const queued = await this.tasks.find({ where: { status: 'queued' }, order: { id: 'ASC' } });
+    for (const task of queued) {
+      await this.enqueueVolume(Number(task.id), Number(task.userId));
+    }
+    if (queued.length) this.logger.log(`Recovered ${queued.length} queued volume(s)`);
   }
 
   // ===== 项目（家族/姓氏）=====
 
-  /** 项目列表，带每个项目下的卷数与聚合状态 */
+  /** 项目列表，带每个项目下的卷数与聚合状态（普通用户只看自己的，管理员看全部） */
   async listProjects(userId: number) {
-    const projects = await this.projects.find({ order: { id: 'DESC' } });
-    const tasks = await this.tasks.find({ order: { id: 'DESC' } });
+    const admin = await this.isAdminUser(userId);
+    const projects = await this.projects.find(admin ? { order: { id: 'DESC' } } : { where: { userId }, order: { id: 'DESC' } });
+    const tasks = await this.tasks.find(admin ? { order: { id: 'DESC' } } : { where: { userId }, order: { id: 'DESC' } });
     const byProject = new Map<number, Task[]>();
     for (const t of tasks) {
       const pid = t.projectId == null ? 0 : Number(t.projectId);
@@ -138,6 +208,8 @@ export class TasksService implements OnModuleInit {
       reviewing: 0,
       // 历史 reviewing 任务按已完成兼容展示；新任务直接写 completed。
       completed: vols.filter((v) => v.status === 'completed' || v.status === 'reviewing').length,
+      localOnly: vols.some((v) => v.clientType === 'desktop'),
+      localDeviceIds: [...new Set(vols.filter((v) => v.clientType === 'desktop' && v.clientDeviceId).map((v) => v.clientDeviceId))],
     });
     return projects.map((p) => ({
       id: Number(p.id),
@@ -146,16 +218,111 @@ export class TasksService implements OnModuleInit {
       description: p.description,
       createdAt: p.createdAt,
       ...summarize(byProject.get(Number(p.id)) || []),
+      sourceKey: this.projectSourceKey(p.rootPath),
+      ...this.projectUploadStatus(p.rootPath, (byProject.get(Number(p.id)) || []).length),
     }));
   }
 
-  async createProject(userId: number, dto: { name?: string; surname?: string; description?: string; rootPath?: string; autoStart?: boolean }) {
+  private projectSourceKey(rootPath: string | null) {
+    if (!rootPath) return undefined;
+    try {
+      const manifest = path.join(path.resolve(rootPath), '.upload-manifest.json');
+      if (!fs.existsSync(manifest)) return undefined;
+      const raw = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+      return raw?.sourceKey ? String(raw.sourceKey) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** 兼容旧项目：旧版本没有 sourceKey 时，按目录名和已有相对路径寻找原项目。 */
+  async matchProjectSource(userId: number, label?: string, sourceKey?: string, paths: string[] = []) {
+    const wantedLabel = String(label || '').trim();
+    const wantedPaths = new Set(paths.map((p) => String(p).replace(/\\/g, '/').replace(/^\/+/, '')));
+    const admin = await this.isAdminUser(userId);
+    const projects = await this.projects.find({ order: { id: 'ASC' } });
+    let best: { project: Project; score: number } | null = null;
+    for (const project of projects) {
+      // 匹配只能命中自己的项目；管理员可以匹配全部。
+      if (!admin && Number(project.userId) !== Number(userId)) continue;
+      const root = project.rootPath ? path.resolve(project.rootPath) : '';
+      if (!root || !fs.existsSync(root) || !fs.statSync(root).isDirectory()) continue;
+      const exact = sourceKey && this.projectSourceKey(root) === sourceKey;
+      const base = path.basename(root);
+      const suffix = base.includes('_') ? base.slice(base.indexOf('_') + 1) : base;
+      if (!exact && wantedLabel && suffix !== wantedLabel && project.name !== wantedLabel) continue;
+      const volumes = await this.tasks.find({ where: { projectId: Number(project.id) } });
+      const images = volumes.length ? await this.images.find({ where: volumes.map((v) => ({ taskId: v.id })) }) : [];
+      const existingPaths = new Set(images.map((img) => path.relative(root, img.sourcePath).replace(/\\/g, '/')));
+      const overlap = [...wantedPaths].filter((p) => existingPaths.has(p)).length;
+      const score = (exact ? 100000 : 0) + overlap * 10 + (suffix === wantedLabel ? 1 : 0);
+      if (!best || score > best.score) best = { project, score };
+    }
+    if (!best) return null;
+    return {
+      id: Number(best.project.id),
+      name: best.project.name,
+      surname: best.project.surname,
+      uploadSessionId: best.project.rootPath ? path.basename(path.resolve(best.project.rootPath)) : null,
+    };
+  }
+
+  /** 从上传清单计算项目是否还有文件未上传或未重新扫描。 */
+  private projectUploadStatus(rootPath: string | null, volumeCount: number) {
+    if (!rootPath) return { importStatus: 'ready' as const };
+    const root = path.resolve(rootPath);
+    const uploadRoot = path.resolve(this.uploadRoot());
+    const rootRel = path.relative(uploadRoot, root);
+    const canRescan = !!rootRel && !rootRel.startsWith('..') && !path.isAbsolute(rootRel);
+    const manifestPath = path.join(root, '.upload-manifest.json');
+    if (!fs.existsSync(manifestPath)) return { importStatus: 'ready' as const, canRescan, uploadSessionId: canRescan ? path.basename(root) : undefined };
+    try {
+      const raw = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      const files = Array.isArray(raw?.files) ? raw.files : [];
+      let uploadedFileCount = 0;
+      const expectedVolumeNames = new Set<string>();
+      const uploadedVolumeNames = new Set<string>();
+      for (const item of files) {
+        const rel = String(item?.path || '').replace(/\\/g, '/').replace(/^\/+/, '');
+        if (!rel || rel.includes('..')) continue;
+        const parts = rel.split('/');
+        if (parts.length > 1) expectedVolumeNames.add(parts[0]);
+        const abs = path.resolve(root, rel);
+        const safe = abs.startsWith(root + path.sep) && fs.existsSync(abs) && fs.statSync(abs).isFile();
+        if (safe && (!Number(item.size) || fs.statSync(abs).size === Number(item.size))) {
+          uploadedFileCount += 1;
+          if (parts.length > 1) uploadedVolumeNames.add(parts[0]);
+        }
+      }
+      const expectedFileCount = files.length;
+      const uploadComplete = uploadedFileCount >= expectedFileCount;
+      const importStatus = !uploadComplete ? 'uploading' : volumeCount < expectedVolumeNames.size ? 'scan_pending' : 'ready';
+      return {
+        importStatus,
+        canRescan,
+        uploadSessionId: canRescan ? path.basename(root) : undefined,
+        expectedFileCount,
+        uploadedFileCount,
+        expectedVolumeCount: expectedVolumeNames.size,
+        uploadedVolumeCount: uploadedVolumeNames.size,
+      };
+    } catch {
+      return { importStatus: 'scan_pending' as const, canRescan, uploadSessionId: canRescan ? path.basename(root) : undefined };
+    }
+  }
+
+  async createProject(userId: number, dto: { name?: string; surname?: string; description?: string; rootPath?: string; autoStart?: boolean; clientType?: string; clientDeviceId?: string | null }) {
     const name = String(dto.name || dto.surname || '').trim();
     if (!name) throw new BadRequestException('请填写项目名称');
     const rootPath = dto.rootPath ? path.resolve(String(dto.rootPath)) : null;
     let volumeDirs: string[] = [];
     if (rootPath) {
       if (!fs.existsSync(rootPath) || !fs.statSync(rootPath).isDirectory()) throw new BadRequestException('项目根目录不存在: ' + rootPath);
+      const sourceKey = this.projectSourceKey(rootPath);
+      if (sourceKey) {
+        const existing = (await this.projects.find()).find((item) => this.projectSourceKey(item.rootPath) === sourceKey);
+        if (existing) throw new BadRequestException(`这个目录已经属于项目「${existing.name}」，同一个目录只能创建一个项目`);
+      }
       // 只取一级目录；更深层目录按约定跳过，不阻断项目创建。
       volumeDirs = fs.readdirSync(rootPath, { withFileTypes: true })
         .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !e.name.startsWith('$'))
@@ -182,6 +349,8 @@ export class TasksService implements OnModuleInit {
         surname: saved.surname,
         projectId: Number(saved.id),
         processingEnabled: true,
+        clientType: dto.clientType,
+        clientDeviceId: dto.clientDeviceId,
       });
       createdVolumes.push(Number(volume.id));
       if (dto.autoStart) await this.enqueueVolume(Number(volume.id), userId);
@@ -189,9 +358,139 @@ export class TasksService implements OnModuleInit {
     return { id: Number(saved.id), name: saved.name, surname: saved.surname, rootPath, volumeIds: createdVolumes };
   }
 
+  /**
+   * 增量扫描已创建项目的上传目录：只登记新卷和新图片，不重复创建已有记录。
+   * 上传可以先于扫描完成，因此服务器重启后也能继续用同一个项目补扫。
+   */
+  async rescanProject(userId: number, projectId: number, autoStart = true) {
+    const project = await this.getProject(userId, projectId);
+    const rootPath = project.rootPath ? path.resolve(project.rootPath) : null;
+    if (!rootPath || !fs.existsSync(rootPath) || !fs.statSync(rootPath).isDirectory()) {
+      throw new BadRequestException('项目上传目录不存在，无法重新扫描');
+    }
+    const volumes = await this.tasks.find({ where: { projectId } });
+    const byFolder = new Map(volumes.map((v) => [path.resolve(v.sourceFolder).toLowerCase(), v]));
+    const createdVolumeIds: number[] = [];
+    let addedImages = 0;
+    const dirs = fs.readdirSync(rootPath, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !e.name.startsWith('$'))
+      .map((e) => path.join(rootPath, e.name));
+
+    for (const dir of dirs) {
+      const files = fs.readdirSync(dir)
+        .filter((f) => IMAGE_EXT.has(path.extname(f).toLowerCase()))
+        .sort((a, b) => a.localeCompare(b, 'zh'));
+      if (!files.length) continue;
+      const key = path.resolve(dir).toLowerCase();
+      const existing = byFolder.get(key);
+      if (!existing) {
+        const volume = await this.create(userId, {
+          name: path.basename(dir),
+          sourceFolder: dir,
+          surname: project.surname,
+          projectId,
+          processingEnabled: true,
+          clientType: 'web',
+        });
+        const volumeId = Number(volume.id);
+        createdVolumeIds.push(volumeId);
+        byFolder.set(key, await this.tasks.findOneOrFail({ where: { id: volumeId } }));
+        if (autoStart) await this.enqueueVolume(volumeId, userId);
+        addedImages += files.length;
+        continue;
+      }
+
+      const before = Number(existing.totalCount || 0);
+      const merged = await this.mergeVolumeImages(existing, dir, files);
+      const added = Math.max(0, Number(merged.totalCount || 0) - before);
+      addedImages += added;
+      if (added > 0 && autoStart) await this.enqueueVolume(Number(existing.id), userId);
+    }
+    return { projectId: Number(project.id), createdVolumeIds, addedImages };
+  }
+
+  /** 重新扫描单卷目录：目录由前端重新授权后传入，只登记内容不存在的新图片。 */
+  async rescanTask(userId: number, taskId: number, autoStart = true, sourceFolder?: string) {
+    const task = await this.get(userId, taskId);
+    const folder = path.resolve(sourceFolder || task.sourceFolder);
+    if (!fs.existsSync(folder) || !fs.statSync(folder).isDirectory()) {
+      throw new BadRequestException('卷上传目录不存在，无法重新扫描');
+    }
+    const files = fs.readdirSync(folder)
+      .filter((name) => IMAGE_EXT.has(path.extname(name).toLowerCase()))
+      .sort((a, b) => a.localeCompare(b, 'zh'));
+    const before = Number(task.totalCount || 0);
+    const merged = await this.mergeVolumeImages(task, folder, files);
+    const addedImages = Math.max(0, Number(merged.totalCount || 0) - before);
+    if (addedImages > 0 && autoStart) await this.enqueueVolume(Number(task.id), userId);
+    return { taskId: Number(task.id), addedImages };
+  }
+
+  /** 按图片内容去重合并卷目录；同名但内容不同的图片会保留并自动改名。 */
+  private async mergeVolumeImages(task: Task, incomingFolder: string, fileNames: string[]) {
+    const existing = await this.images.find({ where: { taskId: task.id } });
+    const known = new Set(existing.map((img) => this.imageFingerprint(img.sourcePath, img.fileName)));
+    const targetFolder = this.isUnderUploadRoot(task.sourceFolder) ? path.resolve(task.sourceFolder) : path.resolve(incomingFolder);
+    fs.mkdirSync(targetFolder, { recursive: true });
+    const rows: TaskImage[] = [];
+    let nextOrder = existing.reduce((max, img) => Math.max(max, Number(img.sortOrder) || 0), -1) + 1;
+    const usedNames = new Set(existing.map((img) => String(img.fileName || '').toLowerCase()));
+
+    for (const fileName of fileNames) {
+      const source = path.join(incomingFolder, fileName);
+      const fingerprint = this.imageFingerprint(source, fileName);
+      if (known.has(fingerprint)) continue;
+      let finalName = fileName;
+      const ext = path.extname(fileName);
+      const stem = path.basename(fileName, ext);
+      let suffix = 1;
+      while (usedNames.has(finalName.toLowerCase())) finalName = `${stem}-新增${suffix++}${ext}`;
+      const target = path.join(targetFolder, finalName);
+      if (path.resolve(source).toLowerCase() !== path.resolve(target).toLowerCase()) fs.copyFileSync(source, target);
+      usedNames.add(finalName.toLowerCase());
+      known.add(fingerprint);
+      rows.push(this.images.create({
+        taskId: Number(task.id), fileName: finalName, sourcePath: target, status: 'pending', sortOrder: nextOrder++,
+        width: null, height: null, params: task.defaultParams || JSON.stringify({ ...DEFAULT_PARAMS, processingEnabled: true }),
+        createdAt: new Date(), updatedAt: new Date(),
+      }));
+    }
+    if (rows.length) {
+      await this.images.save(rows);
+      task.totalCount = existing.length + rows.length;
+      task.status = 'pending';
+      task.updatedAt = new Date();
+      await this.tasks.save(task);
+    }
+    // 浏览器重新授权产生的是临时上传目录；合并后删除临时目录，避免同一卷留下多个副本。
+    if (path.resolve(incomingFolder).toLowerCase() !== path.resolve(targetFolder).toLowerCase() && this.isUnderUploadRoot(incomingFolder)) {
+      try { fs.rmSync(incomingFolder, { recursive: true, force: true }); } catch (e) { this.logger.warn(`清理卷临时上传目录失败: ${incomingFolder}; ${e}`); }
+    }
+    return task;
+  }
+
+  private imageFingerprint(filePath: string, fallbackName: string) {
+    try {
+      if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return `missing:${String(fallbackName).toLowerCase()}`;
+      return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+    } catch {
+      try { return `size:${fs.statSync(filePath).size}:${String(fallbackName).toLowerCase()}`; } catch { return `missing:${String(fallbackName).toLowerCase()}`; }
+    }
+  }
+
+  private isUnderUploadRoot(target: string) {
+    const root = path.resolve(this.uploadRoot());
+    const value = path.resolve(target || '');
+    return value !== root && value.startsWith(root + path.sep);
+  }
+
   async getProject(userId: number, projectId: number) {
     const p = await this.projects.findOne({ where: { id: projectId } });
     if (!p) throw new NotFoundException('项目不存在');
+    if (Number(p.userId) !== Number(userId) && !(await this.isAdminUser(userId))) {
+      // 普通用户访问别人的项目按「不存在」处理，不暴露他人数据的存在性。
+      throw new NotFoundException('项目不存在');
+    }
     return p;
   }
 
@@ -211,21 +510,29 @@ export class TasksService implements OnModuleInit {
 
   /** 删除项目：连同项目下的所有卷一起删（卷的文件也清理） */
   async deleteProject(userId: number, projectId: number) {
-    await this.getProject(userId, projectId);
+    const project = await this.getProject(userId, projectId);
     const vols = await this.tasks.find({ where: { projectId } });
-    for (const v of vols) {
-      try {
-        await this.deleteTask(userId, Number(v.id));
-      } catch (e) {
-        this.logger.warn(`deleteProject: delete volume ${v.id} failed: ${e}`);
-      }
-    }
+    // 记录卷输出目录的项目级父目录；卷删完后再清理可能留下的空项目目录。
+    const outputParents = new Set(
+      vols
+        .map((v) => v.outputFolder ? path.dirname(path.resolve(v.outputFolder)) : '')
+        .filter(Boolean),
+    );
+    for (const v of vols) await this.deleteTask(userId, Number(v.id));
     // 该项目的 OCR 项目一并清掉（页随外键级联删除），避免留下指向已删除卷的残留
     try {
       await this.tasks.query('DELETE FROM ocr_tasks WHERE project_id = ?', [projectId]);
     } catch (e) {
       this.logger.warn(`deleteProject: clear ocr tasks failed: ${e}`);
     }
+    // 网页上传的项目根目录位于 UPLOAD_ROOT 下，删除项目时连同残留的 .part 和空目录一起清理。
+    await this.safeRemoveSourceFolder(project.rootPath);
+    // 所有卷都属于该项目，卷目录删除后项目级父目录只剩空目录时一并删除。
+    outputParents.add(path.join(
+      path.resolve(process.env.OUTPUT_ROOT || path.join(process.cwd(), '..', 'data', 'output')),
+      this.safeName(project.name),
+    ));
+    for (const parent of outputParents) this.safeRemoveEmptyOutputFolder(parent);
     await this.projects.delete({ id: projectId });
     return { ok: true, deletedVolumes: vols.length };
   }
@@ -251,9 +558,12 @@ export class TasksService implements OnModuleInit {
     }
   }
 
-  list(userId: number) {
+  async list(userId: number) {
+    // 兜底处理运行期间因进程重载/异常导致只剩数据库 queued 状态的卷。
+    await this.recoverQueuedVolumes();
+    const admin = await this.isAdminUser(userId);
     return this.tasks.find({
-      where: {},
+      where: admin ? {} : { userId },
       order: { id: 'DESC' },
     });
   }
@@ -261,6 +571,10 @@ export class TasksService implements OnModuleInit {
   async get(userId: number, id: number) {
     const task = await this.tasks.findOne({ where: { id } });
     if (!task) throw new NotFoundException('任务不存在');
+    if (Number(task.userId) !== Number(userId) && !(await this.isAdminUser(userId))) {
+      // 普通用户访问别人的卷按「不存在」处理。
+      throw new NotFoundException('任务不存在');
+    }
     return task;
   }
 
@@ -280,15 +594,19 @@ export class TasksService implements OnModuleInit {
       projectId?: number | null;
       batchCrop?: { enabled?: boolean; quads?: number[][][] } | null;
       processingEnabled?: boolean;
+      clientType?: string;
+      clientDeviceId?: string | null;
     },
   ) {
     const name = dto.name;
     const sourceFolder = dto.sourceFolder;
     // 归入项目（卷属于某个项目/家族）；传了就校验归属
     let projectId: number | null = null;
+    let projectName = '';
     if (dto.projectId != null && Number(dto.projectId) > 0) {
-      await this.getProject(userId, Number(dto.projectId));
+      const project = await this.getProject(userId, Number(dto.projectId));
       projectId = Number(dto.projectId);
+      projectName = project.name || '';
     }
     const description =
       dto.description != null && String(dto.description).trim()
@@ -314,6 +632,14 @@ export class TasksService implements OnModuleInit {
       .filter((f) => IMAGE_EXT.has(path.extname(f).toLowerCase()))
       .sort((a, b) => a.localeCompare(b, 'zh'));
     if (!files.length) throw new BadRequestException('文件夹内没有图片');
+
+    // 同一项目下同名卷视为同一卷：复用原任务，只把新图片按内容去重后合并进去。
+    const sameNameTasks = await this.tasks.find({ where: { userId, projectId } });
+    const existingSameName = sameNameTasks.find((item) => String(item.name || '').trim().toLowerCase() === String(name || '').trim().toLowerCase());
+    if (existingSameName) {
+      const merged = await this.mergeVolumeImages(existingSameName, folder, files);
+      return this.get(userId, Number(merged.id));
+    }
 
     const batchCrop = dto.batchCrop?.enabled && Array.isArray(dto.batchCrop.quads) && dto.batchCrop.quads.length === 2 ? dto.batchCrop : null;
     if (batchCrop && !dto.batchCrop!.quads!.every((q) => Array.isArray(q) && q.length === 4 && q.every((p) => Array.isArray(p) && p.length === 2 && Number.isFinite(Number(p[0])) && Number.isFinite(Number(p[1]))))) {
@@ -356,7 +682,14 @@ export class TasksService implements OnModuleInit {
 
     const outputRoot = process.env.OUTPUT_ROOT || path.join(process.cwd(), '..', 'data', 'output');
     const stamp = Date.now();
-    const outputFolder = path.join(outputRoot, `task-${stamp}`);
+    // 输出目录按业务对象命名，便于人工查找；时间戳保留以避免同名卷覆盖。
+    const projectSegment = projectName ? this.safeName(projectName) : '';
+    const volumeSegment = this.safeName(name || path.basename(folder)) || 'volume';
+    const outputFolder = path.join(
+      outputRoot,
+      ...(projectSegment ? [projectSegment] : []),
+      `${volumeSegment}-${stamp}`,
+    );
     fs.mkdirSync(path.join(outputFolder, 'results'), { recursive: true });
     fs.mkdirSync(path.join(outputFolder, 'thumbs'), { recursive: true });
     fs.mkdirSync(path.join(outputFolder, 'sources'), { recursive: true });
@@ -375,6 +708,8 @@ export class TasksService implements OnModuleInit {
       actualCost: '0',
       sourceFolder: folder,
       outputFolder,
+      clientType: dto.clientType === 'desktop' ? 'desktop' : 'web',
+      clientDeviceId: dto.clientDeviceId || null,
       status: 'pending',
       // 裁剪/分页属于处理结果后的派生操作，建卷阶段始终只登记原图。
       totalCount: files.length,
@@ -424,6 +759,216 @@ export class TasksService implements OnModuleInit {
     }
     const ordered = await this.repairDerivedImageOrder(list);
     return this.groupSplitPages(ordered);
+  }
+
+  /** 将单张补图从临时上传会话加入当前卷，后续由前端触发单页处理。 */
+  async appendUploadedImage(userId: number, taskId: number, uploadSessionId: string, fileName: string) {
+    const task = await this.get(userId, taskId);
+    const session = String(uploadSessionId || '');
+    const name = path.basename(String(fileName || ''));
+    const ext = path.extname(name).toLowerCase();
+    if (!session || !name || session.includes('..') || /[\\/]/.test(session) || !IMAGE_EXT.has(ext)) {
+      throw new BadRequestException('补图文件无效，只接受单张图片');
+    }
+
+    const uploadRoot = path.resolve(this.uploadRoot());
+    const uploaded = path.resolve(uploadRoot, session, name);
+    const sessionPrefix = path.resolve(uploadRoot, session) + path.sep;
+    if (!uploaded.toLowerCase().startsWith(sessionPrefix.toLowerCase()) || !fs.existsSync(uploaded) || !fs.statSync(uploaded).isFile()) {
+      throw new BadRequestException('补图上传文件不存在，请重新上传');
+    }
+
+    // 补图属于卷的原始资料，必须落到项目/卷源目录，不能放进结果输出目录。
+    const sourceDir = path.resolve(task.sourceFolder);
+    fs.mkdirSync(sourceDir, { recursive: true });
+    const stem = this.safeName(name) || 'supplement';
+    const target = path.join(sourceDir, `${stem}-${Date.now()}${ext}`);
+    fs.copyFileSync(uploaded, target);
+
+    const last = await this.images.findOne({ where: { taskId }, order: { sortOrder: 'DESC', id: 'DESC' } });
+    const now = new Date();
+    const image = this.images.create({
+      taskId,
+      fileName: name,
+      sourcePath: target,
+      status: 'pending',
+      sortOrder: (last?.sortOrder ?? -1) + 1,
+      params: task.defaultParams || JSON.stringify(DEFAULT_PARAMS),
+      createdAt: now,
+      updatedAt: now,
+    });
+    const saved = await this.images.save(image);
+    await this.syncProjectUploadManifest(task.projectId, null, target);
+    task.totalCount = await this.images.count({ where: { taskId } });
+    if (task.status === 'completed') task.status = 'reviewing';
+    task.updatedAt = now;
+    await this.tasks.save(task);
+    // 补图已落卷源目录，临时上传会话用完即删，不在 uploads 根目录留文件夹。
+    this.cleanupSingleUploadSession(session);
+    return this.imageView(saved);
+  }
+
+  /** 用新上传文件替换普通页的最初原图；裁剪/分页产生的派生页不允许直接替换。 */
+  async replaceUploadedImage(userId: number, taskId: number, imageId: number, uploadSessionId: string, fileName: string) {
+    const task = await this.get(userId, taskId);
+    const img = await this.getImage(userId, taskId, imageId);
+    if (img.originalSourcePath) throw new BadRequestException('裁剪或分页产生的派生页不能替换原图，请选择对应的原始页');
+
+    const session = String(uploadSessionId || '');
+    const name = path.basename(String(fileName || ''));
+    const ext = path.extname(name).toLowerCase();
+    if (!session || !name || session.includes('..') || /[\\/]/.test(session) || !IMAGE_EXT.has(ext)) {
+      throw new BadRequestException('替换文件无效，只接受单张图片');
+    }
+    const uploadRoot = path.resolve(this.uploadRoot());
+    const uploaded = path.resolve(uploadRoot, session, name);
+    const sessionPrefix = path.resolve(uploadRoot, session) + path.sep;
+    if (!uploaded.toLowerCase().startsWith(sessionPrefix.toLowerCase()) || !fs.existsSync(uploaded) || !fs.statSync(uploaded).isFile()) {
+      throw new BadRequestException('替换文件不存在，请重新上传');
+    }
+
+    const sourceDir = path.resolve(task.sourceFolder);
+    fs.mkdirSync(sourceDir, { recursive: true });
+    const oldSource = path.resolve(img.sourcePath);
+    let manifestSource = oldSource;
+    const oldAssets = new Set<string>([
+      img.sourcePath,
+      img.resultPath,
+      img.algoResultPath,
+      img.aiResultPath,
+      img.thumbPath,
+    ].filter(Boolean) as string[]);
+    try {
+      const finalCrop = img.finalCrop ? JSON.parse(img.finalCrop) : null;
+      if (finalCrop?.basePath) oldAssets.add(String(finalCrop.basePath));
+    } catch { /* 忽略损坏的历史裁剪元数据 */ }
+    // 透视修正页的 sourcePath 是派生文件，JSON 中才记录最初原图。
+    const perspectiveMeta = img.sourcePath && /[\\/]persp[\\/]/.test(img.sourcePath) ? img.sourcePath.replace(/\.png$/i, '.json') : '';
+    if (perspectiveMeta && fs.existsSync(perspectiveMeta)) {
+      try {
+        const meta = JSON.parse(fs.readFileSync(perspectiveMeta, 'utf8'));
+        if (meta?.original) {
+          manifestSource = path.resolve(String(meta.original));
+          oldAssets.add(manifestSource);
+        }
+        oldAssets.add(perspectiveMeta);
+      } catch { /* 元数据损坏时仍清理已知文件 */ }
+    }
+    const derived = await this.images.find({ where: { taskId, originalSourcePath: String(img.id) } as any });
+    for (const child of derived) {
+      for (const file of [child.sourcePath, child.resultPath, child.algoResultPath, child.aiResultPath, child.thumbPath]) {
+        if (file) oldAssets.add(file);
+      }
+      try {
+        const finalCrop = child.finalCrop ? JSON.parse(child.finalCrop) : null;
+        if (finalCrop?.basePath) oldAssets.add(String(finalCrop.basePath));
+      } catch { /* 忽略损坏的历史裁剪元数据 */ }
+    }
+    // 大模型处理中间原图及其告警元数据与结果同名，替换时也一并清理。
+    for (const file of [...oldAssets]) {
+      if (!/\.png$/i.test(file)) continue;
+      const raw = file.replace(/\.png$/i, '') + '_raw.png';
+      oldAssets.add(raw);
+      oldAssets.add(raw + '.json');
+    }
+    const originalStem = this.safeName(path.basename(img.fileName, path.extname(img.fileName))) || 'page';
+    const target = path.join(sourceDir, `${originalStem}-replaced-${Date.now()}${ext}`);
+    fs.copyFileSync(uploaded, target);
+
+    img.sourcePath = target;
+    img.originalDeleted = false;
+    img.resultPath = null;
+    img.resultDeleted = false;
+    img.processMode = null;
+    img.algoResultPath = null;
+    img.aiResultPath = null;
+    img.aiModelId = null;
+    img.thumbPath = null;
+    img.cropBox = null;
+    img.finalCrop = null;
+    img.width = null;
+    img.height = null;
+    img.status = 'pending';
+    img.errorMessage = null;
+    img.processingTimeMs = null;
+    img.updatedAt = new Date();
+    const saved = await this.images.save(img);
+    if (derived.length) {
+      for (const child of derived) await this.images.delete({ id: Number(child.id) });
+    }
+    await this.syncProjectUploadManifest(task.projectId, manifestSource, target);
+    this.removeReplacedImageAssets(oldAssets, task, target);
+    // 新原图已落卷源目录，替换用的临时上传会话用完即删。
+    this.cleanupSingleUploadSession(session);
+
+    task.updatedAt = new Date();
+    if (task.status === 'completed') task.status = 'reviewing';
+    task.totalCount = await this.images.count({ where: { taskId } });
+    await this.tasks.save(task);
+    return this.imageView(saved);
+  }
+
+  /** 补图/替换原图的临时上传会话只在 uploads 根目录做中转，落盘成功后整个文件夹删除，避免残留难管理。 */
+  private cleanupSingleUploadSession(sessionId: string) {
+    try {
+      const rel = String(sessionId || '').replace(/\\/g, '/').replace(/^\/+/, '');
+      // 只允许删除 uploads 根目录下的一级会话文件夹（如 20261106xxxxxx-xxxxxx_补图）。
+      if (!rel || rel.includes('..') || /[\\/]/.test(rel) || /^[A-Za-z]:/.test(rel)) return;
+      const uploadRoot = path.resolve(this.uploadRoot());
+      const dir = path.resolve(uploadRoot, rel);
+      const relCheck = path.relative(uploadRoot, dir);
+      if (!relCheck || relCheck.startsWith('..') || path.isAbsolute(relCheck)) return;
+      if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) fs.rmSync(dir, { recursive: true, force: true });
+    } catch (e) {
+      this.logger.warn(`补图/替换临时上传会话清理失败: ${sessionId}; ${e}`);
+    }
+  }
+
+  /** 替换完成后删除旧原图、旧结果和派生页文件，只允许清理当前卷源目录及输出目录。 */
+  private removeReplacedImageAssets(files: Set<string>, task: Task, keepFile: string) {
+    const roots = [task.sourceFolder, task.outputFolder].filter(Boolean).map((value) => path.resolve(value));
+    const keep = path.resolve(keepFile);
+    for (const value of files) {
+      try {
+        const file = path.resolve(value);
+        if (file === keep) continue;
+        const allowed = roots.some((root) => {
+          const rel = path.relative(root, file);
+          return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+        });
+        if (allowed && fs.existsSync(file) && fs.statSync(file).isFile()) fs.rmSync(file, { force: true });
+      } catch (e) {
+        this.logger.warn(`Replaced image asset cleanup skipped: ${value}; ${e}`);
+      }
+    }
+  }
+
+  /** 单张补图/替换也同步项目上传清单，使项目卡片统计与卷目录中的实际文件一致。 */
+  private async syncProjectUploadManifest(projectId: number | null, removedFile: string | null, addedFile: string) {
+    if (projectId == null) return;
+    try {
+      const project = await this.projects.findOne({ where: { id: Number(projectId) } });
+      if (!project?.rootPath) return;
+      const root = path.resolve(project.rootPath);
+      const manifestPath = path.join(root, '.upload-manifest.json');
+      if (!fs.existsSync(manifestPath)) return;
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      if (!Array.isArray(manifest?.files)) return;
+      const relative = (file: string | null) => {
+        if (!file) return null;
+        const rel = path.relative(root, path.resolve(file));
+        return !rel || rel.startsWith('..') || path.isAbsolute(rel) ? null : rel.replace(/\\/g, '/');
+      };
+      const removedRel = relative(removedFile);
+      const addedRel = relative(addedFile);
+      if (!addedRel) return;
+      const files = manifest.files.filter((item: any) => String(item?.path || '').replace(/\\/g, '/') !== removedRel);
+      const stat = fs.statSync(addedFile);
+      files.push({ path: addedRel, size: stat.size, lastModified: Math.trunc(stat.mtimeMs) });
+      fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, files }, null, 2), 'utf8');
+    } catch (e) {
+      this.logger.warn(`Upload manifest sync skipped: ${e}`);
+    }
   }
 
   /** 修复历史裁剪/分页页：派生页必须紧跟其父图，不能按旧的绝对序号落到后续原图之后。 */
@@ -489,20 +1034,49 @@ export class TasksService implements OnModuleInit {
     return img;
   }
 
-  /**
-   * 删除裁剪/分页生成的派生页。原始导入页始终不能通过此接口删除，避免误删用户本地原图。
-   */
-  async deleteImage(userId: number, taskId: number, imageId: number) {
+  /** 删除卷内图片记录及其生成文件；外部导入目录中的原始文件不会被删除。 */
+  async deleteImage(userId: number, taskId: number, imageId: number, asset = 'all') {
     const task = await this.get(userId, taskId);
     const img = await this.getImage(userId, taskId, imageId);
-    let finalCrop: any = null;
-    try { finalCrop = img.finalCrop ? JSON.parse(img.finalCrop) : null; } catch { finalCrop = null; }
-    const isDerived = Boolean(img.originalSourcePath) || finalCrop?.source === 'result';
-    if (!isDerived) {
-      throw new BadRequestException('原始图片不能单独删除，请删除整卷任务');
-    }
     if (img.status === 'processing') {
       throw new BadRequestException('图片正在处理中，暂时不能删除');
+    }
+
+    if (asset === 'original') {
+      img.originalDeleted = true;
+      img.updatedAt = new Date();
+      await this.images.save(img);
+      return { ok: true, id: Number(img.id), totalCount: await this.images.count({ where: { taskId } }) };
+    }
+
+    if (asset === 'result') {
+      const outputRoot = path.resolve(task.outputFolder || '');
+      const outputPrefix = outputRoot ? outputRoot + path.sep : '';
+      const paths = new Set<string>();
+      for (const candidate of [img.resultPath, img.algoResultPath, img.aiResultPath, img.thumbPath]) {
+        if (!candidate) continue;
+        const resolved = path.resolve(candidate);
+        if (resolved !== outputRoot && resolved.startsWith(outputPrefix)) paths.add(resolved);
+      }
+      for (const filePath of paths) {
+        try {
+          if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) fs.unlinkSync(filePath);
+        } catch (e) {
+          this.logger.warn(`结果文件删除失败，继续更新记录: ${filePath}; ${e}`);
+        }
+      }
+      img.resultPath = null;
+      img.algoResultPath = null;
+      img.aiResultPath = null;
+      img.thumbPath = null;
+      img.processMode = null;
+      img.aiModelId = null;
+      img.resultDeleted = true;
+      img.status = 'pending';
+      img.updatedAt = new Date();
+      await this.images.save(img);
+      await this.refreshConfirmed(taskId);
+      return { ok: true, id: Number(img.id), totalCount: await this.images.count({ where: { taskId } }) };
     }
 
     const outputRoot = path.resolve(task.outputFolder || '');
@@ -1086,16 +1660,16 @@ export class TasksService implements OnModuleInit {
     }
     return {
       ...rest,
-      sourceUrl: perspApplied ? withBust(this.fileUrl(img.sourcePath)) : this.fileUrl(img.sourcePath),
+      sourceUrl: img.originalDeleted ? null : perspApplied ? withBust(this.fileUrl(img.sourcePath)) : this.fileUrl(img.sourcePath),
       perspectiveApplied: perspApplied,
       perspectiveQuads: perspQuads,
-      trueOriginalUrl: perspApplied ? withBust(this.fileUrl(trueOriginal)) : this.fileUrl(trueOriginal),
+      trueOriginalUrl: img.originalDeleted ? null : perspApplied ? withBust(this.fileUrl(trueOriginal)) : this.fileUrl(trueOriginal),
       splitOriginalUrl: img.originalSourcePath ? withBust(this.fileUrl(img.originalSourcePath)) : null,
       splitQuad: img.splitQuad ? (() => { try { return JSON.parse(img.splitQuad!); } catch { return null; } })() : null,
-      finalCrop: finalCrop ? { source: finalCrop.source, box: finalCrop.box } : null,
+      finalCrop: finalCrop ? { source: finalCrop.source, quad: finalCrop.quad } : null,
       finalCropBaseUrl: finalCrop?.source === 'result' && finalCrop.basePath && fs.existsSync(finalCrop.basePath) ? withBust(this.fileUrl(finalCrop.basePath)) : null,
-      resultUrl: withBust(this.fileUrl(img.resultPath)),
-      thumbUrl: withBust(this.fileUrl(img.thumbPath)),
+      resultUrl: img.resultDeleted ? null : withBust(this.fileUrl(img.resultPath)),
+      thumbUrl: img.resultDeleted ? null : withBust(this.fileUrl(img.thumbPath)),
       hasAlgoResult: !!(algoResultPath && fs.existsSync(algoResultPath)),
       hasAiResult: !!(aiResultPath && fs.existsSync(aiResultPath)),
       aiModelName: aiModel ? aiModel.displayName : undefined,
@@ -1103,14 +1677,10 @@ export class TasksService implements OnModuleInit {
     };
   }
 
-  async applyFinalCrop(userId: number, taskId: number, imageId: number, source: string, box: CropBox, rotation = 0) {
-    if (!['original', 'result'].includes(source) || !box || ![box.x, box.y, box.w, box.h].every(Number.isFinite) || box.x < 0 || box.y < 0 || box.w <= 0 || box.h <= 0 || box.x + box.w > 1.00001 || box.y + box.h > 1.00001) {
-      throw new BadRequestException('裁剪范围无效，请重新选择');
-    }
-    if (!Number.isFinite(Number(rotation)) || Number(rotation) < -360 || Number(rotation) > 360) {
-      throw new BadRequestException('旋转角度无效，请重新选择');
-    }
-    rotation = Number(rotation);
+  async applyFinalCrop(userId: number, taskId: number, imageId: number, source: string, quad: number[][], rotation = 0) {
+    const validQuad = Array.isArray(quad) && quad.length === 4 && quad.every((p) => Array.isArray(p) && p.length === 2 && p.every((v) => Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= 1));
+    if (!['original', 'result'].includes(source) || !validQuad) throw new BadRequestException('必须选择四个有效角点');
+    if (!Number.isFinite(Number(rotation)) || Number(rotation) < -360 || Number(rotation) > 360) throw new BadRequestException('旋转角度无效，请重新选择');
     const task = await this.get(userId, taskId);
     const img = await this.getImage(userId, taskId, imageId);
     let existing: any = null;
@@ -1121,15 +1691,14 @@ export class TasksService implements OnModuleInit {
     fs.mkdirSync(dir, { recursive: true });
     const id = crypto.randomBytes(12).toString('hex');
     let basePath = input;
-    if (source === 'result' && (input !== existing?.basePath || Math.abs(rotation) > 0.001)) {
+    if (Math.abs(Number(rotation)) > 0.001) {
       basePath = path.join(dir, `${id}-base.png`);
-      await sharp(input, { failOn: 'none' }).rotate(rotation).png().toFile(basePath);
+      await sharp(input, { failOn: 'none' }).rotate(Number(rotation)).png().toFile(basePath);
     }
     const outPath = path.join(dir, `${id}-result.png`);
     const thumbPath = path.join(dir, `${id}-thumb.jpg`);
-    const resolved = await this.processor.resolveCropAgainstSource(basePath, box);
-    if (!resolved.crop) throw new BadRequestException('裁剪区域无效');
-    await this.processor.materializeCrop(basePath, resolved.crop, outPath);
+    const normalizedQuad = quad.map((p) => [Number(p[0]), Number(p[1])]);
+    await this.processor.warpPerspectivePage(basePath, outPath, normalizedQuad);
     await this.processor.makeThumb(outPath, thumbPath);
     if (source === 'result') {
       // 结果裁剪是派生页：保留输入结果，允许同一结果连续裁剪多次。
@@ -1144,7 +1713,7 @@ export class TasksService implements OnModuleInit {
         resultPath: outPath,
         algoResultPath: outPath,
         thumbPath,
-        finalCrop: JSON.stringify({ source: 'result', box, rotation, basePath, parentImageId: Number(img.id) }),
+        finalCrop: JSON.stringify({ source: 'result', quad: normalizedQuad, rotation: Number(rotation), basePath, parentImageId: Number(img.id) }),
         params: img.params,
         status: 'ready',
         sortOrder: img.sortOrder + nextIndex,
@@ -1164,7 +1733,7 @@ export class TasksService implements OnModuleInit {
       });
       return this.imageView(child);
     }
-    img.finalCrop = JSON.stringify({ source, box, basePath: source === 'result' ? basePath : null });
+    img.finalCrop = JSON.stringify({ source, quad: normalizedQuad, rotation: Number(rotation), basePath: source === 'result' ? basePath : null });
     if (source === 'original') {
       // 后续增强以这块原图区域为输入；旧的 AI 结果来自其他范围，不能继续沿用。
       img.cropBox = null;
@@ -1455,16 +2024,40 @@ export class TasksService implements OnModuleInit {
   async deleteTask(userId: number, taskId: number) {
     const task = await this.get(userId, taskId);
     const id = Number(task.id);
+    const taskImages = await this.images.find({ where: { taskId: id } });
+    const project = task.projectId == null
+      ? null
+      : await this.projects.findOne({ where: { id: Number(task.projectId) } });
 
     // Stop in-flight processing if any
     this.cancelled.add(id);
     this.volActors.delete(id);
     this.running.delete(id);
 
+    // 处理可能已经进入 sharp/AI/文件写入阶段。必须等待它完全退出，
+    // 否则下面的清理会被并发任务重新生成的结果文件抵消。
+    const active = this.activeRuns.get(id);
+    if (active) await active;
+
+    // 从等待队列移除，避免取消标记过期后又被队列泵取出。
+    const queuedAt = this.volQueue.indexOf(id);
+    if (queuedAt >= 0) this.volQueue.splice(queuedAt, 1);
+    this.volQueued.delete(id);
+
     try {
+      this.safeRemoveOutputFolder(task.outputFolder, task.sourceFolder);
+      // 仅删除服务器上传目录；桌面端选择的用户本机原始目录不由网页删除。
+      await this.safeRemoveTaskSources(
+        task.sourceFolder,
+        taskImages.flatMap((img) => [img.sourcePath, img.originalSourcePath].filter(Boolean) as string[]),
+      );
+      // 代理图使用哈希文件名，无法可靠按卷反查；这是可再生缓存，删除卷时整体清空。
+      if (!clearViewProxyCache()) {
+        this.logger.warn(`View proxy cache cleanup incomplete after deleting task ${id}; cache is regenerable`);
+      }
       await this.images.delete({ taskId: id });
       await this.tasks.delete({ id });
-      this.safeRemoveOutputFolder(task.outputFolder, task.sourceFolder);
+      this.removeTaskFromUploadManifest(project?.rootPath, task.sourceFolder);
       this.logger.log(`Deleted task ${id} (${task.name})`);
       return { ok: true, id };
     } finally {
@@ -1473,9 +2066,38 @@ export class TasksService implements OnModuleInit {
     }
   }
 
+  /** 删除卷后同步收缩网页上传清单，避免已主动删除的文件被误报为“上传未完成”。 */
+  private removeTaskFromUploadManifest(projectRoot: string | null | undefined, sourceFolder: string | null | undefined) {
+    if (!projectRoot || !sourceFolder) return;
+    try {
+      const root = path.resolve(projectRoot);
+      const source = path.resolve(sourceFolder);
+      const sourceRel = path.relative(root, source);
+      if (!sourceRel || sourceRel.startsWith('..') || path.isAbsolute(sourceRel)) return;
+
+      const manifestPath = path.join(root, '.upload-manifest.json');
+      if (!fs.existsSync(manifestPath)) return;
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      if (!Array.isArray(manifest?.files)) return;
+
+      const files = manifest.files.filter((item: any) => {
+        const rel = String(item?.path || '').replace(/\\/g, '/').replace(/^\/+/, '');
+        if (!rel || rel.includes('..')) return true;
+        const file = path.resolve(root, rel);
+        const relToSource = path.relative(source, file);
+        return relToSource.startsWith('..') || path.isAbsolute(relToSource);
+      });
+      if (files.length === manifest.files.length) return;
+      fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, files }, null, 2), 'utf8');
+    } catch (e) {
+      this.logger.warn(`Upload manifest cleanup skipped after deleting task: ${e}`);
+    }
+  }
+
   /**
    * Remove task output dir only. Never touch the user's source_folder originals.
-   * Only deletes paths under OUTPUT_ROOT (or default data/output) that look like task-*.
+   * Only deletes paths under OUTPUT_ROOT (or default data/output). Output folders may use
+   * either the legacy task-* format or the current project/volume naming format.
    */
   private safeRemoveOutputFolder(outputFolder: string | null | undefined, sourceFolder: string) {
     if (!outputFolder) return;
@@ -1493,18 +2115,109 @@ export class TasksService implements OnModuleInit {
       if (
         !rel ||
         rel.startsWith('..') ||
-        path.isAbsolute(rel) ||
-        !/^task[-_]/i.test(path.basename(out))
+        path.isAbsolute(rel)
       ) {
         this.logger.warn(`Skip unsafe output path: ${out}`);
         return;
       }
       if (fs.existsSync(out)) {
-        fs.rmSync(out, { recursive: true, force: true });
+        fs.rmSync(out, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+        if (fs.existsSync(out)) throw new Error(`输出目录删除后仍存在: ${out}`);
         this.logger.log(`Removed output folder ${out}`);
       }
     } catch (e) {
-      this.logger.warn(`Output folder cleanup failed: ${e}`);
+      this.logger.error(`Output folder cleanup failed: ${e}`);
+      throw e;
+    }
+  }
+
+  /** 只删除 OUTPUT_ROOT 下已确认为空的项目级目录。 */
+  private safeRemoveEmptyOutputFolder(folder: string | null | undefined) {
+    if (!folder) return;
+    const target = path.resolve(folder);
+    const outputRoot = path.resolve(
+      process.env.OUTPUT_ROOT || path.join(process.cwd(), '..', 'data', 'output'),
+    );
+    const rel = path.relative(outputRoot, target);
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return;
+    try {
+      if (!fs.existsSync(target) || !fs.statSync(target).isDirectory()) return;
+      if (fs.readdirSync(target).length !== 0) return;
+      fs.rmdirSync(target);
+      this.logger.log(`Removed empty project output folder ${target}`);
+    } catch (e) {
+      this.logger.warn(`Empty project output folder cleanup skipped: ${target}; ${e}`);
+    }
+  }
+
+  private uploadRoot() {
+    return process.env.UPLOAD_ROOT || path.join(process.cwd(), '..', 'data', 'uploads');
+  }
+
+  /** 删除网页上传的原图目录，禁止把桌面端用户本机目录当作服务器文件删除。 */
+  private async safeRemoveSourceFolder(sourceFolder: string | null | undefined) {
+    if (!sourceFolder) return;
+    try {
+      const source = path.resolve(sourceFolder);
+      const uploadRoot = path.resolve(this.uploadRoot());
+      const rel = path.relative(uploadRoot, source);
+      if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+        this.logger.log(`Skip source cleanup outside upload root: ${source}`);
+        return;
+      }
+      for (let attempt = 1; attempt <= 4; attempt += 1) {
+        try {
+          if (!fs.existsSync(source)) return;
+          fs.rmSync(source, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+          if (!fs.existsSync(source)) {
+            this.logger.log(`Removed uploaded source folder ${source}`);
+            return;
+          }
+        } catch (e) {
+          if (attempt === 4) throw e;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+      }
+    } catch (e) {
+      this.logger.error(`Source folder cleanup failed: ${e}`);
+      throw e;
+    }
+  }
+
+  /**
+   * 清理卷的服务器原图。旧数据的 source_folder 可能与实际 source_path 不完全一致，
+   * 因此同时使用图片记录中的实际路径兜底；所有删除仍严格限制在 UPLOAD_ROOT 下。
+   */
+  private async safeRemoveTaskSources(sourceFolder: string | null | undefined, imagePaths: string[]) {
+    const uploadRoot = path.resolve(this.uploadRoot());
+    const underUploadRoot = (target: string) => {
+      const rel = path.relative(uploadRoot, target);
+      return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+    };
+    const source = sourceFolder ? path.resolve(sourceFolder) : '';
+    const existingImages = imagePaths.map((p) => path.resolve(p)).filter((p) => underUploadRoot(p));
+    const allImagesInSource = !!source && existingImages.length > 0 && existingImages.every((p) => path.dirname(p).toLowerCase() === source.toLowerCase());
+
+    if (source && underUploadRoot(source)) {
+      await this.safeRemoveSourceFolder(source);
+      return;
+    }
+
+    // source_folder 不可靠时，逐个删除该卷实际登记的服务器图片，并尝试删除空父目录。
+    for (const file of existingImages) {
+      try {
+        if (fs.existsSync(file)) fs.rmSync(file, { force: true });
+      } catch (e) {
+        this.logger.warn(`Uploaded image cleanup failed: ${file}; ${e}`);
+      }
+    }
+    const parents = [...new Set(existingImages.map((file) => path.dirname(file)))];
+    for (const parent of parents) {
+      try {
+        if (underUploadRoot(parent) && fs.existsSync(parent) && fs.readdirSync(parent).length === 0) fs.rmdirSync(parent);
+      } catch {
+        /* ignore non-empty or concurrently removed folders */
+      }
     }
   }
 
@@ -1866,11 +2579,15 @@ export class TasksService implements OnModuleInit {
     filter: 'all' | 'passed' | 'failed' = 'all',
   ) {
     const task = await this.get(userId, taskId);
+    if (task.status === 'processing' || task.status === 'queued') {
+      throw new BadRequestException('卷正在处理中，处理完成后才能导出');
+    }
     const imgs = await this.images.find({
       where: { taskId },
       order: { sortOrder: 'ASC' },
     });
-    let ready = this.groupSplitPages(imgs).filter((img) => img.resultPath && fs.existsSync(img.resultPath));
+    // 导出范围与审阅页“结果图”列表一致：只要有当前结果图即可，不要求通过/未通过状态。
+    let ready = this.groupSplitPages(imgs).filter((img) => !img.resultDeleted && img.resultPath && fs.existsSync(img.resultPath));
     if (filter === 'passed') {
       ready = ready.filter((img) => img.status === 'confirmed');
     } else if (filter === 'failed') {
@@ -1886,48 +2603,84 @@ export class TasksService implements OnModuleInit {
       );
     }
 
-    const suffix =
-      filter === 'passed' ? 'passed' : filter === 'failed' ? 'failed' : 'results';
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="task-${taskId}-${suffix}.zip"`,
+      `attachment; filename*=UTF-8''${encodeURIComponent(this.safeName(task.name) || `task-${taskId}`)}.zip`,
     );
-    const archive = archiver('zip', { zlib: { level: 9 } });
-    archive.on('error', (err) => {
-      throw err;
-    });
-    archive.pipe(res);
-    for (const img of ready) {
-      archive.file(img.resultPath!, {
-        name: 'results/' + this.safeName(img.fileName) + '.png',
-      });
-    }
-    await archive.finalize();
+    await this.streamZip(res, ready.map((img) => ({
+      file: img.resultPath!,
+      // ZIP 内保留一级卷目录：卷一.zip 解压后为「卷一/图片...」
+      name: `${this.safeName(task.name) || `task-${taskId}`}/${this.safeName(img.fileName)}${path.extname(img.resultPath || '').toLowerCase()}`,
+    })));
   }
 
   /** 按项目导出当前选中的结果图，不导出原图。 */
   async downloadProjectZip(userId: number, projectId: number, res: any) {
     const project = await this.getProject(userId, projectId);
     const volumes = await this.tasks.find({ where: { projectId }, order: { id: 'ASC' } });
+    const busy = volumes.filter((task) => task.status === 'processing' || task.status === 'queued');
+    if (busy.length) {
+      throw new BadRequestException(`项目仍有 ${busy.length} 卷正在处理，全部处理完成后才能导出`);
+    }
     const entries: Array<{ task: Task; image: TaskImage }> = [];
+    const volumeIds = volumes.map((task) => Number(task.id));
+    const allImages = volumeIds.length
+      ? await this.images.find({ where: { taskId: In(volumeIds) }, order: { sortOrder: 'ASC' } })
+      : [];
+    const taskById = new Map(volumes.map((task) => [Number(task.id), task]));
+    const imagesByTask = new Map<number, TaskImage[]>();
+    for (const image of allImages) {
+      const list = imagesByTask.get(Number(image.taskId)) || [];
+      list.push(image);
+      imagesByTask.set(Number(image.taskId), list);
+    }
     for (const task of volumes) {
-      const imgs = await this.images.find({ where: { taskId: task.id }, order: { sortOrder: 'ASC' } });
-      for (const image of this.groupSplitPages(imgs)) {
-        if (image.resultPath && fs.existsSync(image.resultPath)) entries.push({ task, image });
+      for (const image of this.groupSplitPages(imagesByTask.get(Number(task.id)) || [])) {
+        if (!image.resultDeleted && image.resultPath && fs.existsSync(image.resultPath)) entries.push({ task: taskById.get(Number(task.id))!, image });
       }
     }
     if (!entries.length) throw new BadRequestException('项目中没有可下载的结果图');
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="project-${project.id}-results.zip"`);
-    const archive = archiver('zip', { zlib: { level: 9 } });
-    archive.on('error', (err) => { throw err; });
-    archive.pipe(res);
-    for (const { task, image } of entries) {
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename*=UTF-8''${encodeURIComponent(this.safeName(project.name) || `project-${project.id}`)}.zip`,
+    );
+    await this.streamZip(res, entries.map(({ task, image }) => {
       const ext = path.extname(image.resultPath || '') || '.png';
-      archive.file(image.resultPath!, { name: `${this.safeName(task.name)}/${this.safeName(image.fileName)}${ext.toLowerCase()}` });
+      return {
+        file: image.resultPath!,
+        // ZIP 内保留两级目录：李.zip 解压后为「李/卷一/图片...」
+        name: `${this.safeName(project.name) || `project-${project.id}`}/${this.safeName(task.name)}/${this.safeName(image.fileName)}${ext.toLowerCase()}`,
+      };
+    }));
+  }
+
+  /**
+   * 稳定地把结果流式写入 HTTP 响应。
+   * 不能在 archiver 的异步 error 事件里直接 throw，否则线上代理会看到 502。
+   */
+  private async streamZip(res: any, entries: Array<{ file: string; name: string }>) {
+    // 图片（JPG/PNG/WebP 等）本身已经压缩，再次 deflate 会大量消耗 CPU，
+    // 在线服务器上会表现为导出长时间无响应；使用 ZIP Store 直接打包，速度显著更快。
+    const archive = archiver('zip', { zlib: { level: 0 } });
+    archive.on('warning', (err: any) => {
+      if (err?.code !== 'ENOENT') this.logger.warn(`导出 ZIP 警告: ${err?.message || err}`);
+    });
+    const archiveError = new Promise<never>((_, reject) => {
+      archive.once('error', (err) => reject(err));
+      res.once('error', (err: Error) => reject(err));
+    });
+    for (const entry of entries) {
+      if (!entry.file || !fs.existsSync(entry.file) || !fs.statSync(entry.file).isFile()) {
+        throw new BadRequestException(`结果文件不存在，无法导出：${entry.name}`);
+      }
     }
-    await archive.finalize();
+    archive.pipe(res);
+    for (const entry of entries) {
+      archive.file(entry.file, { name: entry.name, store: true } as any);
+    }
+    await Promise.race([archive.finalize(), archiveError]);
   }
 
   fileUrl(absPath: string | null) {

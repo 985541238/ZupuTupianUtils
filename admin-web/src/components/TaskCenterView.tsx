@@ -30,6 +30,7 @@ interface TaskCenterViewProps {
   onCreateTask: (newTask: Partial<Task>, items: ScanItem[], startImmediately: boolean) => Promise<any>;
   onOpenReview: (taskId: string) => void;
   onDeleteTask?: (taskId: string) => void | Promise<void>;
+  onRescanTask?: (taskId: string) => void | Promise<void>;
   processingTaskId: string | null;
   processingProgress: number;
   processingStatusText: string;
@@ -57,6 +58,31 @@ function stageOf(t: Task): Stage {
   }
 }
 
+const ZH_VOLUME_DIGITS: Record<string, number> = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+function volumeSortKey(name: string): { number: number | null; text: string } {
+  const arabic = String(name || '').match(/卷\s*(\d+)/i);
+  if (arabic) return { number: Number(arabic[1]), text: String(name || '') };
+  const chinese = String(name || '').match(/卷\s*([零一二两三四五六七八九十百]+)/);
+  if (!chinese) return { number: null, text: String(name || '') };
+  const digits = chinese[1];
+  if (digits === '十') return { number: 10, text: String(name || '') };
+  if (digits.startsWith('十')) return { number: 10 + (ZH_VOLUME_DIGITS[digits.slice(1)] || 0), text: String(name || '') };
+  if (digits.includes('十')) {
+    const [tens, ones] = digits.split('十');
+    return { number: (ZH_VOLUME_DIGITS[tens] || 0) * 10 + (ZH_VOLUME_DIGITS[ones] || 0), text: String(name || '') };
+  }
+  return { number: ZH_VOLUME_DIGITS[digits] ?? null, text: String(name || '') };
+}
+
+function compareVolumes(a: Task, b: Task) {
+  const x = volumeSortKey(a.name);
+  const y = volumeSortKey(b.name);
+  if (x.number != null && y.number != null && x.number !== y.number) return x.number - y.number;
+  if (x.number != null && y.number == null) return -1;
+  if (x.number == null && y.number != null) return 1;
+  return x.text.localeCompare(y.text, 'zh', { numeric: true }) || Number(a.id) - Number(b.id);
+}
+
 const STAGE_TABS: { key: 'all' | Stage; label: string; tone: string }[] = [
   { key: 'all', label: '全部', tone: 'text-[#1D1D1F]' },
   { key: 'pending', label: '待处理', tone: 'text-[#FF9500]' },
@@ -66,6 +92,36 @@ const STAGE_TABS: { key: 'all' | Stage; label: string; tone: string }[] = [
 type Est = { cost: number | null; priced: boolean; raw: number | null; currency: 'CNY' | 'USD' };
 const EMPTY_EST: Est = { cost: null, priced: false, raw: null, currency: 'CNY' };
 type PendingProjectFile = { file: File; relativePath: string };
+type ProjectUploadSession = { id: string; dir: string; label: string; fingerprint: string; projectId?: number };
+type SingleUploadSession = { id: string; dir: string; label: string; fingerprint: string };
+const PROJECT_UPLOAD_SESSION_KEY = 'zupu_project_upload_session';
+const SINGLE_UPLOAD_SESSION_KEY = 'zupu_single_upload_session';
+
+function readProjectUploadSession(): ProjectUploadSession | null {
+  try {
+    const value = JSON.parse(localStorage.getItem(PROJECT_UPLOAD_SESSION_KEY) || 'null');
+    return value && value.id && value.dir && value.label && value.fingerprint ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function readSingleUploadSession(): SingleUploadSession | null {
+  try {
+    const value = JSON.parse(localStorage.getItem(SINGLE_UPLOAD_SESSION_KEY) || 'null');
+    return value && value.id && value.dir && value.label && value.fingerprint ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function projectFilesFingerprint(label: string, files: PendingProjectFile[]) {
+  return `${label}|${files.map((f) => `${f.relativePath}:${f.file.size}:${f.file.lastModified}`).join('|')}`;
+}
+
+function projectSourceKey(label: string, files: PendingProjectFile[]) {
+  return `${label}|${files.map((f) => f.relativePath).sort().join('|')}`;
+}
 
 /** ¥12.30（约 $1.71） */
 function moneyText(e: Est) {
@@ -88,6 +144,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   onCreateTask,
   onOpenReview,
   onDeleteTask,
+  onRescanTask,
   processingTaskId,
   processingProgress,
   processingStatusText: _processingStatusText,
@@ -104,8 +161,9 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   const [timeFilter, setTimeFilter] = useState<TimeFilterType>('all');
   const [searchQuery, setSearchQuery] = useState('');
   /** 项目（家族）列表与当前筛选、创建弹窗里输入的项目名 */
-  type ProjectRow = { id: number; name: string; surname?: string; volumeCount: number; totalPages: number; processing: number; reviewing: number; completed: number };
+  type ProjectRow = { id: number; name: string; surname?: string; volumeCount: number; totalPages: number; processing: number; reviewing: number; completed: number; localOnly?: boolean; localDeviceIds?: string[]; importStatus?: 'uploading' | 'scan_pending' | 'ready'; canRescan?: boolean; uploadSessionId?: string; expectedFileCount?: number; uploadedFileCount?: number; expectedVolumeCount?: number; uploadedVolumeCount?: number };
   const [projects, setProjects] = useState<ProjectRow[]>([]);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
   /** 'all' = 项目总览（第一层）；number / 'none' = 进入某个项目看它的卷（第二层） */
   const [projectFilter, setProjectFilter] = useState<'all' | 'none' | number>(initialProjectFilter);
   const [showProjectModal, setShowProjectModal] = useState(false);
@@ -116,6 +174,10 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   const [currentProjectPage, setCurrentProjectPage] = useState(1);
   const [pendingProjectFiles, setPendingProjectFiles] = useState<PendingProjectFile[]>([]);
   const [pendingProjectLabel, setPendingProjectLabel] = useState('');
+  const [projectUploadSession, setProjectUploadSession] = useState<ProjectUploadSession | null>(() => readProjectUploadSession());
+  const [projectResumeTargetId, setProjectResumeTargetId] = useState<number | null>(null);
+  const [projectResumeUploadSessionId, setProjectResumeUploadSessionId] = useState<string | null>(null);
+  const isDesktopShell = typeof window !== 'undefined' && !!(window as any).zupuDesktop;
   const [projectUploadProg, setProjectUploadProg] = useState<{ done: number; total: number } | null>(null);
   const [projectBackgroundStatus, setProjectBackgroundStatus] = useState<{
     name: string;
@@ -141,6 +203,9 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
 
   // Create Task Modal (path pick + genealogy fields, no folder tree)
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [rescanTargetTask, setRescanTargetTask] = useState<Task | null>(null);
+  /** 新建卷/重新扫描卷的后台进度提示（右下角卡片，与新建项目一致） */
+  const [taskBackgroundStatus, setTaskBackgroundStatus] = useState<{ name: string; stage: 'uploading' | 'creating' | 'done' | 'error'; message?: string } | null>(null);
   const [taskName, setTaskName] = useState('');
   const [taskDescription, setTaskDescription] = useState('旧族谱复印页图片处理（去污去褶皱、白底黑字），供后续 OCR 识别与数据化');
   const [genealogyNote, setGenealogyNote] = useState('');
@@ -156,6 +221,8 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   const [ocrEst, setOcrEst] = useState<Est>(EMPTY_EST);
   const [countingPages, setCountingPages] = useState(false);
   const [folderPath, setFolderPath] = useState('');
+  const [pendingVolumeFiles, setPendingVolumeFiles] = useState<File[]>([]);
+  const [pendingVolumeLabel, setPendingVolumeLabel] = useState('');
   const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [browseCurrent, setBrowseCurrent] = useState('');
   const [browseParent, setBrowseParent] = useState<string | null>(null);
@@ -179,6 +246,9 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     [tasks, projectFilter],
   );
   const stageCount = (k: 'all' | Stage) => (k === 'all' ? scopeTasks.length : scopeTasks.filter((t) => stageOf(t) === k).length);
+  const projectExportBusy = typeof projectFilter === 'number' && scopeTasks.some(
+    (task) => task.nestStatus === 'processing' || task.nestStatus === 'queued',
+  );
 
   const filteredProjects = useMemo(() => {
     const query = projectSearchQuery.trim().toLowerCase();
@@ -197,7 +267,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   // Filtered Tasks
   const filteredTasks = useMemo(() => {
     // 项目里的卷：先新建的排在最上面（卷1、卷2…）
-    return [...tasks].sort((x, y) => Number(x.id) - Number(y.id)).filter((task) => {
+    return [...tasks].sort(compareVolumes).filter((task) => {
       // 1. Status Filter
       if (statusFilter !== 'all' && stageOf(task) !== statusFilter) return false;
 
@@ -244,18 +314,28 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   React.useEffect(() => {
     if (currentProjectPage > projectTotalPages) setCurrentProjectPage(projectTotalPages);
   }, [currentProjectPage, projectTotalPages]);
+  React.useEffect(() => {
+    if (projectsLoaded && typeof projectFilter === 'number' && !projects.some((project) => project.id === projectFilter)) {
+      setProjectFilter('all');
+    }
+  }, [projects, projectsLoaded, projectFilter]);
 
   const loadProjects = React.useCallback(async () => {
     try {
       const list = await api.listProjects();
       setProjects(Array.isArray(list) ? list : []);
+      setProjectsLoaded(true);
     } catch {
       /* ignore */
     }
   }, []);
+  const projectStatusSignature = useMemo(
+    () => tasks.map((task) => `${task.id}:${task.status}:${task.nestStatus}:${task.doneCount}:${task.totalPages}`).join('|'),
+    [tasks],
+  );
   React.useEffect(() => {
     void loadProjects();
-  }, [loadProjects, tasks.length]);
+  }, [loadProjects, projectStatusSignature]);
 
   // Paginated Slicing
   const totalItems = filteredTasks.length;
@@ -364,6 +444,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   const openCreateModal = () => {
     // Always start blank — never prefill last/default folder.
     setShowCreateModal(true);
+    setRescanTargetTask(null);
     setTaskName('');
     setUseAiRecognition(false);
     setPageCountPreview(0);
@@ -373,10 +454,29 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     const cur = typeof projectFilter === 'number' ? projects.find((p) => p.id === projectFilter) : null;
     setGenealogyNote(cur ? cur.surname || '' : '');
     setFolderPath('');
+    setPendingVolumeFiles([]);
+    setPendingVolumeLabel('');
     setBatchCrop(false);
     setImageProcessingEnabled(true);
     setBatchCropConfig(null);
     setBatchCropImageUrl('');
+  };
+
+  const openRescanModal = (task: Task) => {
+    // 重新扫描必须重新授权原目录；浏览器目录会在点击确认后上传到服务器。
+    setRescanTargetTask(task);
+    setShowCreateModal(true);
+    setTaskName(task.name || '');
+    setPageCountPreview(0);
+    setFolderPath('');
+    setPendingVolumeFiles([]);
+    setPendingVolumeLabel('');
+    setGenealogyNote(task.surname || task.genealogyNote || '');
+    setUseAiRecognition(false);
+    setUseAiClean(false);
+    setBatchCrop(false);
+    setBatchCropConfig(null);
+    setImageProcessingEnabled(true);
   };
 
   const submitNewProject = async () => {
@@ -391,57 +491,137 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
       void appAlert('请填写姓氏，例如：王');
       return;
     }
-    if (projects.some((p) => p.name === name)) {
+    let latestProjects = projects;
+    try {
+      latestProjects = await api.listProjects();
+      setProjects(latestProjects);
+    } catch {
+      // 使用当前列表继续，后端仍会做最终校验。
+    }
+    if (projectResumeTargetId && !latestProjects.some((p) => p.id === projectResumeTargetId)) {
+      setProjectResumeTargetId(null);
+      setProjectResumeUploadSessionId(null);
+      setProjectUploadSession(null);
+      localStorage.removeItem(PROJECT_UPLOAD_SESSION_KEY);
+      setShowProjectModal(false);
+      void appAlert('原项目已不存在，请重新选择目录并新建项目');
+      return;
+    }
+    if (latestProjects.some((p) => p.name === name) && !projectUploadSession?.projectId && !projectResumeTargetId) {
       void appAlert('已有同名项目，直接点进去新建卷即可');
       return;
     }
     const uploadFiles = pendingProjectFiles;
     const uploadLabel = pendingProjectLabel;
-    const typedRootPath = newProjectRoot.trim();
+    const uploadFingerprint = projectFilesFingerprint(uploadLabel || name, uploadFiles);
+    const uploadSourceKey = projectSourceKey(uploadLabel || name, uploadFiles);
+    const rescanMode = !!projectResumeTargetId;
+    if (uploadFiles.length && !projectResumeTargetId && latestProjects.some((p) => p.sourceKey === uploadSourceKey)) {
+      const existing = latestProjects.find((p) => p.sourceKey === uploadSourceKey);
+      void appAlert(`这个目录已经属于项目「${existing?.name || '已有项目'}」，同一个目录只能创建一个项目`);
+      return;
+    }
     setCreatingProject(true);
     setShowProjectModal(false);
-    setProjectBackgroundStatus({ name, stage: uploadFiles.length ? 'uploading' : 'creating', done: 0, total: uploadFiles.length || undefined });
-    setNewProjectName('');
-    setNewProjectSurname('');
-    setNewProjectRoot('');
-    setPendingProjectFiles([]);
-    setPendingProjectLabel('');
+    setProjectBackgroundStatus({ name, stage: uploadFiles.length && !rescanMode ? 'uploading' : 'creating', done: 0, total: uploadFiles.length || undefined, message: rescanMode ? '正在检查目录中的新增文件…' : undefined });
+    let completionMessage = rescanMode ? '本次无新增文件，重新扫描完成' : '项目已创建，正在刷新列表';
     try {
-      let rootPath = uploadLabel ? undefined : typedRootPath || undefined;
+      let projectId: number | undefined;
       if (uploadFiles.length) {
-        const sess = await api.createUploadSession(uploadLabel || name);
-        let next = 0; let done = 0;
+        let sess = projectUploadSession?.label === (uploadLabel || name) && projectUploadSession.fingerprint === uploadFingerprint
+          ? projectUploadSession
+          : {
+            ...(await api.createUploadSession(
+              uploadLabel || name,
+              uploadFiles.map((entry) => ({ path: entry.relativePath, size: entry.file.size, lastModified: entry.file.lastModified })),
+              uploadSourceKey,
+            )),
+            label: uploadLabel || name,
+            fingerprint: uploadFingerprint,
+          };
+        if (!sess.projectId && projectResumeTargetId) {
+          sess = { ...sess, projectId: projectResumeTargetId };
+        }
+        if (!sess.projectId) {
+          setProjectBackgroundStatus({ name, stage: 'creating', message: '正在建立项目记录…' });
+          const created = await api.createProject({ name, surname, rootPath: sess.dir, autoStart: false });
+          sess = { ...sess, projectId: created.id };
+          await loadProjects();
+          setProjectFilter(created.id);
+        } else {
+          setProjectFilter(sess.projectId);
+        }
+        projectId = sess.projectId;
+        setProjectUploadSession(sess);
+        localStorage.setItem(PROJECT_UPLOAD_SESSION_KEY, JSON.stringify(sess));
+        let next = 0; let done = 0; let addedFileCount = 0;
         setProjectUploadProg({ done: 0, total: uploadFiles.length });
         const worker = async () => {
           while (next < uploadFiles.length) {
             const entry = uploadFiles[next++];
-            setProjectBackgroundStatus({ name, stage: 'uploading', done, total: uploadFiles.length, message: entry.relativePath });
-            await api.uploadImage(sess.id, entry.file, entry.relativePath);
+            setProjectBackgroundStatus({ name, stage: 'uploading', done, total: uploadFiles.length, message: rescanMode ? `检查 ${entry.relativePath}` : entry.relativePath });
+            const result = await api.uploadImage(sess.id, entry.file, entry.relativePath);
+            if (result.uploaded) addedFileCount += 1;
             done += 1;
             setProjectUploadProg({ done, total: uploadFiles.length });
             setProjectBackgroundStatus({ name, stage: 'uploading', done, total: uploadFiles.length });
           }
         };
         await Promise.all([worker(), worker(), worker()]);
-        rootPath = sess.dir;
+        setProjectUploadProg(null);
+        completionMessage = rescanMode
+          ? (addedFileCount ? `本次新增 ${addedFileCount} 张，重新扫描完成` : '本次无新增文件，重新扫描完成')
+          : '项目已创建，正在刷新列表';
+        setProjectBackgroundStatus({ name, stage: 'creating', message: rescanMode ? (addedFileCount ? `本次新增 ${addedFileCount} 张，正在重新扫描…` : '本次无新增文件，正在重新扫描…') : '正在扫描上传文件…' });
+        await api.rescanProject(projectId!, true);
+      } else if (rescanMode) {
+        projectId = projectResumeTargetId!;
+        setProjectBackgroundStatus({ name, stage: 'creating', message: '正在扫描服务器原目录…' });
+        const result = await api.rescanProject(projectId, true);
+        completionMessage = result.addedImages > 0 ? `本次新增 ${result.addedImages} 张，重新扫描完成` : '本次无新增文件，重新扫描完成';
+      } else {
+        setProjectUploadProg(null);
+        setProjectBackgroundStatus({ name, stage: 'creating' });
+        const np = await api.createProject({ name, surname, autoStart: true });
+        projectId = np.id;
       }
-      setProjectUploadProg(null);
-      setProjectBackgroundStatus({ name, stage: 'creating' });
-      const np = await api.createProject({ name, surname, rootPath, autoStart: true });
       await loadProjects();
       await onRefresh?.();
-      setProjectFilter(np.id);
-      setProjectBackgroundStatus({ name, stage: 'done', message: '项目已创建，正在刷新列表' });
+      setProjectFilter(projectId!);
+      setNewProjectName('');
+      setNewProjectSurname('');
+      setNewProjectRoot('');
+      setPendingProjectFiles([]);
+      setPendingProjectLabel('');
+      setProjectUploadSession(null);
+      setProjectResumeTargetId(null);
+      localStorage.removeItem(PROJECT_UPLOAD_SESSION_KEY);
+      setProjectBackgroundStatus({ name, stage: 'done', message: completionMessage });
       window.setTimeout(() => setProjectBackgroundStatus(null), 3000);
     } catch (e: any) {
       setProjectUploadProg(null);
-      setProjectBackgroundStatus({ name, stage: 'error', message: e?.message || '创建项目失败' });
+      const message = e?.message || '创建项目失败';
+      if (/项目不存在/.test(String(message))) {
+        setProjectFilter('all');
+        setProjectUploadSession(null);
+        setProjectResumeTargetId(null);
+        setProjectResumeUploadSessionId(null);
+        localStorage.removeItem(PROJECT_UPLOAD_SESSION_KEY);
+        setProjectBackgroundStatus({ name, stage: 'error', message: '原项目已删除，本次上传未归入项目，请重新选择目录' });
+      } else {
+        setProjectBackgroundStatus({ name, stage: 'error', message });
+      }
     } finally {
       setCreatingProject(false);
     }
   };
 
   const onProjectDirInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (isDesktopShell) {
+      e.target.value = '';
+      void appAlert('桌面版请使用系统目录选择器，不支持浏览器上传。');
+      return;
+    }
     const all = Array.from(e.target.files || []);
     e.target.value = '';
     if (!all.length) return;
@@ -452,23 +632,43 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
         file: f,
         relativePath: String((f as any).webkitRelativePath || f.name).split('/').slice(1).join('/') || f.name,
       }));
+    const sourceKey = projectSourceKey(root, files);
+    const fingerprint = projectFilesFingerprint(root, files);
+    let matchedSession: ProjectUploadSession | null = null;
+    let matchedProjectId: number | null = null;
+    try {
+      const matched = await api.matchProjectSource({ label: root, sourceKey, paths: files.map((f) => f.relativePath) });
+      if (matched?.id) {
+        setNewProjectName(matched.name);
+        setNewProjectSurname(matched.surname || '');
+        setProjectResumeTargetId(matched.id);
+        setProjectResumeUploadSessionId(matched.uploadSessionId || null);
+        matchedProjectId = matched.id;
+        matchedSession = matched.uploadSessionId ? {
+          id: matched.uploadSessionId,
+          dir: '',
+          label: root,
+          fingerprint,
+          projectId: matched.id,
+        } : null;
+      }
+    } catch {
+      // 目录匹配失败不阻止新项目上传，提交时仍由服务端做最终校验。
+    }
     setPendingProjectFiles(files);
     setPendingProjectLabel(root);
+    const savedSession = readProjectUploadSession();
+    const canResume = savedSession && savedSession.label === root && savedSession.fingerprint === fingerprint;
+    const canResumeExistingProject = matchedSession && matchedProjectId === matchedSession.projectId;
+    setProjectUploadSession(matchedSession || (canResume ? savedSession : null));
+    if (!matchedSession && !canResume) localStorage.removeItem(PROJECT_UPLOAD_SESSION_KEY);
     setNewProjectRoot(files.length ? `浏览器目录：${root}（创建时上传）` : '浏览器目录为空（创建时直接建立空项目）');
     if (!newProjectName.trim() && root) setNewProjectName(root);
   };
 
   const pickProjectRoot = async () => {
     if (projectUploadProg) return;
-    // 这里允许浏览器显示批量上传确认，但使用 input 的 onChange 能稳定拿到文件列表。
-    if (projectDirInputRef.current) {
-      projectDirInputRef.current.click();
-      return;
-    }
-    try {
-      const r = await api.pickFolder(newProjectRoot.trim() || undefined);
-      if (r?.path) { setNewProjectRoot(r.path); return; }
-    } catch { /* remote browser falls back to upload */ }
+    // 新建项目统一走浏览器目录上传，服务端只接收文件内容，不读取用户本机路径。
     projectDirInputRef.current?.click();
   };
 
@@ -477,6 +677,13 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     try {
       await api.deleteProject(projectDeleteTarget.id);
       setProjectDeleteTarget(null);
+      if (projectFilter === projectDeleteTarget.id) setProjectFilter('all');
+      if (projectUploadSession?.projectId === projectDeleteTarget.id) {
+        setProjectUploadSession(null);
+        setProjectResumeTargetId(null);
+        setProjectResumeUploadSessionId(null);
+        localStorage.removeItem(PROJECT_UPLOAD_SESSION_KEY);
+      }
       await loadProjects();
       onRefresh?.();
     } catch (e: any) {
@@ -508,11 +715,35 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   const [uploadProg, setUploadProg] = useState<{ done: number; total: number } | null>(null);
   const IMG_RE = /\.(jpe?g|png|bmp|tiff?|webp)$/i;
 
-  /** 把选好的文件夹里的图片逐张上传到服务器，并用服务器上的目录建任务（showDirectoryPicker 和 webkitdirectory 共用） */
+  /** 选择卷目录只保存授权后的文件，真正上传延迟到点击“创建”时。 */
   const uploadFolderFiles = async (dirName: string, files: File[]) => {
+    setPendingVolumeFiles(files);
+    setPendingVolumeLabel(dirName);
+    setPageCountPreview(files.length);
+    if (!taskName.trim() && dirName) setTaskName(dirName);
+  };
+
+  /** 创建卷时上传已授权的一级图片目录，并返回服务器目录。 */
+  const uploadPendingVolumeFiles = async (dirName: string, files: File[]) => {
+    const saved = readSingleUploadSession();
+    const currentProject = typeof projectFilter === 'number'
+      ? projects.find((p) => p.id === projectFilter)
+      : rescanTargetTask?.projectId != null
+        ? projects.find((p) => p.id === Number(rescanTargetTask.projectId))
+        : null;
+    const parentSessionId = currentProject?.uploadSessionId;
+    const fingerprint = `${parentSessionId || ''}|${dirName}|${files.map((f) => `${f.name}:${f.size}:${f.lastModified}`).join('|')}`;
+    const sess = saved?.label === dirName && saved.fingerprint === fingerprint
+      ? saved
+      : await api.createUploadSession(
+        dirName,
+        files.map((f) => ({ path: f.name, size: f.size, lastModified: f.lastModified })),
+        undefined,
+        parentSessionId,
+      ).then((created) => ({ ...created, label: dirName, fingerprint }));
+    localStorage.setItem(SINGLE_UPLOAD_SESSION_KEY, JSON.stringify(sess));
+    setUploadProg({ done: 0, total: files.length });
     try {
-      const sess = await api.createUploadSession(dirName);
-      setUploadProg({ done: 0, total: files.length });
       let next = 0;
       let done = 0;
       const worker = async () => {
@@ -526,9 +757,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
       await Promise.all([worker(), worker(), worker()]);
       setFolderPath(sess.dir);
       setPageCountPreview(files.length);
-      if (!taskName.trim() && dirName) setTaskName(dirName);
-    } catch (e: any) {
-      void appAlert('上传图片失败：' + (e?.message || '请重试'));
+      return sess.dir;
     } finally {
       setUploadProg(null);
     }
@@ -594,7 +823,43 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
 
   const openFolderPicker = async () => {
     if (nativePicking || uploadProg) return;
-    // 保留浏览器文件夹选择方式；不支持时再使用文件夹上传控件。
+    const desktopPicker = (window as any).zupuDesktop?.pickFolder;
+    if (typeof desktopPicker === 'function') {
+      setNativePicking(true);
+      try {
+        const r = await desktopPicker();
+        if (r?.cancelled) return;
+        if (r?.path) {
+          setFolderPath(r.path);
+          setPageCountPreview(0);
+          return;
+        }
+      } catch (e: any) {
+        void appAlert('本地目录选择失败：' + (e?.message || '请重试'));
+      } finally {
+        setNativePicking(false);
+      }
+      return;
+    }
+    // Electron 桌面版优先使用服务端的系统选择器：只传目录路径，不把图片读入浏览器再逐张上传。
+    const isDesktopShell = /Electron/i.test(navigator.userAgent);
+    setNativePicking(true);
+    try {
+      if (isDesktopShell) {
+        const r = await api.pickFolder(folderPath.trim() || undefined);
+        if (r?.path) {
+          setFolderPath(r.path);
+          return;
+        }
+        if (r?.cancelled) return;
+      }
+    } catch {
+      // 桌面选择器不可用时继续走浏览器兼容流程。
+    } finally {
+      setNativePicking(false);
+    }
+
+    // 普通浏览器优先使用目录读取；Electron 仅在本机选择器失败时才回退。
     if (typeof (window as any).showDirectoryPicker !== 'function' && dirInputRef.current) {
       dirInputRef.current.click();
       return;
@@ -607,7 +872,11 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     } finally {
       setNativePicking(false);
     }
-    setNativePicking(true);
+
+    if (isDesktopShell) {
+      // 仅作为最后兜底，避免因系统选择器异常导致无法选择目录。
+      setNativePicking(true);
+    }
     try {
       const r = await api.pickFolder(folderPath.trim() || undefined);
       if (r?.path) {
@@ -649,9 +918,10 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
     })();
   };
 
-  const handleCreateSubmit = async (startAfter = false) => {
+  // 新建卷统一采用“创建并开始处理”，不再让用户在弹窗里选择创建模式。
+  const handleCreateSubmit = async (startAfter = true) => {
     if (!taskName.trim()) {
-      void appAlert('请填写族谱名称');
+      void appAlert('请填写卷名称');
       return;
     }
     if (!genealogyNote.trim()) {
@@ -670,8 +940,8 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
         return;
       }
     }
-    if (!folderPath.trim()) {
-      void appAlert('请填写图片文件夹路径');
+    if (!folderPath.trim() && !pendingVolumeFiles.length) {
+      void appAlert('请先选择卷目录');
       return;
     }
     if (batchCrop && !batchCropConfig) {
@@ -679,15 +949,43 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
       setShowBatchCrop(true);
       return;
     }
+    const volumeName = taskName.trim();
+    const isRescan = !!rescanTargetTask;
+    // 与新建项目一致：校验通过后立即关闭弹窗，右下角卡片展示后台进度与结果。
+    setShowCreateModal(false);
+    setTaskBackgroundStatus({
+      name: volumeName,
+      stage: pendingVolumeFiles.length ? 'uploading' : 'creating',
+      message: isRescan ? '正在重新扫描卷…' : '正在创建卷…',
+    });
     setCreating(true);
     try {
+      const sourceFolder = pendingVolumeFiles.length
+        ? await uploadPendingVolumeFiles(pendingVolumeLabel, pendingVolumeFiles)
+        : folderPath.trim();
+      if (rescanTargetTask) {
+        const result = await api.rescanTask(rescanTargetTask.id, true, sourceFolder);
+        setRescanTargetTask(null);
+        localStorage.removeItem(SINGLE_UPLOAD_SESSION_KEY);
+        setFolderPath('');
+        setPendingVolumeFiles([]);
+        setPendingVolumeLabel('');
+        await onRefresh?.();
+        setTaskBackgroundStatus({
+          name: volumeName,
+          stage: 'done',
+          message: result.addedImages ? `重新扫描完成，新增 ${result.addedImages} 张图片` : '重新扫描完成，没有发现新增图片',
+        });
+        window.setTimeout(() => setTaskBackgroundStatus((cur) => (cur?.stage === 'done' ? null : cur)), 3000);
+        return;
+      }
       const projectId: number | null = typeof projectFilter === 'number' ? projectFilter : null;
       const proj = projectId != null ? projects.find((p) => p.id === projectId) : null;
       const surnameFinal = proj ? proj.surname || genealogyNote.trim() : genealogyNote.trim();
       const created = await onCreateTask(
         {
           name: taskName.trim(),
-          folderPath: folderPath.trim(),
+          folderPath: sourceFolder,
           description: taskDescription.trim() || '旧族谱复印页图片处理（去污去褶皱、白底黑字），供后续 OCR 识别与数据化',
           genealogyNote: surnameFinal,
           surname: surnameFinal,
@@ -708,52 +1006,94 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
         [],
         false
       );
+      localStorage.removeItem(SINGLE_UPLOAD_SESSION_KEY);
       setShowCreateModal(false);
+      setRescanTargetTask(null);
       if (startAfter && created?.id != null) onStartProcessing(String(created.id));
       void loadProjects();
       setTaskName('');
       setGenealogyNote('');
       setFolderPath('');
+      setPendingVolumeFiles([]);
+      setPendingVolumeLabel('');
       setUseAiRecognition(false);
       setUseAiClean(false);
       setBatchCrop(false);
       setImageProcessingEnabled(true);
       setBatchCropConfig(null);
+      setTaskBackgroundStatus({ name: volumeName, stage: 'done', message: '卷已创建，正在后台处理图片' });
+      window.setTimeout(() => setTaskBackgroundStatus((cur) => (cur?.stage === 'done' ? null : cur)), 3000);
     } catch (e: any) {
-      void appAlert(e?.message || '创建任务失败');
+      setTaskBackgroundStatus({ name: volumeName, stage: 'error', message: e?.message || (isRescan ? '重新扫描失败' : '创建卷失败') });
     } finally {
       setCreating(false);
     }
   };
 
 
-  const handleDownloadTaskZip = (task: Task, filter: 'all' | 'passed' | 'failed' = 'all') => {
-    setDownloadingTaskId(task.id);
-    setDownloadProgress(30);
-    const label = filter === 'passed' ? '已通过' : filter === 'failed' ? '未通过' : '全部';
-    setDownloadStatusText(`正在请求${label}净图 ZIP…`);
-    window.open(downloadUrl(task.id, filter), '_blank');
-    setDownloadProgress(100);
-    setDownloadStatusText('已开始下载');
-    setTimeout(() => {
-      setDownloadingTaskId(null);
-      setDownloadProgress(0);
-      setDownloadStatusText('');
-    }, 1200);
+  const downloadZipFile = async (url: string, fallbackName: string) => {
+    // 直接交给浏览器下载，避免 fetch/blob 先把整个线上 ZIP 下载完才开始保存。
+    // 对几十到上百 MB 的结果包，这会显著降低首字节等待和前端内存占用。
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = fallbackName;
+    anchor.rel = 'noopener';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
   };
 
-  const handleDownloadProjectZip = (projectId: number) => {
-    setDownloadingTaskId(`project-${projectId}`);
-    setDownloadProgress(30);
-    setDownloadStatusText('正在请求项目结果 ZIP…');
-    window.open(projectDownloadUrl(projectId), '_blank');
+  const handleDownloadTaskZip = async (task: Task, filter: 'all' | 'passed' | 'failed' = 'all') => {
+    setDownloadingTaskId(task.id);
     setDownloadProgress(100);
-    setDownloadStatusText('已开始下载');
-    setTimeout(() => {
+    const label = filter === 'passed' ? '已通过' : filter === 'failed' ? '未通过' : '全部';
+    setDownloadStatusText(`已发起${label}结果图 ZIP 下载，浏览器正在接收文件…`);
+    try {
+      await downloadZipFile(downloadUrl(task.id, filter), `${task.name || `task-${task.id}`}.zip`);
+      setDownloadProgress(100);
+      setDownloadStatusText('已开始下载');
+    } catch (e: any) {
+      void appAlert(e?.message || '导出失败');
+    } finally {
+      setTimeout(() => {
       setDownloadingTaskId(null);
       setDownloadProgress(0);
       setDownloadStatusText('');
-    }, 1200);
+      }, 1200);
+    }
+  };
+
+  const handleDownloadProjectZip = async (projectId: number) => {
+    setDownloadingTaskId(`project-${projectId}`);
+    setDownloadProgress(100);
+    setDownloadStatusText('已发起项目结果图 ZIP 下载，浏览器正在接收文件…');
+    try {
+      const projectName = projects.find((project) => project.id === projectId)?.name || `project-${projectId}`;
+      await downloadZipFile(projectDownloadUrl(projectId), `${projectName}.zip`);
+      setDownloadProgress(100);
+      setDownloadStatusText('已开始下载');
+    } catch (e: any) {
+      void appAlert(e?.message || '导出失败');
+    } finally {
+      setTimeout(() => {
+      setDownloadingTaskId(null);
+      setDownloadProgress(0);
+      setDownloadStatusText('');
+      }, 1200);
+    }
+  };
+
+  const openProjectRescan = (project: ProjectRow) => {
+    const saved = readProjectUploadSession();
+    setNewProjectName(project.name);
+    setNewProjectSurname(project.surname || '');
+    setNewProjectRoot('请选择原目录以重新授权扫描');
+    setPendingProjectFiles([]);
+    setPendingProjectLabel('');
+    setProjectUploadSession(saved?.projectId === project.id ? saved : project.uploadSessionId ? { id: project.uploadSessionId, dir: '', label: '', fingerprint: '', projectId: project.id } : null);
+    setProjectResumeTargetId(project.id);
+    setProjectResumeUploadSessionId(project.uploadSessionId || saved?.id || null);
+    setShowProjectModal(true);
   };
 
   return (
@@ -799,12 +1139,13 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                 {typeof projectFilter === 'number' && (
                   <button
                     type="button"
-                    onClick={() => handleDownloadProjectZip(projectFilter)}
-                    className="flex items-center gap-1.5 h-10 px-4 bg-white border border-[#0071E3]/25 text-[#0071E3] text-sm font-semibold rounded-xl hover:bg-[#E8F1FC] transition-all cursor-pointer whitespace-nowrap shrink-0"
-                    title="导出当前项目全部结果"
+                    onClick={() => { if (!projectExportBusy) void handleDownloadProjectZip(projectFilter); }}
+                    disabled={projectExportBusy}
+                    className="flex items-center gap-1.5 h-10 px-4 bg-white border border-[#0071E3]/25 text-[#0071E3] text-sm font-semibold rounded-xl hover:bg-[#E8F1FC] transition-all cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-white"
+                    title={projectExportBusy ? '项目处理中，全部卷处理完成后才能导出' : '导出当前项目全部结果图，按卷保留目录结构'}
                   >
                     <Download className="w-4 h-4" />
-                    <span>导出全部</span>
+                    <span>{projectExportBusy ? '处理中不可导出' : '导出项目'}</span>
                   </button>
                 )}
                 {onRefresh && (
@@ -818,6 +1159,15 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                     {loading ? '刷新中…' : '刷新'}
                   </button>
                 )}
+                {typeof projectFilter === 'number' && curProject?.canRescan && (
+                  <button
+                    type="button"
+                    onClick={() => openProjectRescan(curProject)}
+                    className="h-10 px-4 text-sm font-semibold bg-white border border-[#0071E3]/25 text-[#0071E3] rounded-xl hover:bg-[#E8F1FC] cursor-pointer whitespace-nowrap"
+                  >
+                    重新扫描
+                  </button>
+                )}
                 {!inProject ? (
                   <button
                     onClick={() => {
@@ -826,6 +1176,9 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                       setNewProjectRoot('');
                       setPendingProjectFiles([]);
                       setPendingProjectLabel('');
+                      setProjectUploadSession(null);
+                      setProjectResumeTargetId(null);
+                      setProjectResumeUploadSessionId(null);
                       setShowProjectModal(true);
                     }}
                     className="flex items-center gap-1.5 h-10 px-5 bg-[#0071E3] hover:bg-[#0077ED] active:scale-[0.98] text-white text-sm font-semibold rounded-xl shadow-[0_2px_8px_rgba(0,113,227,0.25)] transition-all cursor-pointer whitespace-nowrap shrink-0"
@@ -856,6 +1209,9 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
             setNewProjectRoot('');
             setPendingProjectFiles([]);
             setPendingProjectLabel('');
+            setProjectUploadSession(null);
+            setProjectResumeTargetId(null);
+            setProjectResumeUploadSessionId(null);
             setShowProjectModal(true);
           };
           return (
@@ -909,6 +1265,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
                   {paginatedProjects.map((p) => {
+                    const foreignLocalProject = !!p.localOnly && !isDesktopShell;
                     const vols = Math.max(1, p.volumeCount);
                     const segs = [
                       { n: p.completed, c: '#34C759' },
@@ -919,10 +1276,10 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                       <div
                         key={p.id}
                         role="button"
-                        tabIndex={0}
-                        onClick={() => setProjectFilter(p.id)}
-                        onKeyDown={(e) => e.key === 'Enter' && setProjectFilter(p.id)}
-                        className="group relative bg-white rounded-3xl border border-black/[0.05] shadow-[0_2px_10px_rgba(0,0,0,0.04)] hover:shadow-[0_14px_36px_rgba(0,0,0,0.10)] hover:-translate-y-0.5 hover:border-[#0071E3]/30 p-6 transition-all duration-200 cursor-pointer"
+                        tabIndex={foreignLocalProject ? -1 : 0}
+                        onClick={() => { if (!foreignLocalProject) setProjectFilter(p.id); }}
+                        onKeyDown={(e) => e.key === 'Enter' && !foreignLocalProject && setProjectFilter(p.id)}
+                        className={`group relative bg-white rounded-3xl border border-black/[0.05] shadow-[0_2px_10px_rgba(0,0,0,0.04)] p-6 transition-all duration-200 ${foreignLocalProject ? 'opacity-70 cursor-not-allowed' : 'hover:shadow-[0_14px_36px_rgba(0,0,0,0.10)] hover:-translate-y-0.5 hover:border-[#0071E3]/30 cursor-pointer'}`}
                       >
                         <div className="flex items-center gap-3.5">
                           <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-[#4DA3FF] to-[#0071E3] text-white text-xl font-bold flex items-center justify-center shadow-[0_6px_14px_rgba(0,113,227,0.25)] shrink-0">
@@ -933,6 +1290,9 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                             <div className="text-xs text-[#86868B] mt-0.5">
                               {p.volumeCount === 0 ? '还没有卷' : `${p.volumeCount} 卷 · 共 ${p.totalPages} 页`}
                             </div>
+                            {foreignLocalProject && <div className="text-xs text-[#FF9500] mt-1">桌面本地任务，仅限创建设备打开</div>}
+                            {p.importStatus === 'uploading' && <div className="text-xs text-[#FF9500] mt-1">上传未完成 {p.uploadedFileCount || 0}/{p.expectedFileCount || 0} 个文件</div>}
+                            {p.importStatus === 'scan_pending' && <div className="text-xs text-[#0071E3] mt-1">文件已上传，等待重新扫描</div>}
                           </div>
                           <button
                             type="button"
@@ -977,7 +1337,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         </div>
 
                         <div className="mt-4 pt-3.5 border-t border-black/[0.05] flex items-center justify-between text-[13px] font-semibold text-[#0071E3]">
-                          <span>进入项目</span>
+                          <span>{foreignLocalProject ? '当前网页不可打开' : '进入项目'}</span>
                           <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-1" />
                         </div>
                       </div>
@@ -1184,6 +1544,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
               const isNestProcessing = task.nestStatus === 'processing';
               const isQueued = task.nestStatus === 'queued';
               const isLocalProcessing = processingTaskId === task.id;
+              const foreignLocalTask = task.clientType === 'desktop' && !isDesktopShell;
               const isProcessing = isNestProcessing || isLocalProcessing;
               // Prefer live API counts; fall back to App prop for the locally started task
               const processPct = isProcessing
@@ -1230,7 +1591,11 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                             {projects.find((p) => p.id === task.projectId)?.name}
                           </span>
                         ) : null}
-                        {isProcessing ? (
+                        {foreignLocalTask ? (
+                          <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#FF9500]/12 text-[#FF9500]">
+                            仅限创建设备
+                          </span>
+                        ) : isProcessing ? (
                           <span className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#0071E3]/10 text-[#0071E3]">
                             <Sparkles className="w-3 h-3 animate-spin" />
                             处理中
@@ -1270,12 +1635,6 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         >
                           {task.useAiClean ? '大模型处理' : '算法处理'}
                         </span>
-                        {task.actualCost ? (
-                          <>
-                            <span className="text-black/15">·</span>
-                            <span className="tabular-nums">{isProcessing ? '已花费' : '费用'} ¥{task.actualCost.toFixed(2)}</span>
-                          </>
-                        ) : null}
                         {isProcessing ? (
                           <>
                             <span className="text-black/15">·</span>
@@ -1328,7 +1687,18 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                   </div>
 
                   <div className="flex items-center justify-end gap-4 shrink-0 md:pl-2">
-                    {(task.status === 'pending' || task.nestStatus === 'failed') && !isProcessing && !isQueued && (
+                    {!foreignLocalTask && !isProcessing && !isQueued && (
+                      <button
+                        type="button"
+                        onClick={() => openRescanModal(task)}
+                        className="h-10 px-4 text-sm font-semibold rounded-full bg-white hover:bg-[#F5F5F7] border border-black/[0.10] text-[#6E6E73] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
+                        title="重新选择原目录并扫描新增图片"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>重新扫描</span>
+                      </button>
+                    )}
+                    {!foreignLocalTask && (task.status === 'pending' || task.nestStatus === 'failed') && !isProcessing && !isQueued && (
                       <button
                         onClick={() => onStartProcessing(task.id)}
                         className="h-10 px-5 text-sm font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
@@ -1338,7 +1708,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                       </button>
                     )}
 
-                    {isQueued && (
+                    {!foreignLocalTask && isQueued && (
                       <button
                         disabled
                         className="h-10 px-5 text-sm font-semibold rounded-full bg-[#F5F5F7] text-[#86868B] cursor-not-allowed flex items-center justify-center gap-1.5"
@@ -1348,7 +1718,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                       </button>
                     )}
 
-                    {isProcessing && (task.status === 'pending' || task.nestStatus === 'processing' || task.nestStatus === 'failed') && (
+                    {!foreignLocalTask && isProcessing && (task.status === 'pending' || task.nestStatus === 'processing' || task.nestStatus === 'failed') && (
                       <button
                         disabled
                         className="h-10 px-5 text-sm font-semibold rounded-full bg-[#E8F1FC] text-[#0071E3] cursor-not-allowed flex items-center justify-center gap-1.5"
@@ -1358,7 +1728,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                       </button>
                     )}
 
-                    {task.status === 'completed' && (
+                    {!foreignLocalTask && task.status === 'completed' && (
                       <>
                         <button
                           onClick={() => onOpenReview(task.id)}
@@ -1371,7 +1741,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         <button
                           onClick={() => handleDownloadTaskZip(task, 'all')}
                           className="h-10 px-4 text-sm font-semibold rounded-full bg-white hover:bg-[#E8F1FC] border border-[#0071E3]/30 text-[#0071E3] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
-                          title="导出本卷当前选中的结果"
+                          title="导出本卷结果图列表中的全部图片"
                         >
                           <Download className="w-3.5 h-3.5" />
                           <span>导出本卷</span>
@@ -1470,6 +1840,15 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                     ? '正在创建项目并整理目录…'
                     : projectBackgroundStatus.message || (projectBackgroundStatus.stage === 'done' ? '已完成' : '创建失败')}
               </div>
+              {projectBackgroundStatus.stage === 'error' ? (
+                <button
+                  type="button"
+                  onClick={() => { setProjectBackgroundStatus(null); setShowProjectModal(true); }}
+                  className="mt-2 text-xs font-semibold text-[#0071E3] hover:underline"
+                >
+                  重新上传并继续
+                </button>
+              ) : null}
               {projectBackgroundStatus.stage === 'uploading' ? (
                 <>
                   {projectBackgroundStatus.message ? <div className="mt-1 truncate text-[11px] text-[#86868B]">{projectBackgroundStatus.message}</div> : null}
@@ -1483,11 +1862,43 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
         </div>
       ) : null}
 
+      {taskBackgroundStatus ? (
+        <div className={`fixed right-6 z-[85] w-[360px] rounded-2xl border border-black/[0.08] bg-white/95 p-4 shadow-[0_16px_48px_rgba(0,0,0,0.16)] backdrop-blur-xl animate-apple-in ${projectBackgroundStatus ? 'bottom-28' : 'bottom-6'}`}>
+          <div className="flex items-start gap-3">
+            <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-base ${taskBackgroundStatus.stage === 'error' ? 'bg-[#FF3B30]/12 text-[#C62828]' : taskBackgroundStatus.stage === 'done' ? 'bg-[#34C759]/12 text-[#248A3D]' : 'bg-[#0071E3]/12 text-[#0071E3]'}`}>
+              {taskBackgroundStatus.stage === 'error' ? '!' : taskBackgroundStatus.stage === 'done' ? '✓' : '↥'}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-semibold text-[#1D1D1F]">{taskBackgroundStatus.name}</div>
+              <div className="mt-1 text-xs leading-relaxed text-[#6E6E73]">
+                {taskBackgroundStatus.stage === 'uploading'
+                  ? `正在上传文件 ${uploadProg?.done || 0}/${uploadProg?.total || 0}`
+                  : taskBackgroundStatus.message || (taskBackgroundStatus.stage === 'done' ? '已完成' : '操作失败')}
+              </div>
+              {taskBackgroundStatus.stage === 'error' ? (
+                <button
+                  type="button"
+                  onClick={() => { setTaskBackgroundStatus(null); setShowCreateModal(true); }}
+                  className="mt-2 text-xs font-semibold text-[#0071E3] hover:underline"
+                >
+                  重新打开并继续
+                </button>
+              ) : null}
+              {taskBackgroundStatus.stage === 'uploading' ? (
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[#E5E5EA]">
+                  <div className="h-full rounded-full bg-[#0071E3] transition-[width]" style={{ width: `${Math.round(((uploadProg?.done || 0) / (uploadProg?.total || 1)) * 100)}%` }} />
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {/* 新建项目 */}
       {showProjectModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm animate-fade-in">
           <div className="bg-white rounded-3xl border border-black/[0.08] shadow-[0_24px_64px_rgba(0,0,0,0.18)] max-w-[440px] w-full p-6 animate-apple-in">
-            <h3 className="text-base font-bold text-[#1D1D1F]">新建项目</h3>
+            <h3 className="text-base font-bold text-[#1D1D1F]">{projectResumeTargetId ? '重新扫描项目' : '新建项目'}</h3>
             <div className="grid grid-cols-[1fr_120px] gap-3 mt-4">
               <div>
                 <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">
@@ -1497,9 +1908,10 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                   type="text"
                   autoFocus
                   value={newProjectName}
+                  disabled={!!projectResumeTargetId}
                   onChange={(e) => setNewProjectName(e.target.value)}
                   placeholder="例如：王氏族谱"
-                  className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
+                  className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium disabled:opacity-60"
                 />
               </div>
               <div>
@@ -1509,10 +1921,11 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                 <input
                   type="text"
                   value={newProjectSurname}
+                  disabled={!!projectResumeTargetId}
                   onChange={(e) => setNewProjectSurname(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && !creatingProject && void submitNewProject()}
                   placeholder="例如：王"
-                  className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
+                  className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium disabled:opacity-60"
                 />
               </div>
             </div>
@@ -1522,12 +1935,13 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                 <input
                   type="text"
                   value={newProjectRoot}
-                  onChange={(e) => setNewProjectRoot(e.target.value)}
-                  placeholder="选择后自动按一级子目录创建卷"
-                  className="min-w-0 flex-1 px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
+                  readOnly
+                  placeholder="选择后上传到服务器，并按一级子目录创建卷"
+                  className="min-w-0 flex-1 px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl font-medium"
                 />
                 <button type="button" onClick={() => void pickProjectRoot()} disabled={!!projectUploadProg} className="shrink-0 px-3 rounded-xl bg-[#F5F5F7] border border-black/[0.06] text-xs font-semibold hover:bg-[#E5E5EA] disabled:opacity-50">{projectUploadProg ? `上传 ${projectUploadProg.done}/${projectUploadProg.total}` : '选择目录'}</button>
               </div>
+              <p className="text-[11px] text-[#86868B] mt-1.5">网页端只上传你选中的图片内容，不读取或保存本机路径；网络中断后会从已上传位置继续。</p>
               <input ref={projectDirInputRef} type="file" className="hidden" {...({ webkitdirectory: '', directory: '' } as any)} multiple onChange={(e) => void onProjectDirInputChange(e)} />
             </div>
             <div className="flex justify-end gap-2 mt-5">
@@ -1542,7 +1956,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                 onClick={() => void submitNewProject()}
                 className="h-10 px-5 text-sm font-semibold bg-[#0071E3] hover:bg-[#0077ED] disabled:opacity-60 text-white rounded-xl cursor-pointer"
               >
-                {creatingProject ? '创建中…' : '创建并进入'}
+                {creatingProject ? '处理中…' : projectResumeTargetId ? '重新扫描' : '创建并进入'}
               </button>
             </div>
           </div>
@@ -1556,8 +1970,8 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
             <h3 className="text-base font-bold text-[#1D1D1F]">删除项目「{projectDeleteTarget.name}」？</h3>
             <p className="text-xs text-[#86868B] mt-2 leading-relaxed">
               {projectDeleteTarget.volumeCount > 0
-                ? `会同时删除项目下的 ${projectDeleteTarget.volumeCount} 卷及其处理结果、对应的 OCR 项目，无法恢复。`
-                : '这个项目下还没有卷。'}
+                ? `会同时删除项目下的 ${projectDeleteTarget.volumeCount} 卷、全部上传图片、处理结果及对应的 OCR 项目，无法恢复。`
+                : '这个项目下还没有卷；如果存在未完成上传，也会一并清理。'}
             </p>
             <div className="flex justify-end gap-2 mt-5">
               <button
@@ -1584,14 +1998,14 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
             <div className="flex items-start justify-between px-6 pt-5 pb-4 border-b border-black/[0.06] shrink-0">
               <div>
                 <h3 className="text-base font-bold text-[#1D1D1F]">
-                  新建卷
+                  {rescanTargetTask ? '重新扫描卷' : '新建卷'}
                   {typeof projectFilter === 'number' && projects.find((p) => p.id === projectFilter) ? (
                     <span className="ml-2 px-2 py-0.5 rounded-full text-[12px] font-semibold bg-[#0071E3]/10 text-[#0071E3]">
                       {projects.find((p) => p.id === projectFilter)?.name}
                     </span>
                   ) : null}
                 </h3>
-                <p className="text-xs text-[#86868B] mt-0.5">一卷对应一个图片文件夹：选好文件夹后创建，系统会自动在后台开始处理</p>
+                <p className="text-xs text-[#86868B] mt-0.5">{rescanTargetTask ? '重新选择原卷目录并授权，系统只补充未存在的图片' : '一卷对应一个图片文件夹：选好文件夹后创建，系统会自动在后台开始处理'}</p>
               </div>
               <button
                 onClick={() => setShowCreateModal(false)}
@@ -1658,6 +2072,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                       type="text"
                       value={taskName}
                       onChange={(e) => setTaskName(e.target.value)}
+                      readOnly={!!rescanTargetTask}
                       placeholder="例如：卷1"
                       autoFocus
                       className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium"
@@ -1670,10 +2085,10 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                     <div className="flex items-center gap-2">
                       <input
                         type="text"
-                        value={folderPath}
-                        onChange={(e) => setFolderPath(e.target.value)}
-                        placeholder="粘贴或输入服务器上的文件夹路径"
-                        className="flex-1 min-w-0 px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-mono text-[#1D1D1F]"
+                        value={pendingVolumeFiles.length ? `本机目录：${pendingVolumeLabel}（${rescanTargetTask ? '重新扫描时上传' : '创建时上传'}）` : folderPath}
+                        readOnly
+                        placeholder={rescanTargetTask ? '请选择原卷目录重新授权' : '选择本机卷目录后上传到服务器'}
+                        className="flex-1 min-w-0 px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:outline-none font-mono text-[#1D1D1F] cursor-default"
                       />
                       <input
                         ref={dirInputRef}
@@ -1685,7 +2100,10 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                       />
                       <button
                         type="button"
-                        onClick={() => void openFolderPicker()}
+                        // 新建卷与项目入口统一走浏览器目录上传；卷目录下只读取一级图片。
+                        onClick={() => {
+                          if (!uploadProg && !nativePicking) dirInputRef.current?.click();
+                        }}
                         className="px-3 py-2.5 text-xs font-semibold bg-[#E5E5EA] hover:bg-[#D1D1D6] text-[#1D1D1F] rounded-xl cursor-pointer whitespace-nowrap flex items-center gap-1.5"
                       >
                         <Folder className="w-3.5 h-3.5" />
@@ -1697,26 +2115,12 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         ? '正在统计图片张数…'
                         : pageCountPreview
                           ? `文件夹里共 ${pageCountPreview} 张图片`
-                          : folderPath.trim()
-                            ? '这个文件夹里没有找到图片（支持 jpg / png / tif / bmp / webp）'
-                            : '可直接粘贴路径，或点「选择目录」；会自动统计图片张数'}
+                          : pendingVolumeFiles.length
+                            ? `目录已授权，点击“${rescanTargetTask ? '重新扫描' : '创建并开始处理'}”后上传`
+                            : folderPath.trim()
+                              ? '这个文件夹里没有找到图片（支持 jpg / png / tif / bmp / webp）'
+                              : '选择本机目录后会自动上传；只读取该目录下的图片，不读取子目录'}
                     </p>
-                  </div>
-                  <div>
-                    <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">任务说明</label>
-                    <textarea
-                      value={taskDescription}
-                      onChange={(e) => setTaskDescription(e.target.value)}
-                      rows={4}
-                      className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F7] border border-black/[0.06] rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0071E3]/20 focus:border-[#0071E3] font-medium resize-y leading-relaxed"
-                    />
-                  </div>
-                  <div className="rounded-xl border border-black/[0.06] bg-[#F5F5F7] px-3.5 py-3">
-                    <label className="flex items-center gap-2 text-[13px] font-semibold text-[#1D1D1F] cursor-pointer">
-                      <input type="checkbox" checked={imageProcessingEnabled} onChange={(e) => setImageProcessingEnabled(e.target.checked)} className="w-4 h-4 rounded text-[#0071E3] cursor-pointer" />
-                      启用图像增强（去污、去黄、黑白阈值）
-                    </label>
-                    <p className="text-[11px] text-[#86868B] mt-1 ml-6">关闭后仍会按裁剪与四点透视校正输出，但保留原图的颜色、纸张与字迹效果。</p>
                   </div>
                 </div>
 
@@ -1732,7 +2136,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                     共 <b className="text-[#1D1D1F] tabular-nums">{pageCountPreview}</b> 张图片 · 算法处理，免费
                   </>
                 ) : (
-                  '填好卷名称和图片文件夹即可创建'
+                  rescanTargetTask ? '选择原目录后点击重新扫描' : '选择目录后点击创建并开始处理'
                 )}
               </div>
               <button
@@ -1745,19 +2149,11 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
               <button
                 type="button"
                 disabled={creating}
-                onClick={() => handleCreateSubmit(false)}
-                className="h-10 px-4 text-sm font-semibold bg-white border border-black/[0.1] hover:bg-[#F5F5F7] text-[#1D1D1F] rounded-xl cursor-pointer disabled:opacity-60"
-              >
-                仅创建
-              </button>
-              <button
-                type="button"
-                disabled={creating}
                 onClick={() => handleCreateSubmit(true)}
                 className="h-10 px-5 text-sm font-semibold bg-[#0071E3] hover:bg-[#0077ED] text-white rounded-xl shadow-[0_2px_8px_rgba(0,113,227,0.25)] cursor-pointer flex items-center gap-1.5 active:scale-[0.98] disabled:opacity-60"
               >
                 <Play className="w-3.5 h-3.5 fill-current" />
-                <span>{creating ? '创建中…' : '创建并开始处理'}</span>
+                <span>{creating ? (rescanTargetTask ? '扫描中…' : '创建中…') : (rescanTargetTask ? '重新扫描' : '创建并开始处理')}</span>
               </button>
             </div>
           </div>
@@ -1888,7 +2284,7 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                   确认删除此任务
                 </h3>
                 <p className="text-[12px] text-[#86868B] mt-1 leading-relaxed">
-                  「{deleteTarget.name}」将被永久删除，处理结果一并清除。原图文件夹不会被删除。
+                  「{deleteTarget.name}」将被永久删除，处理结果和服务器上的原图文件夹也会一并清除，无法恢复。
                 </p>
               </div>
             </div>

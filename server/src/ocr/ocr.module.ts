@@ -5,12 +5,13 @@ import { OcrPage } from './ocr-page.entity';
 import { Project } from '../tasks/project.entity';
 import { Task } from '../tasks/task.entity';
 import { TaskImage } from '../tasks/task-image.entity';
+import { User } from '../users/user.entity';
 import { OcrService } from './ocr.service';
 import { OcrController } from './ocr.controller';
 import { SettingsModule } from '../settings/settings.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([OcrTask, OcrPage, Task, TaskImage, Project]), SettingsModule],
+  imports: [TypeOrmModule.forFeature([OcrTask, OcrPage, Task, TaskImage, Project, User]), SettingsModule],
   providers: [OcrService],
   controllers: [OcrController],
 })

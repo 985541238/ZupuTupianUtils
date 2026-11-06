@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Task, ScanItem, ProcessParams, CropRect } from '../types';
-import { api, previewImageBlob, previewFastBlob } from '../api/client';
+import { api, previewImageBlob, previewFastBlob, viewThumbUrl } from '../api/client';
 import { buildPreviewBody, nestCropToUi, PROCESS_MODES, modeParams, matchMode } from '../api/params';
 import { PerspectiveDialog } from './PerspectiveDialog';
 import { BatchCropDialog, BatchCropConfig } from './BatchCropDialog';
@@ -32,6 +32,7 @@ import {
   AlertTriangle,
   AlertCircle,
   Trash2,
+  Upload,
 } from 'lucide-react';
 
 interface ReviewWorkbenchProps {
@@ -72,6 +73,32 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   const [currentStats, setCurrentStats] = useState(task.items[currentPageIndex]?.stats);
 
   const currentItem = task.items[currentPageIndex] || task.items[0];
+  // 裁剪/分页生成的派生页本身就是结果，只出现在结果图列表。
+  const resultItems = task.items.filter((item) => item.processedUrl);
+  const currentResultIndex = resultItems.findIndex((item) => item.id === currentItem?.id);
+  const THUMB_PAGE_SIZE = 40;
+  const [thumbnailPage, setThumbnailPage] = useState(0);
+
+  const thumbnailItems = resultItems;
+  const thumbnailPageCount = Math.max(1, Math.ceil(thumbnailItems.length / THUMB_PAGE_SIZE));
+  const thumbnailPageItems = thumbnailItems.slice(
+    thumbnailPage * THUMB_PAGE_SIZE,
+    (thumbnailPage + 1) * THUMB_PAGE_SIZE,
+  );
+
+  useEffect(() => {
+    if (resultItems.length && currentResultIndex < 0) {
+      setCurrentPageIndex(task.items.indexOf(resultItems[0]));
+    }
+  }, [currentResultIndex, resultItems.length, task.items]);
+
+  useEffect(() => {
+    const position = thumbnailItems.findIndex((item) => item.id === currentItem?.id);
+    if (position >= 0) {
+      const nextPage = Math.floor(position / THUMB_PAGE_SIZE);
+      setThumbnailPage((page) => page === nextPage ? page : nextPage);
+    }
+  }, [currentItem?.id, thumbnailItems.length]);
 
   useEffect(() => {
     setPanOffset({ x: 0, y: 0 });
@@ -140,7 +167,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   const [aiResultOpen, setAiResultOpen] = useState(false);
   const [aiResultText, setAiResultText] = useState('');
   const [aiResultMeta, setAiResultMeta] = useState('');
-  const [rightPanelTab, setRightPanelTab] = useState<'params' | 'aiClean'>('params');
+  const [rightPanelTab] = useState<'params' | 'aiClean'>('aiClean');
   const [cleanModels, setCleanModels] = useState<any[]>([]);
   const [selectedCleanModelId, setSelectedCleanModelId] = useState<number | null>(null);
   /** 每个图片处理模型处理一页大约多少钱（元），下拉里直接比较 */
@@ -148,6 +175,8 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   /** 每页最近一次大模型处理结果的提示/原因：留在面板里，不是弹一下就没了 */
   const [aiNotes, setAiNotes] = useState<Record<string, { type: 'warning' | 'error'; text: string } | string>>({});
   const [aiProcessBusy, setAiProcessBusy] = useState(false);
+  const [supplementBusy, setSupplementBusy] = useState(false);
+  const supplementInputRef = useRef<HTMLInputElement>(null);
   /** 正在后台用大模型处理的页（可同时处理多页，处理期间可翻页） */
   const [aiBusyIds, setAiBusyIds] = useState<string[]>([]);
   const curAiBusy = !!currentItem && aiBusyIds.includes(currentItem.id);
@@ -813,6 +842,78 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
     window.setTimeout(poll, 2000);
   };
 
+  const handleSupplementUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file || supplementBusy) return;
+    if (!file.type.startsWith('image/')) {
+      void appAlert('请选择图片文件');
+      return;
+    }
+    setSupplementBusy(true);
+    try {
+      const session = await api.createUploadSession('补图', [{ path: file.name, size: file.size, lastModified: file.lastModified }]);
+      await api.uploadImage(session.id, file, file.name);
+      const raw = await api.appendTaskImage(task.id, session.id, file.name);
+      const imageId = String(raw.id);
+      await api.reprocessImage(task.id, imageId, {});
+      const refreshed = await onReloadTask?.();
+      const nextIndex = refreshed?.items?.findIndex((item: ScanItem) => item.id === imageId) ?? -1;
+      if (nextIndex >= 0) setCurrentPageIndex(nextIndex);
+      setCompareMode('side-by-side');
+      triggerToast('图片已上传并完成算法处理');
+      setSupplementBusy(false);
+    } catch (error: any) {
+      setSupplementBusy(false);
+      void appAlert(error?.message || '补图上传失败');
+    }
+  };
+
+  const handleReplaceOriginal = async (event: React.ChangeEvent<HTMLInputElement>, targetItem: ScanItem) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file || supplementBusy) return;
+    if (targetItem.splitSourceKey) {
+      void appAlert('裁剪或分页产生的派生页不能替换原图，请选择对应的原始页');
+      return;
+    }
+    if (!file.type.startsWith('image/')) {
+      void appAlert('请选择图片文件');
+      return;
+    }
+    setSupplementBusy(true);
+    try {
+      const session = await api.createUploadSession('替换原图', [{ path: file.name, size: file.size, lastModified: file.lastModified }]);
+      await api.uploadImage(session.id, file, file.name);
+      await api.replaceTaskImage(task.id, targetItem.id, session.id, file.name);
+      await api.reprocessImage(task.id, targetItem.id, {});
+      const refreshed = await onReloadTask?.();
+      const nextIndex = refreshed?.items?.findIndex((item: ScanItem) => item.id === targetItem.id) ?? -1;
+      if (nextIndex >= 0) setCurrentPageIndex(nextIndex);
+      pageSessionRef.current.delete(String(targetItem.id));
+      pageUrlCacheRef.current.delete(String(targetItem.id));
+      // 替换后旧图和旧结果都已作废：必须清掉跨翻页保留的预览/结果/裁剪状态，
+      // 否则右侧会一直停留在旧算法结果（页面同步 effect 在同 ID 同索引下不会重跑）。
+      const fresh = refreshed?.items?.find((item: ScanItem) => item.id === targetItem.id) || null;
+      const nextSrc = fresh?.processedUrl || fresh?.originalUrl || '';
+      previewUrlRef.current = '';
+      previewDataUrlRef.current = '';
+      setPreviewDataUrl(nextSrc);
+      setDisplayResultSrc(nextSrc);
+      confirmedCropRef.current = null;
+      setConfirmedCrop(null);
+      setDraftCrop(null);
+      if (fresh?.params) setLocalParams({ ...fresh.params });
+      syncedPageIdRef.current = null;
+      setCompareMode('side-by-side');
+      triggerToast('原图已替换并重新处理');
+    } catch (error: any) {
+      void appAlert(error?.message || '替换原图失败');
+    } finally {
+      setSupplementBusy(false);
+    }
+  };
+
   /** 在算法结果 / 大模型结果之间切换；没有算法结果时现跑一次算法 */
   const handleUseResult = async (mode: 'algo' | 'ai') => {
     if (!currentItem || aiProcessBusy) return;
@@ -916,6 +1017,11 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
     if (index >= 0 && index < task.items.length) {
       setCurrentPageIndex(index);
     }
+  };
+
+  const goToAdjacentResult = (offset: -1 | 1) => {
+    const next = resultItems[currentResultIndex + offset];
+    if (next) setCurrentPageIndex(task.items.indexOf(next));
   };
 
   const handleParamChange = <K extends keyof ProcessParams>(key: K, value: ProcessParams[K]) => {
@@ -1050,10 +1156,10 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
     }
   };
 
-  const saveFinalCrop = async (box: { x: number; y: number; w: number; h: number }, rotation = 0) => {
+  const saveFinalCrop = async (quad: number[][], rotation = 0) => {
     if (!currentItem || !finalCropSource) throw new Error('图片不存在');
     if (isProcessing || paramsDirtyRef.current) throw new Error('图像处理尚未完成，请稍候再裁剪');
-    const raw = await api.applyFinalCrop(task.id, currentItem.id, finalCropSource, box, rotation);
+    const raw = await api.applyFinalCrop(task.id, currentItem.id, finalCropSource, quad, rotation);
     const mapped = mapImage(raw, task.id, currentItem.pageNumber);
     pageSessionRef.current.delete(String(mapped.id));
     pageUrlCacheRef.current.delete(String(mapped.id));
@@ -1072,19 +1178,23 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
     }
   };
 
-  const deleteDerivedPage = async (item: ScanItem, index: number) => {
-    if (!item.splitSourceKey || isProcessing) return;
-    if (!(await appConfirm(`确定删除“${item.fileName}”吗？\n这只会删除裁剪/分页结果，原图不会受影响。`))) return;
+  const deletePage = async (item: ScanItem, index: number) => {
+    if (isProcessing || aiProcessBusy || supplementBusy || aiBusyIds.length > 0) return;
+    if (!(await appConfirm(`确定删除“${item.fileName}”吗？\n将从当前卷中移除这张图片及其结果，原始文件不会被删除。`))) return;
     try {
       setIsProcessing(true);
-      await api.deleteTaskImage(task.id, item.id);
+      await api.deleteTaskImage(task.id, item.id, 'result');
       pageSessionRef.current.delete(String(item.id));
       pageUrlCacheRef.current.delete(String(item.id));
       const refreshed = await onReloadTask?.();
       const nextItems = refreshed?.items || [];
-      if (nextItems.length) setCurrentPageIndex(Math.min(index, nextItems.length - 1));
-      else setCurrentPageIndex(0);
-      triggerToast('已删除裁剪/分页结果');
+      const remaining = nextItems.filter((next: ScanItem) => next.processedUrl);
+      if (remaining.length) {
+        const next = remaining[Math.min(index, remaining.length - 1)];
+        const nextIndex = nextItems.findIndex((nextItem: ScanItem) => nextItem.id === next.id);
+        setCurrentPageIndex(nextIndex >= 0 ? nextIndex : 0);
+      } else setCurrentPageIndex(0);
+      triggerToast('已删除结果图');
     } catch (e: any) {
       triggerToast(e?.message || '删除失败，请重试');
     } finally {
@@ -1214,10 +1324,10 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
 
       if (e.key === 'ArrowLeft') {
         e.preventDefault();
-        setCurrentPageIndex((p) => Math.max(0, p - 1));
+        goToAdjacentResult(-1);
       } else if (e.key === 'ArrowRight') {
         e.preventDefault();
-        setCurrentPageIndex((p) => Math.min(task.items.length - 1, p + 1));
+        goToAdjacentResult(1);
       } else if (e.key === 'Tab') {
         e.preventDefault();
         setCompareMode((prev) => (prev === 'split' ? 'side-by-side' : 'split'));
@@ -1226,7 +1336,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentPageIndex, task.items.length, localParams, previewDataUrl, cropSelecting, confirmedCrop, draftCrop, compareMode, finalCropSource, splitCropOpen]);
+  }, [currentPageIndex, currentResultIndex, resultItems.length, localParams, previewDataUrl, cropSelecting, confirmedCrop, draftCrop, compareMode, finalCropSource, splitCropOpen]);
 
   // Split Divider mouse drag
   const handleSplitMouseDown = (e: React.MouseEvent) => {
@@ -1342,13 +1452,15 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   useEffect(() => {
     const el = thumbListRef.current;
     if (!el) return;
-    const targetTop = currentPageIndex * THUMB_ROW_H;
+    const visibleIndex = thumbnailItems.findIndex((item) => item.id === currentItem?.id);
+    const localIndex = visibleIndex >= 0 ? visibleIndex % THUMB_PAGE_SIZE : 0;
+    const targetTop = localIndex * THUMB_ROW_H;
     const viewTop = el.scrollTop;
     const viewBot = viewTop + el.clientHeight;
     if (targetTop < viewTop || targetTop + THUMB_ROW_H > viewBot) {
       el.scrollTop = Math.max(0, targetTop - el.clientHeight / 2 + THUMB_ROW_H / 2);
     }
-  }, [currentPageIndex]);
+  }, [currentPageIndex, thumbnailPage, thumbnailItems.length]);
 
   if (!currentItem) {
     return (
@@ -1398,8 +1510,22 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
               <div className="text-xs font-bold text-[#1D1D1F] truncate" title={task.name}>
                 {task.name}
               </div>
-              <div className="text-[11px] text-[#86868B] font-mono mt-0.5">
-                共 {task.totalPages} 页 · 处理结果可直接查看和裁剪
+              <div className="text-[11px] text-[#86868B] truncate mt-0.5">
+                处理结果可直接查看和裁剪
+              </div>
+            </div>
+            <div className="flex items-center justify-between gap-2 rounded-lg bg-[#E5E5EA]/70 px-2.5 py-1.5">
+              <span className="text-[11px] font-semibold text-[#1D1D1F]">结果图</span>
+              <span className="text-[11px] font-semibold text-[#6E6E73] tabular-nums" title={`当前结果图 ${resultItems.length} 张，卷内共 ${task.totalPages} 页`}>
+                {resultItems.length} 张
+              </span>
+            </div>
+            <div className="flex items-center justify-between text-[11px] text-[#6E6E73]">
+              <span>每页 {THUMB_PAGE_SIZE} 张</span>
+              <div className="flex items-center gap-1">
+                <button type="button" disabled={thumbnailPage <= 0} onClick={() => setThumbnailPage((p) => Math.max(0, p - 1))} className="px-2 py-1 rounded-md bg-white border border-black/[0.08] disabled:opacity-40">上一页</button>
+                <span className="min-w-[42px] text-center tabular-nums">{thumbnailPage + 1}/{thumbnailPageCount}</span>
+                <button type="button" disabled={thumbnailPage >= thumbnailPageCount - 1} onClick={() => setThumbnailPage((p) => Math.min(thumbnailPageCount - 1, p + 1))} className="px-2 py-1 rounded-md bg-white border border-black/[0.08] disabled:opacity-40">下一页</button>
               </div>
             </div>
           </div>
@@ -1410,7 +1536,8 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
             onScroll={(e) => setThumbScrollTop((e.target as HTMLDivElement).scrollTop)}
           >
             {(() => {
-              const total = task.items.length;
+              const visibleItems = thumbnailPageItems;
+              const total = visibleItems.length;
               const start = Math.max(0, Math.floor(thumbScrollTop / THUMB_ROW_H) - THUMB_OVERSCAN);
               const end = Math.min(
                 total,
@@ -1421,13 +1548,14 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
               const nodes: React.ReactNode[] = [];
               nodes.push(<div key="pad-top" style={{ height: topPad }} />);
               for (let idx = start; idx < end; idx++) {
-                const item = task.items[idx];
-                const isActive = idx === currentPageIndex;
-                const thumbSrc = item.thumbnailUrl || item.processedUrl || item.originalUrl;
+                const item = visibleItems[idx];
+                const itemIndex = task.items.indexOf(item);
+                const isActive = itemIndex === currentPageIndex;
+                const thumbSrc = item.resultThumbnailUrl || item.thumbnailUrl || item.processedUrl || '';
                 nodes.push(
                   <div
                     key={item.id}
-                    onClick={() => handleGoToPage(idx)}
+                    onClick={() => handleGoToPage(itemIndex)}
                     style={{ height: THUMB_ROW_H }}
                     className={`group relative px-2 rounded-xl cursor-pointer transition-colors flex items-center gap-2.5 box-border ${
                       isActive
@@ -1436,13 +1564,19 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                     }`}
                   >
                     <div className="relative w-10 h-12 bg-white rounded-lg overflow-hidden shrink-0 border border-black/[0.08] shadow-2xs">
-                      <img
-                        src={thumbSrc}
-                        alt=""
-                        loading="lazy"
-                        decoding="async"
-                        className="w-full h-full object-cover"
-                      />
+                      {thumbSrc ? (
+                        <img
+                          src={thumbSrc}
+                          alt=""
+                          loading="lazy"
+                          decoding="async"
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center text-[9px] text-[#86868B] text-center leading-tight px-1">
+                          未生成
+                        </div>
+                      )}
                       <div className="absolute top-0.5 left-0.5 px-1 py-0.2 bg-black/60 text-[9px] font-mono text-white rounded">
                         {item.pageNumber}
                       </div>
@@ -1452,11 +1586,11 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                         {item.fileName}
                       </div>
                       <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 mt-1">
-                        {item.splitSourceKey && <span className="text-[10px] font-semibold text-[#0071E3]">{task.items.filter((page) => page.splitSourceKey === item.splitSourceKey).length === 2 ? '已分页' : '已裁剪'}</span>}
+                        {item.splitSourceKey && <span className="inline-flex items-center px-1.5 py-0.5 rounded-full bg-[#0071E3]/10 text-[10px] font-semibold text-[#0071E3]">{task.items.filter((page) => page.splitSourceKey === item.splitSourceKey).length === 2 ? '已分页' : '已裁剪'}</span>}
                         {item.processedUrl ? (
-                          <span className="text-[10px] text-[#0071E3] font-medium">已处理</span>
+                          <span className="inline-flex items-center px-1.5 py-0.5 rounded-full bg-[#34C759]/12 text-[10px] text-[#248A3D] font-semibold">已处理</span>
                         ) : (
-                          <span className="text-[10px] text-[#86868B]">未处理</span>
+                          <span className="inline-flex items-center px-1.5 py-0.5 rounded-full bg-black/[0.05] text-[10px] text-[#86868B]">未处理</span>
                         )}
                         {formatProcessingTime(item.stats?.processingTimeMs) ? (
                           <>
@@ -1478,21 +1612,32 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                         ) : null}
                       </div>
                     </div>
-                    {item.splitSourceKey && (
+                    <div className={`shrink-0 flex items-center gap-0.5 ${isActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-opacity`}>
+                      {!item.splitSourceKey && (
+                        <label
+                          title="替换原图"
+                          aria-label={`替换${item.fileName}的原图`}
+                          onClick={(event) => event.stopPropagation()}
+                          className={`p-1.5 rounded-lg text-[#0071E3] hover:bg-[#0071E3]/10 ${supplementBusy ? 'opacity-30 cursor-wait' : 'cursor-pointer'}`}
+                        >
+                          <Upload className="w-3.5 h-3.5" />
+                          <input type="file" accept="image/*" disabled={supplementBusy} onChange={(event) => void handleReplaceOriginal(event, item)} className="sr-only" />
+                        </label>
+                      )}
                       <button
                         type="button"
-                        title="删除此裁剪/分页结果"
+                        title="删除此图片"
                         aria-label={`删除${item.fileName}`}
-                        disabled={isProcessing}
+                        disabled={isProcessing || aiProcessBusy || supplementBusy || aiBusyIds.length > 0}
                         onClick={(event) => {
                           event.stopPropagation();
-                          void deleteDerivedPage(item, idx);
+                          void deletePage(item, itemIndex);
                         }}
-                        className={`shrink-0 p-1.5 rounded-lg text-[#86868B] ${isActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} hover:bg-[#FFF1F0] hover:text-[#D70015] disabled:opacity-30 transition-opacity`}
+                        className="p-1.5 rounded-lg text-[#86868B] hover:bg-[#FFF1F0] hover:text-[#D70015] disabled:opacity-30"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
-                    )}
+                    </div>
                   </div>
                 );
               }
@@ -1834,15 +1979,15 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
           <footer className="h-14 apple-glass border-t border-black/[0.06] px-6 flex items-center justify-between gap-4 z-20 shrink-0">
             <div className="flex items-center gap-3">
               <span className="text-sm font-semibold text-[#1D1D1F]">
-                第 {currentItem.pageNumber} / {task.totalPages} 页
+                第 {Math.max(1, currentResultIndex + 1)} / {resultItems.length} 页
               </span>
 
               <div className="flex items-center gap-1">
                 <button
-                  disabled={currentPageIndex === 0}
-                  onClick={() => setCurrentPageIndex((p) => p - 1)}
+                  disabled={currentResultIndex <= 0}
+                  onClick={() => goToAdjacentResult(-1)}
                   className={`p-1.5 rounded-lg border transition-all ${
-                    currentPageIndex === 0
+                    currentResultIndex <= 0
                       ? 'border-transparent text-[#C7C7CC] cursor-not-allowed'
                       : 'border-black/[0.08] bg-white text-[#1D1D1F] hover:bg-[#F5F5F7] shadow-2xs cursor-pointer'
                   }`}
@@ -1851,10 +1996,10 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                   <ChevronLeft className="w-4 h-4" />
                 </button>
                 <button
-                  disabled={currentPageIndex === task.items.length - 1}
-                  onClick={() => setCurrentPageIndex((p) => p + 1)}
+                  disabled={currentResultIndex < 0 || currentResultIndex === resultItems.length - 1}
+                  onClick={() => goToAdjacentResult(1)}
                   className={`p-1.5 rounded-lg border transition-all ${
-                    currentPageIndex === task.items.length - 1
+                    currentResultIndex < 0 || currentResultIndex === resultItems.length - 1
                       ? 'border-transparent text-[#C7C7CC] cursor-not-allowed'
                       : 'border-black/[0.08] bg-white text-[#1D1D1F] hover:bg-[#F5F5F7] shadow-2xs cursor-pointer'
                   }`}
@@ -1865,7 +2010,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
               </div>
 
               <div className="hidden sm:flex items-center gap-1.5 text-xs font-mono ml-2">
-                <span className="text-[#86868B] font-medium">{currentItem.processedUrl ? '已处理' : '未处理'}</span>
+                <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full font-medium ${currentItem.processedUrl ? 'bg-[#34C759]/12 text-[#248A3D]' : 'bg-black/[0.05] text-[#86868B]'}`}>{currentItem.processedUrl ? '已处理' : '未处理'}</span>
                 {currentItem.processMode ? (
                   <span
                     className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold font-sans whitespace-nowrap ${
@@ -1893,43 +2038,38 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
           <button
             onClick={() => setShowRightInspector(true)}
             className="absolute top-3 right-3 z-30 p-2 apple-glass-heavy border border-black/[0.08] rounded-xl text-[#1D1D1F] shadow-sm hover:scale-105 transition-all cursor-pointer"
-            title="展开调参面板"
+            title="展开大模型处理面板"
           >
             <PanelRightOpen className="w-4 h-4" />
           </button>
         )}
 
-        {/* RIGHT COLUMN: Parameter Sliders */}
+        {/* RIGHT COLUMN: AI Processing */}
         <aside
           className={`apple-glass border-l border-black/[0.06] transition-all duration-300 ease-out flex flex-col shrink-0 z-20 ${
             showRightInspector ? 'w-80' : 'w-0'
           } overflow-hidden`}
         >
           <div className="p-3.5 border-b border-black/[0.06] flex items-center justify-between gap-2">
-            <div className="flex-1 grid grid-cols-2 gap-1 p-1 bg-[#E5E5EA]/70 rounded-xl">
-              <button
-                type="button"
-                onClick={() => setRightPanelTab('params')}
-                className={`py-1.5 text-[11px] font-semibold rounded-lg transition-all cursor-pointer ${
-                  rightPanelTab === 'params'
-                    ? 'bg-white text-[#1D1D1F] shadow-xs'
-                    : 'text-[#6E6E73] hover:text-[#1D1D1F]'
-                }`}
-              >
-                参数调节
-              </button>
-              <button
-                type="button"
-                onClick={() => setRightPanelTab('aiClean')}
-                className={`py-1.5 text-[11px] font-semibold rounded-lg transition-all cursor-pointer ${
-                  rightPanelTab === 'aiClean'
-                    ? 'bg-[#0071E3] text-white shadow-xs'
-                    : 'text-[#6E6E73] hover:text-[#1D1D1F]'
-                }`}
-              >
-                大模型处理
-              </button>
-            </div>
+            <label
+              className={`flex flex-1 flex-row items-center justify-center gap-1.5 h-10 min-w-0 px-3 rounded-lg text-[12px] font-semibold transition-colors ${
+                supplementBusy
+                  ? 'bg-[#0071E3]/50 text-white cursor-wait'
+                  : 'bg-[#0071E3] text-white hover:bg-[#0077ED] cursor-pointer'
+              }`}
+              title="上传一张图片并自动使用算法处理"
+            >
+              <Upload className="w-3.5 h-3.5" />
+                <span>{supplementBusy ? '处理中…' : '单张上传'}</span>
+              <input
+                ref={supplementInputRef}
+                type="file"
+                accept="image/*"
+                disabled={supplementBusy}
+                onChange={handleSupplementUpload}
+                className="sr-only"
+              />
+            </label>
             <button
               onClick={() => setShowRightInspector(false)}
               className="p-1 text-[#86868B] hover:text-[#1D1D1F] hover:bg-black/[0.04] rounded-lg transition-colors cursor-pointer shrink-0"
@@ -1943,9 +2083,6 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
               <div className="p-3.5 bg-white rounded-2xl border border-black/[0.06] shadow-2xs space-y-3">
                 <div className="text-xs font-semibold text-[#1D1D1F]">使用大模型处理本页</div>
-                <p className="text-[11px] text-[#86868B] leading-relaxed">
-                  把本页原图（有裁剪框则按裁剪区域）交给图生图大模型，处理成白底黑字。只影响这一页；算法结果会保留，可随时切回。
-                </p>
                 <div>
                   <label className="block text-[11px] font-semibold text-[#1D1D1F] mb-1">图片处理模型</label>
                   <select
@@ -1958,8 +2095,6 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                     {cleanModels.map((m) => (
                       <option key={m.id} value={m.id}>
                         {m.displayName}
-                        {cleanPerPage[Number(m.id)] != null ? ` · 约¥${cleanPerPage[Number(m.id)]!.toFixed(2)}/页` : ''}
-                        {currentItem?.aiModelId && Number(m.id) === Number(currentItem.aiModelId) ? ' · 本页上次用的' : ''}
                       </option>
                     ))}
                   </select>
@@ -2180,7 +2315,6 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
           open={finalCropSource !== null}
           source={finalCropSource || 'original'}
           imageUrl={finalCropSource === 'result' ? (currentItem.finalCrop?.source === 'result' ? currentItem.finalCropBaseUrl : currentItem.processedUrl) || currentItem.originalUrl : currentItem.originalUrl}
-          initial={currentItem.finalCrop?.source === finalCropSource ? currentItem.finalCrop.box : null}
           onClose={() => setFinalCropSource(null)}
           onApply={saveFinalCrop}
         />

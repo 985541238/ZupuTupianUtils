@@ -18,7 +18,11 @@ export const TASKS_ALTER_SQL: string[] = [
   "ALTER TABLE `tasks` ADD COLUMN `project_id` BIGINT UNSIGNED NULL COMMENT '所属项目 projects.id' AFTER `user_id`",
   'ALTER TABLE `tasks` ADD KEY `idx_tasks_project` (`project_id`)',
   'ALTER TABLE `task_images` ADD COLUMN `original_source_path` VARCHAR(1024) NULL AFTER `source_path`',
+  'ALTER TABLE `task_images` ADD COLUMN `original_deleted` TINYINT(1) NOT NULL DEFAULT 0 AFTER `source_path`',
+  'ALTER TABLE `task_images` ADD COLUMN `result_deleted` TINYINT(1) NOT NULL DEFAULT 0 AFTER `result_path`',
   'ALTER TABLE `task_images` ADD COLUMN `split_quad` TEXT NULL AFTER `crop_box`',
   'ALTER TABLE `task_images` ADD COLUMN `final_crop` TEXT NULL AFTER `split_quad`',
   'ALTER TABLE `projects` ADD COLUMN `root_path` VARCHAR(1024) NULL AFTER `description`',
+  "ALTER TABLE `tasks` ADD COLUMN `client_type` VARCHAR(16) NOT NULL DEFAULT 'web' COMMENT '创建入口：web/desktop' AFTER `source_folder`",
+  'ALTER TABLE `tasks` ADD COLUMN `client_device_id` VARCHAR(128) NULL COMMENT \'创建设备标识\' AFTER `client_type`',
 ];

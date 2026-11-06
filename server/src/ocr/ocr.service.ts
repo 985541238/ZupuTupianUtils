@@ -8,6 +8,7 @@ import { OcrPage } from './ocr-page.entity';
 import { Task } from '../tasks/task.entity';
 import { TaskImage } from '../tasks/task-image.entity';
 import { Project } from '../tasks/project.entity';
+import { User } from '../users/user.entity';
 import { SettingsService } from '../settings/settings.service';
 import { AliyunService, AiConfigError, OcrParseError } from '../ai/aliyun.service';
 import { getPlatformDef } from '../settings/platforms';
@@ -35,9 +36,28 @@ export class OcrService implements OnModuleInit {
     @InjectRepository(Task) private readonly srcTasks: Repository<Task>,
     @InjectRepository(TaskImage) private readonly srcImages: Repository<TaskImage>,
     @InjectRepository(Project) private readonly projects: Repository<Project>,
+    @InjectRepository(User) private readonly usersRepo: Repository<User>,
     private readonly settings: SettingsService,
     private readonly aliyun: AliyunService,
   ) {}
+
+  /** 账号隔离：普通用户只能看到/操作自己的 OCR 任务和项目；管理员可以看到和操作全部。结果缓存 60 秒。 */
+  private readonly adminCache = new Map<number, { admin: boolean; at: number }>();
+  private async isAdminUser(userId: number): Promise<boolean> {
+    const id = Number(userId);
+    if (!Number.isFinite(id) || id <= 0) return false;
+    const cached = this.adminCache.get(id);
+    if (cached && Date.now() - cached.at < 60_000) return cached.admin;
+    let admin = false;
+    try {
+      const u = await this.usersRepo.findOne({ where: { id } });
+      admin = !!u && (u.role === 'admin' || u.username === 'admin');
+    } catch {
+      admin = false;
+    }
+    this.adminCache.set(id, { admin, at: Date.now() });
+    return admin;
+  }
 
   async onModuleInit() {
     try {
@@ -79,6 +99,10 @@ export class OcrService implements OnModuleInit {
   private async getTask(userId: number, id: number) {
     const t = await this.tasks.findOne({ where: { id } });
     if (!t) throw new NotFoundException('OCR 任务不存在');
+    if (Number(t.userId) !== Number(userId) && !(await this.isAdminUser(userId))) {
+      // 普通用户访问别人的 OCR 任务按「不存在」处理。
+      throw new NotFoundException('OCR 任务不存在');
+    }
     return t;
   }
 
@@ -89,7 +113,8 @@ export class OcrService implements OnModuleInit {
   }
 
   async list(userId: number) {
-    const list = await this.tasks.find({ order: { createdAt: 'DESC' } });
+    const admin = await this.isAdminUser(userId);
+    const list = await this.tasks.find(admin ? { order: { createdAt: 'DESC' } } : { where: { userId }, order: { createdAt: 'DESC' } });
     const sums = list.length
       ? await this.pages
           .createQueryBuilder('p')
@@ -185,9 +210,10 @@ export class OcrService implements OnModuleInit {
     return { vols, items: out, volStat };
   }
 
-  /** 能建 OCR 任务的项目：列出每个项目下各卷的可识别页数，以及是否已经建过 */
+  /** 能建 OCR 任务的项目：列出每个项目下各卷的可识别页数，以及是否已经建过（普通用户只看自己的项目） */
   async sources(userId: number) {
-    const projs = await this.projects.find({ order: { updatedAt: 'DESC' } });
+    const admin = await this.isAdminUser(userId);
+    const projs = await this.projects.find(admin ? { order: { updatedAt: 'DESC' } } : { where: { userId }, order: { updatedAt: 'DESC' } });
     const existing = await this.tasks.find();
     const out = [];
     for (const p of projs) {
@@ -263,6 +289,10 @@ export class OcrService implements OnModuleInit {
     if (!pid) throw new BadRequestException('请选择一个项目');
     const proj = await this.projects.findOne({ where: { id: pid } });
     if (!proj) throw new BadRequestException('所选项目不存在');
+    if (Number(proj.userId) !== Number(userId) && !(await this.isAdminUser(userId))) {
+      // 普通用户不能给别人的项目建 OCR 任务。
+      throw new BadRequestException('所选项目不存在');
+    }
     const dup = await this.tasks.findOne({ where: { projectId: pid } });
     if (dup) throw new BadRequestException(`「${proj.name}」已经有 OCR 项目了，后面完成的卷会自动并入`);
     const { items, vols } = await this.projectUsable(userId, pid);

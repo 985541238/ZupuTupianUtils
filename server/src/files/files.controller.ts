@@ -32,14 +32,21 @@ export class FilesController {
   /** 浏览器选文件夹后逐张上传：先开一个上传会话，拿到服务器上的目录 */
   @UseGuards(JwtAuthGuard)
   @Post('upload-session')
-  uploadSession(@Body() body: { label?: string }) {
-    return this.files.createUploadSession(body?.label);
+  uploadSession(@Body() body: { label?: string; sourceKey?: string; parentSessionId?: string; files?: { path: string; size: number; lastModified?: number }[] }) {
+    return this.files.createUploadSession(body?.label, body?.files, body?.sourceKey, body?.parentSessionId);
   }
 
   @UseGuards(JwtAuthGuard)
   @Put('upload/:id')
   async uploadOne(@Param('id') id: string, @Query('name') name: string, @Req() req: Request) {
     return this.files.saveUpload(id, name, req);
+  }
+
+  /** 查询某个文件已经上传到会话目录的偏移量，供浏览器断点续传。 */
+  @UseGuards(JwtAuthGuard)
+  @Get('upload/:id/status')
+  uploadStatus(@Param('id') id: string, @Query('name') name: string) {
+    return this.files.uploadStatus(id, name);
   }
 
   @UseGuards(JwtAuthGuard)

@@ -8,6 +8,7 @@ Desktop.ini
 
 # Build outputs
 **/dist/
+desktop/dist-new/
 **/unpackage/
 admin-vue3/dist/
 admin/dist/
@@ -76,6 +77,13 @@ venv/
 待处理的图片/
 待处理的图片 - 副本/
 _patches/
+双页/
+王氏族谱/
+算法demo/
+
+# Agent workspace & release packages
+.workbuddy/
+zupu-update-*.zip
 
 # Python cache
 **/__pycache__/

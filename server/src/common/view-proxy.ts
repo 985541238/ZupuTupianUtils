@@ -100,6 +100,26 @@ export function warmViewProxy(abs?: string | null) {
   void ensureViewProxy(abs, VIEW_MAX_SIDE, 'low').catch(() => undefined);
 }
 
+/**
+ * 代理图文件名是按“完整路径 + 文件状态”哈希生成的，无法仅凭卷目录名反查。
+ * 删除卷/项目时清空这层可再生缓存，避免已删除图片仍能从审阅缓存访问。
+ */
+export function clearViewProxyCache(): boolean {
+  for (const job of jobs.values()) job.resolve(null);
+  jobs.clear();
+  high.length = 0;
+  low.length = 0;
+  const root = proxyRoot();
+  if (!fs.existsSync(root)) return true;
+  try {
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    return !fs.existsSync(root);
+  } catch {
+    // 代理图只是可再生缓存，可能正被 sendFile/sharp 占用；不能阻断卷的正式删除。
+    return false;
+  }
+}
+
 /** 只看缓存里有没有现成的工作图，不触发生成（用于"提示类"的轻量计算，别为它多解一次大图） */
 export function peekViewProxy(abs: string, maxSide = VIEW_MAX_SIDE): string | null {
   try {
