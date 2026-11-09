@@ -1027,6 +1027,17 @@ export class TasksService implements OnModuleInit {
     return grouped;
   }
 
+  /** 导出时派生裁剪页优先：某原图已有裁剪/分页结果后，不再导出它的完整处理结果。 */
+  private exportResultPages(list: TaskImage[]): TaskImage[] {
+    const ids = new Set(list.map((item) => String(item.id)));
+    const croppedParentIds = new Set(
+      list
+        .map((item) => String(item.originalSourcePath || ''))
+        .filter((parentId) => /^\d+$/.test(parentId) && ids.has(parentId)),
+    );
+    return this.groupSplitPages(list).filter((item) => !croppedParentIds.has(String(item.id)));
+  }
+
   async getImage(userId: number, taskId: number, imageId: number) {
     await this.get(userId, taskId);
     const img = await this.images.findOne({ where: { id: imageId, taskId } });
@@ -2587,7 +2598,7 @@ export class TasksService implements OnModuleInit {
       order: { sortOrder: 'ASC' },
     });
     // 导出范围与审阅页“结果图”列表一致：只要有当前结果图即可，不要求通过/未通过状态。
-    let ready = this.groupSplitPages(imgs).filter((img) => !img.resultDeleted && img.resultPath && fs.existsSync(img.resultPath));
+    let ready = this.exportResultPages(imgs).filter((img) => !img.resultDeleted && img.resultPath && fs.existsSync(img.resultPath));
     if (filter === 'passed') {
       ready = ready.filter((img) => img.status === 'confirmed');
     } else if (filter === 'failed') {
@@ -2636,7 +2647,7 @@ export class TasksService implements OnModuleInit {
       imagesByTask.set(Number(image.taskId), list);
     }
     for (const task of volumes) {
-      for (const image of this.groupSplitPages(imagesByTask.get(Number(task.id)) || [])) {
+      for (const image of this.exportResultPages(imagesByTask.get(Number(task.id)) || [])) {
         if (!image.resultDeleted && image.resultPath && fs.existsSync(image.resultPath)) entries.push({ task: taskById.get(Number(task.id))!, image });
       }
     }

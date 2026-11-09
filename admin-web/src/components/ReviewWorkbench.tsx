@@ -850,11 +850,12 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
       void appAlert('请选择图片文件');
       return;
     }
+    const uploadName = file.name.replace(/\\/g, '/').split('/').pop() || file.name;
     setSupplementBusy(true);
     try {
-      const session = await api.createUploadSession('补图', [{ path: file.name, size: file.size, lastModified: file.lastModified }]);
-      await api.uploadImage(session.id, file, file.name);
-      const raw = await api.appendTaskImage(task.id, session.id, file.name);
+      const session = await api.createUploadSession('补图', [{ path: uploadName, size: file.size, lastModified: file.lastModified }]);
+      await api.uploadImage(session.id, file, uploadName);
+      const raw = await api.appendTaskImage(task.id, session.id, uploadName);
       const imageId = String(raw.id);
       await api.reprocessImage(task.id, imageId, {});
       const refreshed = await onReloadTask?.();
@@ -881,11 +882,12 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
       void appAlert('请选择图片文件');
       return;
     }
+    const uploadName = file.name.replace(/\\/g, '/').split('/').pop() || file.name;
     setSupplementBusy(true);
     try {
-      const session = await api.createUploadSession('替换原图', [{ path: file.name, size: file.size, lastModified: file.lastModified }]);
-      await api.uploadImage(session.id, file, file.name);
-      await api.replaceTaskImage(task.id, targetItem.id, session.id, file.name);
+      const session = await api.createUploadSession('替换原图', [{ path: uploadName, size: file.size, lastModified: file.lastModified }]);
+      await api.uploadImage(session.id, file, uploadName);
+      await api.replaceTaskImage(task.id, targetItem.id, session.id, uploadName);
       await api.reprocessImage(task.id, targetItem.id, {});
       const refreshed = await onReloadTask?.();
       const nextIndex = refreshed?.items?.findIndex((item: ScanItem) => item.id === targetItem.id) ?? -1;

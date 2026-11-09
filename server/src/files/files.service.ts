@@ -74,7 +74,7 @@ $owner.Close()
     let base = uploadRoot;
     if (parentSessionId) {
       const parentRel = String(parentSessionId).replace(/\\/g, '/').replace(/^\/+/, '');
-      if (!parentRel || parentRel.includes('..') || /^[A-Za-z]:/.test(parentRel)) throw new BadRequestException('父上传会话无效');
+      if (!parentRel || parentRel.split('/').some((part) => part === '..') || /^[A-Za-z]:/.test(parentRel)) throw new BadRequestException('父上传会话无效');
       base = path.resolve(uploadRoot, parentRel);
       const baseRel = path.relative(uploadRoot, base);
       if (!baseRel || baseRel.startsWith('..') || path.isAbsolute(baseRel) || !fs.existsSync(base) || !fs.statSync(base).isDirectory()) {
@@ -92,13 +92,13 @@ $owner.Close()
   private uploadTarget(id: string, name: string) {
     const uploadRoot = path.resolve(this.uploadRoot());
     const relId = String(id || '').replace(/\\/g, '/').replace(/^\/+/, '');
-    if (!relId || relId.includes('..') || /^[A-Za-z]:/.test(relId)) throw new BadRequestException('会话无效');
+    if (!relId || relId.split('/').some((part) => part === '..') || /^[A-Za-z]:/.test(relId)) throw new BadRequestException('会话无效');
     const dir = path.resolve(uploadRoot, relId);
     const dirRel = path.relative(uploadRoot, dir);
     if (!dirRel || dirRel.startsWith('..') || path.isAbsolute(dirRel)) throw new BadRequestException('会话无效');
     if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) throw new BadRequestException('上传会话不存在，请重新选择文件夹');
     const rel = String(name || '').replace(/\\/g, '/').replace(/^\/+/, '');
-    if (!rel || rel.includes('..') || /^[A-Za-z]:/.test(rel)) throw new BadRequestException('上传文件路径无效');
+    if (!rel || rel.split('/').some((part) => part === '..') || /^[A-Za-z]:/.test(rel)) throw new BadRequestException('上传文件路径无效');
     const base = path.basename(rel);
     const ext = path.extname(base).toLowerCase();
     if (!base || !IMAGE_EXT.has(ext)) throw new BadRequestException('只接受图片文件（jpg/png/tif/bmp/webp）');
