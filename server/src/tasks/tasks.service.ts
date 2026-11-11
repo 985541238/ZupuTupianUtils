@@ -284,8 +284,9 @@ export class TasksService implements OnModuleInit {
       const uploadedVolumeNames = new Set<string>();
       for (const item of files) {
         const rel = String(item?.path || '').replace(/\\/g, '/').replace(/^\/+/, '');
-        if (!rel || rel.includes('..')) continue;
         const parts = rel.split('/');
+        // 只排除真正的 “..” 路径段；文件名里带连续点（如 Image_01153..png）是合法图片，不能跳过。
+        if (!rel || parts.some((part) => part === '..')) continue;
         if (parts.length > 1) expectedVolumeNames.add(parts[0]);
         const abs = path.resolve(root, rel);
         const safe = abs.startsWith(root + path.sep) && fs.existsSync(abs) && fs.statSync(abs).isFile();
@@ -767,7 +768,7 @@ export class TasksService implements OnModuleInit {
     const session = String(uploadSessionId || '');
     const name = path.basename(String(fileName || ''));
     const ext = path.extname(name).toLowerCase();
-    if (!session || !name || session.includes('..') || /[\\/]/.test(session) || !IMAGE_EXT.has(ext)) {
+    if (!session || !name || session.split('/').some((part) => part === '..') || /[\\/]/.test(session) || !IMAGE_EXT.has(ext)) {
       throw new BadRequestException('补图文件无效，只接受单张图片');
     }
 
@@ -817,7 +818,7 @@ export class TasksService implements OnModuleInit {
     const session = String(uploadSessionId || '');
     const name = path.basename(String(fileName || ''));
     const ext = path.extname(name).toLowerCase();
-    if (!session || !name || session.includes('..') || /[\\/]/.test(session) || !IMAGE_EXT.has(ext)) {
+    if (!session || !name || session.split('/').some((part) => part === '..') || /[\\/]/.test(session) || !IMAGE_EXT.has(ext)) {
       throw new BadRequestException('替换文件无效，只接受单张图片');
     }
     const uploadRoot = path.resolve(this.uploadRoot());
@@ -913,7 +914,7 @@ export class TasksService implements OnModuleInit {
     try {
       const rel = String(sessionId || '').replace(/\\/g, '/').replace(/^\/+/, '');
       // 只允许删除 uploads 根目录下的一级会话文件夹（如 20261106xxxxxx-xxxxxx_补图）。
-      if (!rel || rel.includes('..') || /[\\/]/.test(rel) || /^[A-Za-z]:/.test(rel)) return;
+      if (!rel || rel.split('/').some((part) => part === '..') || /[\\/]/.test(rel) || /^[A-Za-z]:/.test(rel)) return;
       const uploadRoot = path.resolve(this.uploadRoot());
       const dir = path.resolve(uploadRoot, rel);
       const relCheck = path.relative(uploadRoot, dir);
@@ -2093,7 +2094,8 @@ export class TasksService implements OnModuleInit {
 
       const files = manifest.files.filter((item: any) => {
         const rel = String(item?.path || '').replace(/\\/g, '/').replace(/^\/+/, '');
-        if (!rel || rel.includes('..')) return true;
+        // 只排除真正的 “..” 路径段；文件名里带连续点（如 Image_01153..png）是合法图片，不能误判。
+        if (!rel || rel.split('/').some((part) => part === '..')) return true;
         const file = path.resolve(root, rel);
         const relToSource = path.relative(source, file);
         return relToSource.startsWith('..') || path.isAbsolute(relToSource);
