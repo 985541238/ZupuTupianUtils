@@ -4,7 +4,7 @@ import { api } from '../api/client';
 import { formatProcessingTime, mapOcrSource } from '../api/mappers';
 import { inferErrorCode } from './AiProblemDialog';
 import { OcrModelPicker } from './OcrModelPicker';
-import { appAlert } from './AppDialog';
+import { appAlert, appConfirm } from './AppDialog';
 import {
   Play,
   Plus,
@@ -179,17 +179,22 @@ export const OcrTaskCenterView: React.FC<Props> = ({
     };
   }, [modelId, selectedSource]);
 
-  /** 项目里有新完成的卷/新通过的页：自动并入识别任务，不用手点 */
+  /** 项目里有新完成/新可用的卷页：自动并入识别任务，不用手点；失败会自动重试 */
   useEffect(() => {
     for (const t of tasks) {
       if (!t.newPageCount || t.status === 'processing') continue;
       const key = `${t.id}:${t.newPageCount}`;
       if (syncedRef.current.has(key)) continue;
       syncedRef.current.add(key);
-      void api
-        .syncOcrTask(t.id)
+      const timeout = new Promise<never>((_, reject) => {
+        window.setTimeout(() => reject(new Error('并入超时，请重试')), 30000);
+      });
+      void Promise.race([api.syncOcrTask(t.id), timeout])
         .then(() => onRefresh?.())
-        .catch(() => {});
+        .catch(() => {
+          // 失败/超时：移除去重标记，下次列表刷新会再次尝试（不会永久卡在"正在并入"）
+          syncedRef.current.delete(key);
+        });
     }
   }, [tasks, onRefresh]);
 
@@ -209,6 +214,33 @@ export const OcrTaskCenterView: React.FC<Props> = ({
     }
     void loadDetail(openTask);
   }, [openId, openTask?.totalCount, openTask?.doneCount, openTask?.confirmedCount, loadDetail]);
+
+  /** 刷新列表 + 当前项目详情（移除/重新并入卷后调用） */
+  const reRenderAfterRefresh = async (task: OcrTask) => {
+    await onRefresh?.();
+    await loadDetail(task);
+  };
+
+  /** 从 OCR 项目里移除某个卷的识别内容 */
+  const handleRemoveVolume = async (task: OcrTask, v: any) => {
+    if (!(await appConfirm(`移除「${v.name}」在这个 OCR 项目里的识别内容？\n已识别的文字和人工修改会被删除；图片处理结果和原图不受影响，之后可点「重新并入」恢复。`))) return;
+    try {
+      await api.removeOcrVolume(task.id, v.id);
+      await reRenderAfterRefresh(task);
+    } catch (e: any) {
+      void appAlert(e?.message || '移除失败，请重试');
+    }
+  };
+
+  /** 重新并入之前移除的卷 */
+  const handleRestoreVolume = async (task: OcrTask, v: any) => {
+    try {
+      await api.restoreOcrVolume(task.id, v.id);
+      await reRenderAfterRefresh(task);
+    } catch (e: any) {
+      void appAlert(e?.message || '重新并入失败，请重试');
+    }
+  };
 
   const submit = async (startAfter: boolean) => {
     if (!sourceId) { void appAlert('请先选择一个项目'); return; }
@@ -246,6 +278,32 @@ export const OcrTaskCenterView: React.FC<Props> = ({
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            {onRefresh && (
+              <button
+                onClick={onRefresh}
+                className="h-10 px-4 text-sm font-semibold bg-white border border-black/[0.08] text-[#1D1D1F] rounded-xl hover:bg-[#F5F5F7] cursor-pointer"
+              >
+                刷新
+              </button>
+            )}
+            <button
+              onClick={() => {
+                void (async () => {
+                  if (!(await appConfirm(`删除整个 OCR 项目「${task.name}」？\n已识别的文字和人工修改会被永久删除；图片处理任务和图片不受影响。`))) return;
+                  try {
+                    await onDelete(task.id);
+                    setOpenId(null);
+                    await onRefresh?.();
+                  } catch (e: any) {
+                    void appAlert(e?.message || '删除失败');
+                  }
+                })();
+              }}
+              className="h-10 px-4 text-sm font-semibold rounded-xl bg-white border border-[#FF3B30]/30 text-[#FF3B30] hover:bg-[#FF3B30]/[0.06] cursor-pointer flex items-center gap-1.5"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              删除项目
+            </button>
           </div>
         </div>
 
@@ -259,6 +317,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({
               const rec = Number(v.recognized) || 0;
               const conf = Number(v.confirmed) || 0;
               const failedN = Number(v.failed) || 0;
+              const removed = !!v.excluded;
               const allDone = inTask > 0 && rec >= inTask;
               const startVol = () => {
                 if (task.modelUsable === false) {
@@ -269,66 +328,141 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                 }
               };
               return (
-                <div key={v.id} className="bg-white rounded-[20px] border border-black/[0.05] shadow-[0_1px_2px_rgba(0,0,0,0.03)] px-5 py-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <h3 className="text-base font-semibold text-[#1D1D1F] truncate">{v.name}</h3>
-                      {v.completed ? (
-                        <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#34C759]/12 text-[#248A3D]">图片处理已完成</span>
-                      ) : (
-                        <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#FF9500]/12 text-[#B25E00]">{v.status === 'processing' ? '图片处理中' : v.status === 'reviewing' ? '图片审阅中' : '待处理'}</span>
-                      )}
+                <div
+                  key={v.id}
+                  className="group bg-white rounded-[20px] border border-black/[0.05] shadow-[0_1px_2px_rgba(0,0,0,0.03)] hover:shadow-[0_8px_24px_rgba(0,0,0,0.06)] hover:border-black/[0.08] p-4 sm:px-5 sm:py-[18px] transition-all flex flex-col md:flex-row md:items-center justify-between gap-4"
+                >
+                  <div className="flex items-start sm:items-center gap-3.5 sm:gap-4 flex-1 min-w-0">
+                    <div className="w-12 h-[3.75rem] bg-[#F5F5F7] rounded-[12px] border border-black/[0.06] shrink-0 flex items-center justify-center text-[15px] font-semibold text-[#0071E3] tracking-tight">
+                      {(v.name || '卷').slice(0, 1)}
                     </div>
-                    <p className="text-[13px] text-[#86868B] mt-1">
-                      {v.completed
-                        ? `通过 ${v.usable} / ${v.total} 页${inTask ? ` · 已识别 ${rec}/${inTask} · 已确认 ${conf}` : ' · 正在并入…'}`
-                        : `图片处理还没完成（已通过 ${v.passed} / ${v.total} 页），完成后才能做 OCR`}
-                    </p>
+                    <div className="min-w-0 flex-1 space-y-1.5">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <h3 className="text-base font-semibold text-[#1D1D1F] tracking-tight truncate leading-snug">{v.name}</h3>
+                        {v.completed ? (
+                          <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#34C759]/12 text-[#34C759]">图片处理已完成</span>
+                        ) : (
+                          <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#FF9500]/12 text-[#FF9500]">
+                            {v.status === 'processing' ? '图片处理中' : v.status === 'reviewing' ? '图片审阅中' : '待处理'}
+                          </span>
+                        )}
+                        {removed ? (
+                          <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-black/[0.05] text-[#6E6E73]">已移除 OCR</span>
+                        ) : inTask > 0 ? (
+                          <span className={`shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold ${conf >= inTask ? 'bg-[#34C759]/12 text-[#34C759]' : rec > 0 ? 'bg-[#0071E3]/10 text-[#0071E3]' : 'bg-black/[0.05] text-[#6E6E73]'}`}>
+                            {conf >= inTask ? '已确认' : rec > 0 ? '已识别' : '待识别'}
+                          </span>
+                        ) : null}
+                        {failedN > 0 ? (
+                          <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#FF3B30]/8 text-[#D70015]">{failedN} 页识别失败</span>
+                        ) : null}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[13px] text-[#86868B] leading-relaxed">
+                        <span className="tabular-nums">共 {v.total} 页</span>
+                        <span className="text-black/15">·</span>
+                        <span className="tabular-nums">可用 {v.usable} 页</span>
+                        {inTask > 0 ? (
+                          <>
+                            <span className="text-black/15">·</span>
+                            <span className="tabular-nums">已并入 {inTask}</span>
+                            <span className="text-black/15">·</span>
+                            <span className="tabular-nums">已识别 {rec}/{inTask}</span>
+                            <span className="text-black/15">·</span>
+                            <span className="tabular-nums">已确认 {conf}</span>
+                          </>
+                        ) : !v.completed ? (
+                          <>
+                            <span className="text-black/15">·</span>
+                            <span>已出图 {v.passed}/{v.total} 页，完成后才能做 OCR</span>
+                          </>
+                        ) : null}
+                      </div>
+                      {inTask > 0 ? (
+                        <div className="pt-1 max-w-xl">
+                          <div className="flex w-full bg-[#E5E5EA] rounded-full h-1.5 overflow-hidden">
+                            <div className="bg-[#34C759] h-full rounded-full transition-all duration-300" style={{ width: `${Math.min(100, Math.round((conf / Math.max(1, inTask)) * 100))}%` }} />
+                            <div className="bg-[#0071E3] h-full rounded-full transition-all duration-300" style={{ width: `${Math.min(100, Math.round(((rec - conf) / Math.max(1, inTask)) * 100))}%` }} />
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
-                  {v.completed ? (
-                    <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
-                      {inTask === 0 ? (
-                        <span className="text-[13px] text-[#86868B]">正在并入…</span>
-                      ) : null}
-                      {inTask > 0 && rec > 0 ? (
-                        <button
-                          onClick={() => onOpenReview(task.id, v.id)}
-                          className="h-10 px-4 text-sm font-semibold rounded-full bg-white border border-[#0071E3]/30 text-[#0071E3] hover:bg-[#0071E3]/[0.05] cursor-pointer"
-                        >
-                          {isProcessing ? `先去审阅（${rec} 页）` : conf >= inTask ? '查看' : '进入审阅'}
-                        </button>
-                      ) : null}
-                      {isProcessing && inTask > 0 ? (
-                        <button disabled className="h-10 px-5 text-sm font-semibold rounded-full bg-[#E8F1FC] text-[#0071E3] cursor-not-allowed flex items-center gap-1.5">
-                          <Sparkles className="w-3.5 h-3.5 animate-spin" />
-                          识别中
-                        </button>
-                      ) : null}
-                      {!isProcessing && inTask > 0 && failedN > 0 ? (
-                        <button
-                          onClick={startVol}
-                          className="h-10 px-5 text-sm font-semibold rounded-full bg-[#FF9500] hover:bg-[#F08C00] text-white cursor-pointer flex items-center gap-1.5"
-                          title="只重新识别失败的页，已识别的不会重复收费"
-                        >
-                          <RotateCcw className="w-3.5 h-3.5" />
-                          重试失败页（{failedN}）
-                        </button>
-                      ) : null}
-                      {!isProcessing && inTask > 0 && failedN === 0 && !allDone ? (
-                        <button
-                          onClick={startVol}
-                          className="h-10 px-5 text-sm font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] cursor-pointer flex items-center gap-1.5 active:scale-[0.98]"
-                        >
-                          <Play className="w-3 h-3 fill-current" />
-                          {rec > 0 ? '继续 OCR' : '开始 OCR'}
-                        </button>
-                      ) : null}
-                    </div>
-                  ) : null}
+                  <div className="flex flex-wrap items-center justify-end gap-2 shrink-0 md:pl-2">
+                    {removed ? (
+                      <button
+                        onClick={() => void handleRestoreVolume(task, v)}
+                        className="h-10 px-4 text-sm font-semibold rounded-full bg-white border border-[#0071E3]/30 text-[#0071E3] hover:bg-[#E8F1FC] transition-all cursor-pointer flex items-center gap-1.5 active:scale-[0.98]"
+                        title="把该卷重新并入 OCR 项目"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>重新并入</span>
+                      </button>
+                    ) : null}
+                    {!removed && inTask === 0 && v.usable > 0 ? (
+                      <button
+                        onClick={() => {
+                          void api.syncOcrTask(task.id)
+                            .then(() => reRenderAfterRefresh(task))
+                            .catch((e: any) => void appAlert(e?.message || '并入失败，请重试'));
+                        }}
+                        className="h-10 px-4 text-sm font-semibold rounded-full bg-white border border-[#0071E3]/30 text-[#0071E3] hover:bg-[#E8F1FC] transition-all cursor-pointer active:scale-[0.98]"
+                      >
+                        正在并入…（点此重试）
+                      </button>
+                    ) : null}
+                    {!removed && inTask === 0 && v.usable === 0 && v.completed ? (
+                      <span className="text-[13px] text-[#86868B]">没有可识别的页（处理结果缺失或已删除）</span>
+                    ) : null}
+                    {!removed && inTask > 0 && rec > 0 ? (
+                      <button
+                        onClick={() => onOpenReview(task.id, v.id)}
+                        className="h-10 px-4 text-sm font-semibold rounded-full bg-[#F5F5F7] hover:bg-[#EBEBED] text-[#1D1D1F] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
+                      >
+                        <ArrowRight className="w-3.5 h-3.5 text-[#0071E3]" />
+                        <span>{isProcessing ? `先去审阅（${rec} 页）` : conf >= inTask ? '查看' : '进入审阅'}</span>
+                      </button>
+                    ) : null}
+                    {!removed && isProcessing && inTask > 0 ? (
+                      <button disabled className="h-10 px-5 text-sm font-semibold rounded-full bg-[#E8F1FC] text-[#0071E3] cursor-not-allowed flex items-center gap-1.5">
+                        <Sparkles className="w-3.5 h-3.5 animate-spin" />
+                        识别中
+                      </button>
+                    ) : null}
+                    {!removed && !isProcessing && inTask > 0 && failedN > 0 ? (
+                      <button
+                        onClick={startVol}
+                        className="h-10 px-5 text-sm font-semibold rounded-full bg-[#FF9500] hover:bg-[#F08C00] text-white cursor-pointer flex items-center gap-1.5"
+                        title="只重新识别失败的页，已识别的不会重复收费"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        重试失败页（{failedN}）
+                      </button>
+                    ) : null}
+                    {!removed && !isProcessing && inTask > 0 && failedN === 0 && !allDone ? (
+                      <button
+                        onClick={startVol}
+                        className="h-10 px-5 text-sm font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] transition-all cursor-pointer flex items-center gap-1.5 active:scale-[0.98]"
+                      >
+                        <Play className="w-3 h-3 fill-current" />
+                        {rec > 0 ? '继续 OCR' : '开始 OCR'}
+                      </button>
+                    ) : null}
+                    {!removed && inTask > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleRemoveVolume(task, v)}
+                        className="h-10 w-10 rounded-full flex items-center justify-center text-[#86868B] opacity-0 group-hover:opacity-100 hover:text-[#FF3B30] hover:bg-[#FF3B30]/10 transition-all cursor-pointer active:scale-[0.96]"
+                        title="移除该卷的 OCR 内容（图片处理结果不受影响）"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
               );
             })}
           </div>
+
         )}
       </div>
     );
@@ -436,178 +570,107 @@ export const OcrTaskCenterView: React.FC<Props> = ({
                 )}
               </div>
             ) : (
-              paged.map((task) => {
-                const total = Math.max(1, task.totalCount);
-                const isProcessing = task.status === 'processing';
-                const pct = Math.min(99, Math.round((task.doneCount / total) * 100) || 4);
-                const reviewPct = Math.min(100, Math.round((task.confirmedCount / total) * 100));
-                return (
-                  <div
-                    key={task.id}
-                    className={`group bg-white rounded-[20px] border p-4 sm:px-5 sm:py-[18px] transition-all flex flex-col md:flex-row md:items-center justify-between gap-4 ${
-                      isProcessing
-                        ? 'border-[#0071E3]/25 shadow-[0_4px_20px_rgba(0,113,227,0.08)]'
-                        : 'border-black/[0.05] shadow-[0_1px_2px_rgba(0,0,0,0.03)] hover:shadow-[0_8px_24px_rgba(0,0,0,0.06)] hover:border-black/[0.08]'
-                    }`}
-                  >
-                    <div className="flex items-start sm:items-center gap-3.5 sm:gap-4 flex-1 min-w-0">
-                      <div className="w-12 h-[3.75rem] bg-[#F5F5F7] rounded-[12px] border border-black/[0.06] shrink-0 flex items-center justify-center text-[#0071E3]">
-                        <FileText className="w-5 h-5" />
-                      </div>
-                      <div className="min-w-0 flex-1 space-y-1.5">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <h3
-                            onClick={() => setOpenId(task.id)}
-                            className="text-base font-semibold text-[#1D1D1F] tracking-tight truncate leading-snug cursor-pointer hover:text-[#0071E3]"
-                            title="点击查看项目里的各卷"
-                          >
-                            {task.name}
-                          </h3>
-                          {isProcessing ? (
-                            <span className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#0071E3]/10 text-[#0071E3]">
-                              <Sparkles className="w-3 h-3 animate-spin" />
-                              识别中
-                            </span>
-                          ) : task.status === 'reviewing' ? (
-                            <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#0071E3]/10 text-[#0071E3]">审阅中</span>
-                          ) : task.status === 'completed' ? (
-                            <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#34C759]/12 text-[#34C759]">已完成</span>
-                          ) : (
-                            <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#FF9500]/12 text-[#FF9500]">
-                              {task.status === 'failed' ? '已暂停' : '待识别'}
-                            </span>
-                          )}
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+                {paged.map((task) => {
+                  const total = Math.max(1, task.totalCount);
+                  const confirmed = Math.min(Number(task.confirmedCount) || 0, total);
+                  const recognized = Math.min(Number(task.doneCount) || 0, total);
+                  const pending = Math.max(0, total - recognized);
+                  const isProcessing = task.status === 'processing';
+                  const segs = [
+                    { n: confirmed, c: '#34C759' },
+                    { n: Math.max(0, recognized - confirmed), c: '#0071E3' },
+                  ];
+                  return (
+                    <div
+                      key={task.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setOpenId(task.id)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') setOpenId(task.id); }}
+                      className="group relative bg-white rounded-3xl border border-black/[0.05] shadow-[0_2px_10px_rgba(0,0,0,0.04)] p-6 transition-all duration-200 hover:shadow-[0_14px_36px_rgba(0,0,0,0.10)] hover:-translate-y-0.5 hover:border-[#0071E3]/30 cursor-pointer"
+                    >
+                      <div className="flex items-center gap-3.5">
+                        <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-[#4DA3FF] to-[#0071E3] text-white text-xl font-bold flex items-center justify-center shadow-[0_6px_14px_rgba(0,113,227,0.25)] shrink-0">
+                          {(task.projectName || task.name || '项').slice(0, 1)}
                         </div>
-                        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[13px] text-[#86868B] leading-relaxed">
-                          <span className="inline-flex items-center gap-1 tabular-nums">
-                            <Clock className="w-3 h-3 opacity-70" />
-                            {task.createdAt}
-                          </span>
-                          <span className="text-black/15">·</span>
-                          <span className="truncate max-w-[260px]" title={task.projectName || task.sourceTaskName}>
-                            项目：{task.projectName || task.sourceTaskName || '—'}
-                            {task.volumeCount ? ` · ${task.volumeCount} 卷` : ''}
-                          </span>
-                          <span className="text-black/15">·</span>
-                          <span className="tabular-nums">共 {task.totalCount} 页</span>
-                          {formatProcessingTime(task.processingTimeMs) || task.actualCost ? (
-                            <>
-                              <span className="text-black/15">·</span>
-                              <span className="tabular-nums">
-                                {[
-                                  formatProcessingTime(task.processingTimeMs) ? `${isProcessing ? '已用' : '用时'} ${formatProcessingTime(task.processingTimeMs)}` : '',
-                                  task.actualCost ? `¥${task.actualCost.toFixed(2)}` : '',
-                                ]
-                                  .filter(Boolean)
-                                  .join(' · ')}
-                              </span>
-                            </>
-                          ) : null}
-                        </div>
-                        {isProcessing && (
-                          <div className="pt-1 max-w-xl">
-                            <div className="flex items-center justify-between mb-1 gap-3">
-                              <span className="text-xs font-medium text-[#0071E3] truncate ocr-breathe">
-                                {task.processingPages.length
-                                  ? `正在识别第 ${task.processingPages.map((p) => p.pageNo).join('、')} 页 · 最久已用 ${elapsedText(
-                                      now - Math.min(...task.processingPages.map((p) => p.startedAt || now)),
-                                    )}`
-                                  : '正在准备下一批页面…'}
-                              </span>
-                              <span className="text-xs font-semibold text-[#0071E3] tabular-nums shrink-0">{pct}%</span>
-                            </div>
-                            <div className="w-full bg-[#E5E5EA] rounded-full h-1.5 overflow-hidden">
-                              <div
-                                className="bg-[#0071E3] ocr-flowing h-full rounded-full transition-all duration-500 ease-out"
-                                style={{ width: `${Math.max(pct, 6)}%` }}
-                              />
-                            </div>
-                            <p className="text-[11px] text-[#86868B] mt-1.5 leading-relaxed">
-                              识别一页通常要几秒到几十秒，多页同时进行。可以离开此页，完成后会提示；识别好的页面现在就能点「先去审阅」。
-                            </p>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-lg font-bold text-[#1D1D1F] tracking-tight truncate" title={task.projectName || task.name}>
+                            {task.projectName || task.name}
                           </div>
-                        )}
-
-                        {!isProcessing && (task.status === 'reviewing' || task.status === 'completed') && task.totalCount > 0 && (
-                          <div className="flex items-center gap-3 pt-0.5 max-w-xl">
-                            <div className="w-44 sm:w-56 bg-[#E5E5EA] rounded-full h-1.5 overflow-hidden shrink-0">
-                              <div className="bg-[#34C759] h-full rounded-full transition-all duration-300" style={{ width: `${reviewPct}%` }} />
-                            </div>
-                            <span className="text-xs text-[#6E6E73] tabular-nums whitespace-nowrap">
-                              已确认 <b className="font-semibold text-[#1D1D1F]">{task.confirmedCount}</b>/{task.totalCount} 页
-                              {task.charCount ? ` · ${task.charCount} 字` : ''}
-                            </span>
+                          <div className="text-xs text-[#86868B] mt-0.5">
+                            {task.volumeCount ? `${task.volumeCount} 卷 · 共 ${task.totalCount} 页` : `共 ${task.totalCount} 页`}
                           </div>
-                        )}
-
-                        {!isProcessing && (task.errorMessage || task.staleCount || task.failedCount || (task.status === 'reviewing' && task.uncertainCount > 0)) ? (
-                          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                            {task.failedCount || task.errorMessage ? (
-                              <span
-                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-[#FF3B30]/8 text-[#D70015]"
-                                title={task.errorMessage ? task.errorMessage.split('\n详情：')[0] : '可在审阅里对失败的页点「重新识别」'}
-                              >
-                                <span className="w-1.5 h-1.5 rounded-full bg-[#FF3B30]" />
-                                {task.failedCount ? `${task.failedCount} 页识别失败` : '识别出错'}
+                          <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                            {isProcessing ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#0071E3]/10 text-[#0071E3]">
+                                <Sparkles className="w-3 h-3 animate-spin" />
+                                识别中
                               </span>
-                            ) : null}
-                            {task.staleCount ? (
-                              <span
-                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-[#FF9500]/10 text-[#B25E00]"
-                                title="识别之后，图片处理里又重新调整保存过这些页的图片，进入审阅可按新图重新对位或重新识别"
-                              >
-                                <span className="w-1.5 h-1.5 rounded-full bg-[#FF9500]" />
-                                {task.staleCount} 页图片已更新
+                            ) : task.status === 'reviewing' ? (
+                              <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#0071E3]/10 text-[#0071E3]">审阅中</span>
+                            ) : task.status === 'completed' ? (
+                              <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#34C759]/12 text-[#34C759]">已完成</span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#FF9500]/12 text-[#FF9500]">
+                                {task.status === 'failed' ? '已暂停' : '待识别'}
                               </span>
+                            )}
+                            {task.failedCount ? (
+                              <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#FF3B30]/8 text-[#D70015]">{task.failedCount} 页失败</span>
                             ) : null}
-                            {task.status === 'reviewing' && task.uncertainCount > 0 ? (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-[#0071E3]/8 text-[#0058B0]" title="识别把握不高的字，需要人工核对">
-                                <span className="w-1.5 h-1.5 rounded-full bg-[#0071E3]" />
+                            {task.uncertainCount ? (
+                              <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#0071E3]/8 text-[#0058B0]" title="识别把握不高的字，需要人工核对">
                                 {task.uncertainCount} 处待核对
                               </span>
                             ) : null}
-                            {onShowProblem && task.errorMessage && (task.errorCode || inferErrorCode(task.errorMessage)) ? (
-                              <button
-                                type="button"
-                                onClick={() => onShowProblem(task)}
-                                className="px-2 py-1 text-xs font-semibold text-[#0071E3] hover:underline cursor-pointer"
-                              >
-                                怎么处理？
-                              </button>
-                            ) : null}
                           </div>
-                        ) : null}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); setDeleteTarget(task); }}
+                          disabled={isProcessing}
+                          className="p-1.5 rounded-lg text-[#86868B] opacity-0 group-hover:opacity-100 hover:bg-[#FF3B30]/10 hover:text-[#FF3B30] transition-all cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                          title={isProcessing ? '识别中不能删除' : '删除项目'}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+
+                      <div className="mt-5">
+                        <div className="flex h-2 rounded-full overflow-hidden bg-[#F2F2F7]">
+                          {segs.map((g, i) =>
+                            g.n > 0 ? <div key={i} style={{ width: `${(g.n / total) * 100}%`, background: g.c }} /> : null,
+                          )}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1 mt-2.5 text-xs text-[#6E6E73] min-h-[18px]">
+                          {confirmed > 0 ? (
+                            <span className="inline-flex items-center gap-1"><i className="w-1.5 h-1.5 rounded-full bg-[#34C759]" />已确认 {confirmed}</span>
+                          ) : null}
+                          {recognized > confirmed ? (
+                            <span className="inline-flex items-center gap-1"><i className="w-1.5 h-1.5 rounded-full bg-[#0071E3]" />已识别 {recognized}</span>
+                          ) : null}
+                          {pending > 0 ? (
+                            <span className="inline-flex items-center gap-1"><i className="w-1.5 h-1.5 rounded-full bg-[#C7C7CC]" />未识别 {pending}</span>
+                          ) : null}
+                          {task.charCount ? <span className="text-[#86868B]">· {task.charCount} 字</span> : null}
+                          {isProcessing ? (
+                            <span className="text-[#0071E3] font-semibold tabular-nums">· 识别中 {Math.min(99, Math.round((recognized / total) * 100))}%</span>
+                          ) : null}
+                        </div>
+                      </div>
+
+                      <div className="mt-4 pt-3.5 border-t border-black/[0.05] flex items-center justify-between text-[13px] font-semibold text-[#0071E3]">
+                        <span>进入项目</span>
+                        <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-1" />
                       </div>
                     </div>
-
-                    <div className="flex items-center justify-end gap-2 shrink-0 md:pl-2">
-                      {isProcessing ? (
-                        <span className="inline-flex items-center gap-1.5 h-10 px-4 text-sm font-semibold rounded-full bg-[#E8F1FC] text-[#0071E3]">
-                          <Sparkles className="w-3.5 h-3.5 animate-spin" />
-                          识别中
-                        </span>
-                      ) : null}
-                      <button
-                        onClick={() => setOpenId(task.id)}
-                        className="h-10 px-5 text-sm font-semibold rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] transition-all cursor-pointer flex items-center gap-1.5 active:scale-[0.98]"
-                      >
-                        进入项目
-                        <ArrowRight className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() => setDeleteTarget(task)}
-                        disabled={isProcessing}
-                        className="w-10 h-10 rounded-full flex items-center justify-center text-[#86868B] hover:text-[#FF3B30] hover:bg-[#FF3B30]/8 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                        title={isProcessing ? '识别中不能删除' : '删除任务'}
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })
+                  );
+                })}
+              </div>
             )}
           </div>
+
           </>)}
         </div>
 

@@ -60,6 +60,10 @@ export class OcrTask {
   @Column({ name: 'processing_time_ms', type: 'int', nullable: true })
   processingTimeMs: number | null;
 
+  /** 手动移除了 OCR 内容的卷 id 列表（JSON 数组），自动并入时跳过这些卷 */
+  @Column({ name: 'excluded_volumes', type: 'text', nullable: true })
+  excludedVolumes: string | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

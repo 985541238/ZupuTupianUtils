@@ -71,6 +71,8 @@ export interface ScanItem {
   processMode?: 'algo' | 'ai' | null;
   hasAlgoResult?: boolean;
   hasAiResult?: boolean;
+  /** 当前结果图是否有「擦除前备份」，可还原擦除 */
+  hasEraseOriginal?: boolean;
   aiModelId?: number | null;
   aiWarning?: string | null;
   /** 图片处理费用（元） */
@@ -230,6 +232,8 @@ export interface OcrSourceTask {
     total: number;
     status: string;
     completed: boolean;
+    /** 是否被手动移除了 OCR 内容（自动并入会跳过） */
+    excluded?: boolean;
     inTask: number;
     recognized: number;
     confirmed: number;

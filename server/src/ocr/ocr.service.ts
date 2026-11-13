@@ -194,18 +194,39 @@ export class OcrService implements OnModuleInit {
     };
   }
 
-  /** 项目下所有「通过」且有结果图的页：按卷（创建先后）→ 页序排好 */
-  private async projectUsable(userId: number, projectId: number) {
+  /** 手动移除了 OCR 内容的卷 id 集合 */
+  private excludedVolumeIds(t?: OcrTask | null): Set<number> {
+    try {
+      const raw = t?.excludedVolumes ? JSON.parse(t.excludedVolumes) : [];
+      return new Set((Array.isArray(raw) ? raw : []).map(Number).filter((n) => Number.isFinite(n) && n > 0));
+    } catch {
+      return new Set();
+    }
+  }
+
+  /** 项目下所有可识别的页：已完成卷内有结果图、未删除/失败/驳回的页，按卷（创建先后）→ 页序排好 */
+  private async projectUsable(userId: number, projectId: number, excluded?: Set<number>) {
     const vols = await this.srcTasks.find({ where: { projectId }, order: { id: 'ASC' } });
     const out: { img: TaskImage; vol: Task }[] = [];
-    const volStat: { id: number; name: string; usable: number; passed: number; total: number; status: string; completed: boolean }[] = [];
+    const volStat: { id: number; name: string; usable: number; passed: number; total: number; status: string; completed: boolean; excluded: boolean }[] = [];
     for (const v of vols) {
       const imgs = await this.srcImages.find({ where: { taskId: v.id }, order: { sortOrder: 'ASC', id: 'ASC' } });
-      const ok = imgs.filter((i) => i.status === 'confirmed' && i.resultPath && fs.existsSync(i.resultPath));
-      // 只收「已完成」的卷（整卷都审阅完）；没完成的卷列出来，完成后自动并入
+      // 新流程不再要求逐页人工「通过」：卷处理完成后，有结果图的页都可直接做 OCR；
+      // 仅排除已删除、失败、驳回或仍在处理的页。
+      const ok = imgs.filter(
+        (i) =>
+          !!i.resultPath &&
+          fs.existsSync(i.resultPath) &&
+          !i.resultDeleted &&
+          i.status !== 'rejected' &&
+          i.status !== 'failed' &&
+          i.status !== 'processing',
+      );
+      // 只收「已完成」的卷；没完成的卷列出来，完成后自动并入
       const done = v.status === 'completed';
-      if (done) for (const img of ok) out.push({ img, vol: v });
-      volStat.push({ id: Number(v.id), name: v.name, usable: done ? ok.length : 0, passed: ok.length, total: imgs.length, status: v.status, completed: done });
+      const ex = !!excluded?.has(Number(v.id));
+      if (done && !ex) for (const img of ok) out.push({ img, vol: v });
+      volStat.push({ id: Number(v.id), name: v.name, usable: done && !ex ? ok.length : 0, passed: ok.length, total: imgs.length, status: v.status, completed: done, excluded: ex });
     }
     return { vols, items: out, volStat };
   }
@@ -217,8 +238,9 @@ export class OcrService implements OnModuleInit {
     const existing = await this.tasks.find();
     const out = [];
     for (const p of projs) {
-      const { items, volStat } = await this.projectUsable(userId, Number(p.id));
       const ocr = existing.find((t) => Number(t.projectId) === Number(p.id));
+      const excluded = this.excludedVolumeIds(ocr || null);
+      const { items, volStat } = await this.projectUsable(userId, Number(p.id), excluded);
       let volumes: any[] = volStat;
       if (ocr) {
         const pg = await this.pages.find({ where: { ocrTaskId: ocr.id }, select: ['id', 'volumeId', 'status'] });
@@ -226,6 +248,7 @@ export class OcrService implements OnModuleInit {
           const mine = pg.filter((x) => Number(x.volumeId) === v.id);
           return {
             ...v,
+            excluded: excluded.has(v.id),
             inTask: mine.length,
             recognized: mine.filter((x) => x.status === 'ready' || x.status === 'confirmed').length,
             confirmed: mine.filter((x) => x.status === 'confirmed').length,
@@ -329,7 +352,7 @@ export class OcrService implements OnModuleInit {
   /** 项目里新通过、还没进任务的页（按图片 id 判断） */
   private async newItems(userId: number, t: OcrTask) {
     if (t.projectId == null) return [];
-    const { items } = await this.projectUsable(userId, Number(t.projectId));
+    const { items } = await this.projectUsable(userId, Number(t.projectId), this.excludedVolumeIds(t));
     const have = new Set((await this.pages.find({ where: { ocrTaskId: t.id }, select: ['id', 'imageId'] })).map((p) => Number(p.imageId)));
     return items.filter((x) => !have.has(Number(x.img.id)));
   }
@@ -358,6 +381,41 @@ export class OcrService implements OnModuleInit {
     await this.pages.delete({ ocrTaskId: t.id });
     await this.tasks.delete({ id: t.id });
     return { ok: true, id: Number(t.id) };
+  }
+
+  /** 从 OCR 任务里移除某个卷的识别内容，并记住该卷（自动并入时跳过，避免马上又被加回来） */
+  async removeVolume(userId: number, id: number, volumeId: number) {
+    const t = await this.getTask(userId, id);
+    if (this.running.has(Number(t.id))) throw new BadRequestException('正在识别中，识别结束后再移除');
+    const vid = Number(volumeId);
+    if (!Number.isFinite(vid) || vid <= 0) throw new BadRequestException('卷参数无效');
+    await this.pages.delete({ ocrTaskId: t.id, volumeId: vid });
+    const excluded = this.excludedVolumeIds(t);
+    excluded.add(vid);
+    t.excludedVolumes = JSON.stringify([...excluded]);
+    await this.tasks.save(t);
+    await this.refreshCounts(Number(t.id));
+    const fresh = await this.tasks.findOne({ where: { id: t.id } });
+    if (fresh) {
+      if (Number(fresh.totalCount) === 0) fresh.status = 'pending';
+      else if (fresh.status === 'completed') fresh.status = 'reviewing';
+      await this.tasks.save(fresh);
+    }
+    return this.getView(userId, Number(t.id));
+  }
+
+  /** 重新并入之前移除的卷（清除排除标记并立即补页） */
+  async restoreVolume(userId: number, id: number, volumeId: number) {
+    const t = await this.getTask(userId, id);
+    const vid = Number(volumeId);
+    if (!Number.isFinite(vid) || vid <= 0) throw new BadRequestException('卷参数无效');
+    const excluded = this.excludedVolumeIds(t);
+    if (excluded.delete(vid)) {
+      t.excludedVolumes = excluded.size ? JSON.stringify([...excluded]) : null;
+      await this.tasks.save(t);
+    }
+    await this.sync(userId, id);
+    return this.getView(userId, Number(t.id));
   }
 
   // ---------------- 开始识别 ----------------

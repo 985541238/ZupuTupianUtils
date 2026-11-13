@@ -371,6 +371,32 @@ export class TasksController {
     return this.tasks.applyFinalCrop(req.user.id, id, imageId, body?.source, body?.quad, body?.rotation);
   }
 
+  /**
+   * 橡皮擦：保存前端画布擦除后的结果图（涂白），覆盖当前结果文件。
+   * mode=algo/ai 分别只覆盖对应的算法/大模型结果文件；原图永不改动。
+   */
+  @Put(':id/images/:imageId/erase')
+  erase(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('imageId', ParseIntPipe) imageId: number,
+    @Body() body: { mode?: 'algo' | 'ai' | 'result'; png?: string },
+  ) {
+    return this.tasks.eraseImage(req.user.id, id, imageId, body || {});
+  }
+
+  /** 橡皮擦：还原到第一次擦除前的结果图 */
+  @Put(':id/images/:imageId/erase-restore')
+  restoreErase(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('imageId', ParseIntPipe) imageId: number,
+    @Body() body: { mode?: 'algo' | 'ai' | 'result' },
+  ) {
+    return this.tasks.restoreErasedImage(req.user.id, id, imageId, body || {});
+  }
+
+
   /** 切换当前结果：{ mode: 'algo' | 'ai' } */
   @Post(':id/images/:imageId/use-result')
   useResult(

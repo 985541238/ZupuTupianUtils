@@ -64,4 +64,5 @@ export const OCR_ALTER_SQL: string[] = [
   "ALTER TABLE `ocr_tasks` ADD COLUMN `project_name` VARCHAR(128) NULL",
   "ALTER TABLE `ocr_pages` ADD COLUMN `volume_id` BIGINT UNSIGNED NULL",
   "ALTER TABLE `ocr_pages` ADD COLUMN `volume_name` VARCHAR(128) NULL",
+  "ALTER TABLE `ocr_tasks` ADD COLUMN `excluded_volumes` TEXT NULL COMMENT '手动移除 OCR 的卷 id 列表(JSON)'",
 ];

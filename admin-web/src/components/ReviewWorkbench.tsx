@@ -33,7 +33,10 @@ import {
   AlertCircle,
   Trash2,
   Upload,
+  Eraser,
+  Undo2,
 } from 'lucide-react';
+import { EraseCanvas, EraseCanvasHandle, EraseSaveState } from './EraseCanvas';
 
 interface ReviewWorkbenchProps {
   task: Task;
@@ -70,6 +73,19 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   const [previewDataUrl, setPreviewDataUrl] = useState<string>('');
   /** Sticky frame shown in compare pane — only advances to a non-empty URL (avoids blank). */
   const [displayResultSrc, setDisplayResultSrc] = useState<string>('');
+
+  // 橡皮擦：只作用于当前页结果图（原图不动）；点「完成」才保存
+  const [eraserActive, setEraserActive] = useState(false);
+  // 笔刷大小（图像像素）：最小 30、最大 300、默认 110
+  const [eraserBrush, setEraserBrush] = useState<number>(110);
+  const [eraserSaveState, setEraserSaveState] = useState<EraseSaveState>('idle');
+  const [eraserCanUndo, setEraserCanUndo] = useState(false);
+  const [eraserDirty, setEraserDirty] = useState(false);
+  const [restoreBusy, setRestoreBusy] = useState(false);
+  const eraserRef = useRef<EraseCanvasHandle | null>(null);
+  const eraserModeRef = useRef<'algo' | 'ai' | 'result'>('result');
+  const eraserPageIdRef = useRef('');
+  const eraserDirtyRef = useRef(false);
   const [currentStats, setCurrentStats] = useState(task.items[currentPageIndex]?.stats);
 
   const currentItem = task.items[currentPageIndex] || task.items[0];
@@ -91,6 +107,18 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
       setCurrentPageIndex(task.items.indexOf(resultItems[0]));
     }
   }, [currentResultIndex, resultItems.length, task.items]);
+
+  // 任意方式切页（按钮/缩略图）后自动退出橡皮擦（未保存的笔画直接丢弃，切页前会先确认）
+  useEffect(() => {
+    if (!eraserActive) return;
+    if (eraserPageIdRef.current && eraserPageIdRef.current !== String(currentItem?.id || '')) {
+      eraserDirtyRef.current = false;
+      setEraserDirty(false);
+      setEraserActive(false);
+      setEraserCanUndo(false);
+      setEraserSaveState('idle');
+    }
+  }, [currentItem?.id, eraserActive]);
 
   useEffect(() => {
     const position = thumbnailItems.findIndex((item) => item.id === currentItem?.id);
@@ -131,6 +159,8 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   const isDraggingSplitRef = useRef(false);
   const panDragRef = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  /** 分屏对比的图片容器（拖动分割线必须按这个容器的矩形换算，不能按整个画布区域） */
+  const splitBoxRef = useRef<HTMLDivElement>(null);
   const previewUrlRef = useRef<string>('');
   const previewDataUrlRef = useRef<string>('');
   const localParamsRef = useRef<ProcessParams>(localParams);
@@ -632,6 +662,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
 
   const handleBackToList = async () => {
     /* FLUSH_BEFORE_BACK */
+    if (eraserActive && !(await tryLeaveEraser())) return;
     // Preview already persists; only flush if last slider/crop debounce may still be pending.
     if (paramsDirtyRef.current) {
       setIsProcessing(true);
@@ -650,6 +681,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   /** Pass/reject: status only + next page. Never reprocess — preview already persisted result. */
   const handlePassCurrentPage = async () => {
     if (!currentItem || decidingRef.current) return;
+    if (eraserActive) { triggerToast('请先退出橡皮擦再操作'); return; }
     decidingRef.current = true;
     try {
       // Cancel any in-flight preview debounce; do not kick ScanWash again
@@ -874,6 +906,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file || supplementBusy) return;
+    if (eraserActive) { triggerToast('请先退出橡皮擦再操作'); return; }
     if (targetItem.splitSourceKey) {
       void appAlert('裁剪或分页产生的派生页不能替换原图，请选择对应的原始页');
       return;
@@ -970,6 +1003,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
 
   const handleRejectCurrentPage = async () => {
     if (!currentItem || decidingRef.current) return;
+    if (eraserActive) { triggerToast('请先退出橡皮擦再操作'); return; }
     decidingRef.current = true;
     try {
       previewGenRef.current += 1;
@@ -1015,13 +1049,92 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
     }
   };
 
-  const handleGoToPage = (index: number) => {
+  /** 未点「完成」就离开时：有未保存笔画则确认是否放弃 */
+  const tryLeaveEraser = async (): Promise<boolean> => {
+    if (!eraserActive) return true;
+    if (eraserDirtyRef.current) {
+      const ok = await appConfirm('擦除内容尚未保存（需要点「完成」才会保存），确定放弃本次擦除吗？');
+      if (!ok) return false;
+    }
+    eraserDirtyRef.current = false;
+    setEraserDirty(false);
+    setEraserActive(false);
+    setEraserCanUndo(false);
+    setEraserSaveState('idle');
+    return true;
+  };
+
+  /** 点「完成」：把合成后的结果图上传保存，成功后退出橡皮擦 */
+  const finishEraser = async () => {
+    if (!eraserActive) return;
+    const ok = await eraserRef.current?.finish();
+    if (ok === false) {
+      triggerToast('擦除结果保存失败，请重试');
+      return;
+    }
+    eraserDirtyRef.current = false;
+    setEraserDirty(false);
+    setEraserActive(false);
+    setEraserCanUndo(false);
+    setEraserSaveState('idle');
+  };
+
+  const handleEraserStateChange = (state: { canUndo: boolean; dirty: boolean; saveState: EraseSaveState }) => {
+    eraserDirtyRef.current = state.dirty;
+    setEraserDirty(state.dirty);
+    setEraserCanUndo(state.canUndo);
+    setEraserSaveState(state.saveState);
+  };
+
+  /** 还原擦除：把当前结果图恢复为第一次擦除前的内容（已保存的擦除也能撤回） */
+  const handleRestoreErase = async () => {
+    if (!currentItem || restoreBusy) return;
+    if (eraserActive && !(await tryLeaveEraser())) return;
+    if (!(await appConfirm('确定还原到擦除前的效果吗？本页已擦除的内容会全部恢复。'))) return;
+    setRestoreBusy(true);
+    try {
+      const item = currentItemRef.current || currentItem;
+      const mode = item.processMode === 'ai' ? 'ai' : item.processMode === 'algo' ? 'algo' : 'result';
+      const raw = await api.restoreErasedImage(task.id, item.id, mode);
+      applyServerImage(raw, item);
+      triggerToast('已还原擦除前的效果');
+    } catch (e: any) {
+      void appAlert(e?.message || '还原失败，请重试');
+    } finally {
+      setRestoreBusy(false);
+    }
+  };
+
+  const enterEraser = () => {
+    if (!currentItem?.processedUrl) {
+      triggerToast('这一页还没有结果图，无法擦除');
+      return;
+    }
+    if (isProcessing || aiProcessBusy || supplementBusy || aiBusyIds.length > 0) {
+      triggerToast('图像处理尚未完成，请稍候再擦');
+      return;
+    }
+    eraserModeRef.current =
+      currentItem.processMode === 'ai' ? 'ai' : currentItem.processMode === 'algo' ? 'algo' : 'result';
+    eraserPageIdRef.current = String(currentItem.id);
+    // 原图视图没有结果图可擦，自动切到双联对比；其余视图（双联/擦除对比/仅净图）保持当前视图
+    if (compareMode === 'original-only') setCompareMode('side-by-side');
+    eraserDirtyRef.current = false;
+    setEraserDirty(false);
+    setEraserCanUndo(false);
+    setEraserSaveState('idle');
+    setEraserActive(true);
+  };
+
+  const handleGoToPage = async (index: number) => {
+    if (eraserActive && !(await tryLeaveEraser())) return;
     if (index >= 0 && index < task.items.length) {
       setCurrentPageIndex(index);
     }
   };
 
-  const goToAdjacentResult = (offset: -1 | 1) => {
+  const goToAdjacentResult = async (offset: -1 | 1) => {
+    if (eraserActive && !(await tryLeaveEraser())) return;
     const next = resultItems[currentResultIndex + offset];
     if (next) setCurrentPageIndex(task.items.indexOf(next));
   };
@@ -1182,6 +1295,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
 
   const deletePage = async (item: ScanItem, index: number) => {
     if (isProcessing || aiProcessBusy || supplementBusy || aiBusyIds.length > 0) return;
+    if (eraserActive) { triggerToast('请先退出橡皮擦再操作'); return; }
     if (!(await appConfirm(`确定删除“${item.fileName}”吗？\n将从当前卷中移除这张图片及其结果，原始文件不会被删除。`))) return;
     try {
       setIsProcessing(true);
@@ -1317,6 +1431,24 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
         return;
       }
 
+      // 橡皮擦模式：Esc 退出、Ctrl+Z 撤销，并屏蔽翻页快捷键避免丢笔画
+      if (eraserActive) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          void tryLeaveEraser();
+          return;
+        }
+        if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') {
+          e.preventDefault();
+          eraserRef.current?.undo();
+          return;
+        }
+        if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Tab') {
+          e.preventDefault();
+          return;
+        }
+      }
+
       if (e.key === 'Escape' && cropSelecting) {
         e.preventDefault();
         cancelCropSelect();
@@ -1326,10 +1458,10 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
 
       if (e.key === 'ArrowLeft') {
         e.preventDefault();
-        goToAdjacentResult(-1);
+        void goToAdjacentResult(-1);
       } else if (e.key === 'ArrowRight') {
         e.preventDefault();
-        goToAdjacentResult(1);
+        void goToAdjacentResult(1);
       } else if (e.key === 'Tab') {
         e.preventDefault();
         setCompareMode((prev) => (prev === 'split' ? 'side-by-side' : 'split'));
@@ -1338,18 +1470,26 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentPageIndex, currentResultIndex, resultItems.length, localParams, previewDataUrl, cropSelecting, confirmedCrop, draftCrop, compareMode, finalCropSource, splitCropOpen]);
+  }, [currentPageIndex, currentResultIndex, resultItems.length, localParams, previewDataUrl, cropSelecting, confirmedCrop, draftCrop, compareMode, finalCropSource, splitCropOpen, eraserActive]);
 
   // Split Divider mouse drag
   const handleSplitMouseDown = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
     isDraggingSplitRef.current = true;
+    const box = splitBoxRef.current;
+    const handleRect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    // 记录抓取点相对分割线中心的偏移，拖动时线严格跟手（不再按整个画布区域换算）
+    const grabOffset = e.clientX - (handleRect.left + handleRect.width / 2);
 
     const handleMouseMove = (moveEvent: MouseEvent) => {
-      if (!isDraggingSplitRef.current || !containerRef.current) return;
-      const rect = containerRef.current.getBoundingClientRect();
-      const newPercent = Math.max(0, Math.min(100, ((moveEvent.clientX - rect.left) / rect.width) * 100));
+      if (!isDraggingSplitRef.current) return;
+      const targetBox = box || containerRef.current;
+      if (!targetBox) return;
+      const rect = targetBox.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      const centerX = moveEvent.clientX - grabOffset;
+      const newPercent = Math.max(0, Math.min(100, ((centerX - rect.left) / rect.width) * 100));
       setSplitPercent(newPercent);
     };
 
@@ -1376,7 +1516,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   };
 
   const handleViewerPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (cropSelecting || e.button !== 0 || zoomLevel <= 1) return;
+    if (eraserActive || cropSelecting || e.button !== 0 || zoomLevel <= 1) return;
     if ((e.target as HTMLElement).closest('button, input, [data-no-pan="true"]')) return;
     e.preventDefault();
     panDragRef.current = {
@@ -1663,7 +1803,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
         <main className="flex-1 flex flex-col relative apple-studio-canvas overflow-hidden">
           {/* Top Floating Glass Capsule */}
           <div className="absolute top-3.5 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1 p-1 whitespace-nowrap apple-glass-heavy border border-black/[0.08] rounded-full shadow-[0_8px_24px_rgba(0,0,0,0.06)]">
-            <div className={`flex items-center p-0.5 bg-[#E5E5EA]/70 rounded-full ${cropSelecting ? 'opacity-40 pointer-events-none' : ''}`}>
+            <div className={`flex items-center p-0.5 bg-[#E5E5EA]/70 rounded-full ${cropSelecting || eraserActive ? 'opacity-40 pointer-events-none' : ''}`}>
               <button
                 onClick={() => setCompareMode('side-by-side')}
                 className={`px-3 py-1 text-xs font-medium rounded-full transition-all cursor-pointer flex items-center gap-1 ${
@@ -1743,13 +1883,14 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
 
             <div className="h-4 w-px bg-black/[0.08] mx-1" />
 
-            <button type="button" disabled={isProcessing || !currentItem?.processedUrl} onClick={() => setFinalCropSource('result')} className="px-2.5 py-1 text-xs font-medium rounded-full hover:bg-black/[0.05] disabled:opacity-40" title="在当前处理结果上生成新的裁剪页，可重复使用">结果裁剪</button>
+            <button type="button" disabled={isProcessing || eraserActive || !currentItem?.processedUrl} onClick={() => setFinalCropSource('result')} className="px-2.5 py-1 text-xs font-medium rounded-full hover:bg-black/[0.05] disabled:opacity-40" title="在当前处理结果上生成新的裁剪页，可重复使用">结果裁剪</button>
             <div className="h-4 w-px bg-black/[0.08] mx-1" />
 
             <button
               type="button"
               onClick={() => setSplitCropOpen(true)}
-              className={`px-3 py-1 text-xs font-medium rounded-full transition-all flex items-center gap-1 cursor-pointer ${
+              disabled={eraserActive}
+              className={`px-3 py-1 text-xs font-medium rounded-full transition-all flex items-center gap-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
                 cropSelecting || confirmedCrop || currentItem?.splitSourceKey
                   ? 'bg-[#0071E3] text-white shadow-xs'
                   : 'text-[#1D1D1F] hover:bg-black/[0.05]'
@@ -1761,7 +1902,86 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                 {splitCropOpen ? '裁剪中…' : currentItem?.splitSourceKey ? '重新裁剪' : confirmedCrop ? '已裁剪' : '裁剪 / 分页'}
               </span>
             </button>
+
+            <div className="h-4 w-px bg-black/[0.08] mx-1" />
+
+            <button
+              type="button"
+              onClick={() => { if (eraserActive) void tryLeaveEraser(); else enterEraser(); }}
+              disabled={!eraserActive && (isProcessing || aiProcessBusy || supplementBusy || aiBusyIds.length > 0 || cropSelecting || splitCropOpen || !currentItem?.processedUrl)}
+              className={`px-3 py-1 text-xs font-medium rounded-full transition-all flex items-center gap-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+                eraserActive
+                  ? 'bg-[#FF9500] text-white shadow-xs'
+                  : 'text-[#1D1D1F] hover:bg-black/[0.05]'
+              }`}
+              title="橡皮擦：擦掉结果图上的文字/黑点；只改结果图，原图不动"
+            >
+              <Eraser className="w-3 h-3" />
+              <span>{eraserActive ? '退出橡皮擦' : '橡皮擦'}</span>
+            </button>
+
+            {currentItem?.hasEraseOriginal && !eraserActive ? (
+              <>
+                <div className="h-4 w-px bg-black/[0.08] mx-1" />
+                <button
+                  type="button"
+                  onClick={() => void handleRestoreErase()}
+                  disabled={restoreBusy || isProcessing || aiProcessBusy}
+                  className="px-2.5 py-1 text-xs font-medium rounded-full text-[#0071E3] hover:bg-[#0071E3]/10 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                  title="还原到擦除前的结果图（撤回已保存的擦除）"
+                >
+                  <span className="inline-flex items-center gap-1">
+                    <Undo2 className="w-3 h-3" />
+                    {restoreBusy ? '还原中…' : '还原擦除'}
+                  </span>
+                </button>
+              </>
+            ) : null}
           </div>
+
+          {/* 橡皮擦工具条：笔刷大小 / 撤销 / 保存状态 / 完成 */}
+          {eraserActive && currentItem ? (
+            <div className="absolute top-16 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-3 py-1.5 apple-glass-heavy border border-[#0071E3]/25 rounded-full shadow-[0_8px_24px_rgba(0,0,0,0.06)] text-xs text-[#1D1D1F] whitespace-nowrap">
+              <Eraser className="w-3.5 h-3.5 text-[#FF9500]" />
+              <span className="font-semibold">橡皮擦</span>
+              <span className="text-[#86868B]">笔刷</span>
+              <input
+                type="range"
+                min={30}
+                max={300}
+                step={1}
+                value={eraserBrush}
+                onChange={(e) => {
+                  const v = Number(e.target.value) || 110;
+                  setEraserBrush(v);
+                }}
+                className="w-24 accent-[#FF9500] cursor-pointer"
+                title="笔刷大小（像素，30-300）"
+              />
+              <span className="w-10 text-center tabular-nums text-[#6E6E73]">{eraserBrush}px</span>
+              <button
+                type="button"
+                onClick={() => eraserRef.current?.undo()}
+                disabled={!eraserCanUndo}
+                className="px-2 py-1 rounded-full hover:bg-black/[0.05] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                title="撤销上一笔 (Ctrl+Z)"
+              >
+                <span className="inline-flex items-center gap-1"><Undo2 className="w-3 h-3" />撤销</span>
+              </button>
+              <span className={`w-20 text-right ${eraserSaveState === 'error' ? 'text-[#D70015]' : 'text-[#86868B]'}`}>
+                {eraserSaveState === 'saving' ? '保存中…' : eraserSaveState === 'error' ? '保存失败' : eraserDirty ? '未保存' : '未修改'}
+              </span>
+              <button
+                type="button"
+                onClick={() => void finishEraser()}
+                disabled={eraserSaveState === 'saving'}
+                className="px-2.5 py-1 rounded-full bg-[#0071E3] text-white font-semibold hover:bg-[#0077ED] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                title="保存本次擦除结果并退出橡皮擦"
+              >
+                {eraserSaveState === 'saving' ? '保存中…' : '完成'}
+              </button>
+            </div>
+          ) : null}
 
           {/* Canvas Viewport */}
           <div
@@ -1799,6 +2019,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
             {/* Split Comparison Mode */}
             {compareMode === 'split' && (
               <div
+                ref={splitBoxRef}
                 className="relative max-h-[80vh] max-w-[85vw] flex items-center justify-center apple-doc-shadow rounded-lg overflow-hidden bg-white transition-transform duration-100 ease-out"
                 style={{ transform: viewerTransform }}
               >
@@ -1824,8 +2045,28 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                   />
                 </div>
 
+                {/* 橡皮擦覆盖层：只覆盖结果图可见区域（分屏右侧），移动到原图上不生效 */}
+                {eraserActive && currentItem ? (
+                  <EraseCanvas
+                    key={'eraser-' + String(currentItem.id)}
+                    ref={eraserRef}
+                    src={shownResultSrc}
+                    taskId={task.id}
+                    imageId={currentItem.id}
+                    mode={eraserModeRef.current}
+                    brushSize={eraserBrush}
+                    clipRightPercent={splitPercent}
+                    onSaved={(raw) => {
+                      const item = currentItemRef.current;
+                      if (item) applyServerImage(raw, item);
+                    }}
+                    onStateChange={handleEraserStateChange}
+                  />
+                ) : null}
+
                 {/* Split Handle */}
                 <div
+                  data-no-pan="true"
                   className="absolute inset-y-0 w-0.5 bg-white shadow-[0_0_8px_rgba(0,0,0,0.3)] z-20 cursor-ew-resize flex items-center justify-center"
                   style={{ left: `${splitPercent}%` }}
                   onMouseDown={handleSplitMouseDown}
@@ -1871,6 +2112,23 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                     alt=""
                     className="max-h-[78vh] w-auto object-contain"
                   />
+                  {/* 橡皮擦只覆盖结果图这一侧 */}
+                  {eraserActive && currentItem ? (
+                    <EraseCanvas
+                      key={'eraser-' + String(currentItem.id)}
+                      ref={eraserRef}
+                      src={shownResultSrc}
+                      taskId={task.id}
+                      imageId={currentItem.id}
+                      mode={eraserModeRef.current}
+                      brushSize={eraserBrush}
+                      onSaved={(raw) => {
+                        const item = currentItemRef.current;
+                        if (item) applyServerImage(raw, item);
+                      }}
+                      onStateChange={handleEraserStateChange}
+                      />
+                  ) : null}
                   <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-[#0071E3] text-[10px] font-semibold text-white shadow-2xs">
                     处理结果
                   </div>
@@ -1881,7 +2139,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
             {/* Clean Only */}
             {compareMode === 'clean-only' && (
               <div
-                className="max-h-[80vh] apple-doc-shadow rounded-lg overflow-hidden bg-white transition-transform duration-100 ease-out"
+                className="relative max-h-[80vh] apple-doc-shadow rounded-lg overflow-hidden bg-white transition-transform duration-100 ease-out"
                 style={{ transform: viewerTransform }}
               >
                 <img
@@ -1890,6 +2148,22 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                   alt=""
                   className="max-h-[78vh] w-auto object-contain"
                 />
+                {eraserActive && currentItem ? (
+                  <EraseCanvas
+                    key={'eraser-' + String(currentItem.id)}
+                    ref={eraserRef}
+                    src={shownResultSrc}
+                    taskId={task.id}
+                    imageId={currentItem.id}
+                    mode={eraserModeRef.current}
+                    brushSize={eraserBrush}
+                    onSaved={(raw) => {
+                      const item = currentItemRef.current;
+                      if (item) applyServerImage(raw, item);
+                    }}
+                    onStateChange={handleEraserStateChange}
+                  />
+                ) : null}
               </div>
             )}
 
@@ -2050,7 +2324,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
         <aside
           className={`apple-glass border-l border-black/[0.06] transition-all duration-300 ease-out flex flex-col shrink-0 z-20 ${
             showRightInspector ? 'w-80' : 'w-0'
-          } overflow-hidden`}
+          } overflow-hidden ${eraserActive ? 'pointer-events-none opacity-50' : ''}`}
         >
           <div className="p-3.5 border-b border-black/[0.06] flex items-center justify-between gap-2">
             <label

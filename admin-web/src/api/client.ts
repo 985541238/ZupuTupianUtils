@@ -184,6 +184,18 @@ export const api = {
     }),
   applyFinalCrop: (taskId: string | number, imageId: string | number, source: 'original' | 'result', quad: number[][], rotation = 0) =>
     request<any>(`/tasks/${taskId}/images/${imageId}/final-crop`, { method: 'PUT', body: JSON.stringify({ source, quad, rotation }) }),
+  /** 橡皮擦：保存前端画布擦除后的结果图（覆盖算法/大模型对应的结果文件，原图不动） */
+  eraseImage: (taskId: string | number, imageId: string | number, mode: 'algo' | 'ai' | 'result', pngDataUrl: string) =>
+    request<any>(`/tasks/${taskId}/images/${imageId}/erase`, {
+      method: 'PUT',
+      body: JSON.stringify({ mode, png: pngDataUrl }),
+    }),
+  /** 橡皮擦：还原到第一次擦除前的结果图 */
+  restoreErasedImage: (taskId: string | number, imageId: string | number, mode: 'algo' | 'ai' | 'result') =>
+    request<any>(`/tasks/${taskId}/images/${imageId}/erase-restore`, {
+      method: 'PUT',
+      body: JSON.stringify({ mode }),
+    }),
   detectMode: (taskId: string | number, imageId: string | number) =>
     request<{ mode: 'standard' | 'stained' | 'faint'; scores: Record<string, number> }>(
       `/tasks/${taskId}/images/${imageId}/detect-mode`,
@@ -301,6 +313,12 @@ export const api = {
   getOcrTasks: () => request<any[]>('/ocr-tasks'),
   getOcrSources: () => request<any[]>('/ocr-tasks/sources'),
   syncOcrTask: (id: string | number) => request<{ added: number; task: any }>('/ocr-tasks/' + id + '/sync', { method: 'POST', body: '{}' }),
+  /** 从 OCR 项目里移除某个卷的识别内容（图片处理结果不受影响） */
+  removeOcrVolume: (taskId: string | number, volumeId: string | number) =>
+    request<any>(`/ocr-tasks/${taskId}/volumes/${volumeId}`, { method: 'DELETE' }),
+  /** 重新并入之前移除的卷 */
+  restoreOcrVolume: (taskId: string | number, volumeId: string | number) =>
+    request<any>(`/ocr-tasks/${taskId}/volumes/${volumeId}/restore`, { method: 'POST', body: '{}' }),
   createOcrTask: (data: { name?: string; projectId: number | string; ocrModelId?: number | null }) =>
     request<any>('/ocr-tasks', { method: 'POST', body: JSON.stringify(data) }),
   getOcrTask: (id: string | number) => request<any>('/ocr-tasks/' + id),

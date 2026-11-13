@@ -1071,6 +1071,7 @@ export class TasksService implements OnModuleInit {
         if (resolved !== outputRoot && resolved.startsWith(outputPrefix)) paths.add(resolved);
       }
       for (const filePath of paths) {
+        this.clearEraseBaseline(filePath);
         try {
           if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) fs.unlinkSync(filePath);
         } catch (e) {
@@ -1101,6 +1102,7 @@ export class TasksService implements OnModuleInit {
       paths.add(resolved);
     }
     for (const filePath of paths) {
+      this.clearEraseBaseline(filePath);
       try {
         if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) fs.unlinkSync(filePath);
       } catch (e) {
@@ -1375,6 +1377,8 @@ export class TasksService implements OnModuleInit {
     const started = Date.now();
     const size = await this.processor.processToFile(img.sourcePath, resultPath, params, crop);
     await this.processor.makeThumb(resultPath, thumbPath);
+    // 重新跑算法会覆盖旧结果，旧的“擦除前备份”随之失效
+    this.clearEraseBaseline(resultPath);
     img.processingTimeMs = Date.now() - started;
     img.algoResultPath = resultPath;
     img.resultPath = resultPath;
@@ -1463,6 +1467,9 @@ export class TasksService implements OnModuleInit {
       const aiWarning: string | null = null;
       // 不做保真检查、不做自动融合：rawPath 就是用户付费得到的大模型结果。
       fs.copyFileSync(rawPath, resultPath);
+      // 大模型重新出图会覆盖算法/AI 结果，旧的“擦除前备份”失效
+      this.clearEraseBaseline(algoOut);
+      this.clearEraseBaseline(resultPath);
       this.writeAiMark(markPath, key, 'done');
       await this.processor.makeThumb(resultPath, thumbPath);
       img.aiResultPath = resultPath;
@@ -1640,6 +1647,201 @@ export class TasksService implements OnModuleInit {
     return this.imageView(img);
   }
 
+  /** 擦除前备份文件路径：与原结果图同目录的 erase-originals 子目录、同名文件 */
+  private eraseBaselinePath(targetPath: string) {
+    const abs = path.resolve(targetPath);
+    return path.join(path.dirname(abs), 'erase-originals', path.basename(abs));
+  }
+
+  /** 第一次擦除前备份原结果图；重复擦除不会覆盖这份“擦除前原图” */
+  private ensureEraseBaseline(targetPath: string) {
+    const abs = path.resolve(targetPath);
+    const baseline = this.eraseBaselinePath(abs);
+    try {
+      if (!fs.existsSync(baseline)) {
+        fs.mkdirSync(path.dirname(baseline), { recursive: true });
+        fs.copyFileSync(abs, baseline);
+      }
+    } catch (e) {
+      this.logger.warn(`擦除前备份创建失败: ${abs}; ${e}`);
+    }
+    return baseline;
+  }
+
+  /** 结果图被重新生成/删除时清掉旧的擦除前备份，避免还原到旧版本 */
+  private clearEraseBaseline(targetPath?: string | null) {
+    if (!targetPath) return;
+    try {
+      const baseline = this.eraseBaselinePath(targetPath);
+      if (fs.existsSync(baseline)) fs.rmSync(baseline, { force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /**
+   * 橡皮擦：用前端画布导出的 PNG 覆盖当前结果图（黑白图擦除=涂白）。
+   * - mode=algo / ai 时只覆盖对应的结果文件；result 时覆盖当前 resultPath 指向的文件；
+   * - 只允许写任务输出目录内的结果文件，原图（source_path）与上传目录永不被修改；
+   * - 尺寸必须与原结果图完全一致，防止串页/误传；
+   * - 覆盖前把原结果图备份到 erase-originals/，保存后可随时「还原擦除」；
+   * - 覆盖后重建缩略图并刷新 updatedAt（前端据此拿到新的缓存地址）。
+   */
+  async eraseImage(
+    userId: number,
+    taskId: number,
+    imageId: number,
+    body: { mode?: string; png?: string },
+  ) {
+    const task = await this.get(userId, taskId);
+    const img = await this.getImage(userId, taskId, imageId);
+    if (img.status === 'processing') throw new BadRequestException('这一页正在处理中，请稍后再擦');
+
+    const mode: 'algo' | 'ai' | 'result' =
+      body?.mode === 'ai' ? 'ai' : body?.mode === 'algo' ? 'algo' : 'result';
+    const target =
+      mode === 'ai' ? img.aiResultPath : mode === 'algo' ? (img.algoResultPath || img.resultPath) : img.resultPath;
+    if (!target || !fs.existsSync(target)) {
+      throw new BadRequestException(mode === 'ai' ? '这一页还没有大模型结果' : '这一页还没有可擦除的结果图');
+    }
+
+    // 只允许覆盖任务输出目录内的结果文件，原图/上传目录一律拒绝
+    const outRoot = path.resolve(task.outputFolder || '');
+    const abs = path.resolve(target);
+    const rel = path.relative(outRoot, abs);
+    if (!outRoot || !rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+      throw new BadRequestException('结果图路径无效，不能擦除');
+    }
+
+    const rawData = String(body?.png || '');
+    const comma = rawData.indexOf(',');
+    const b64 = (rawData.startsWith('data:') && comma >= 0 ? rawData.slice(comma + 1) : rawData).trim();
+    if (!b64) throw new BadRequestException('缺少擦除后的图片数据');
+    if (b64.length > 48 * 1024 * 1024) throw new BadRequestException('擦除图片数据过大');
+    const buf = Buffer.from(b64, 'base64');
+    if (!buf.length) throw new BadRequestException('擦除图片数据无效');
+
+    // 尺寸校验：必须与原结果图一致，避免误传/串页
+    const oldMeta = await sharp(abs, { failOn: 'none' }).metadata().catch(() => null as any);
+    const newMeta = await sharp(buf, { limitInputPixels: false, failOn: 'none' }).metadata().catch(() => null as any);
+    if (!newMeta?.width || !newMeta?.height) throw new BadRequestException('擦除图片解析失败');
+    if (!oldMeta?.width || !oldMeta?.height || oldMeta.width !== newMeta.width || oldMeta.height !== newMeta.height) {
+      throw new BadRequestException('擦除图片尺寸与原结果图不一致，请刷新后重试');
+    }
+
+    // 第一次擦除前保留一份“擦除前原图”，用于保存后随时还原
+    this.ensureEraseBaseline(abs);
+
+    // 原子覆盖：先写临时文件再 rename，避免中途失败留下半张图（Windows 偶发文件占用时重试）
+    const tmp = abs + '.erase-' + process.pid + '-' + Date.now() + '.tmp';
+    try {
+      await sharp(buf, { limitInputPixels: false, failOn: 'none' })
+        .png({ compressionLevel: 9 })
+        .toFile(tmp);
+      let renamed = false;
+      for (let attempt = 1; attempt <= 4; attempt += 1) {
+        try {
+          fs.renameSync(tmp, abs);
+          renamed = true;
+          break;
+        } catch (e) {
+          if (attempt === 4) throw e;
+          await new Promise((r) => setTimeout(r, 150 * attempt));
+        }
+      }
+      if (!renamed) throw new Error('rename failed');
+    } catch {
+      try { if (fs.existsSync(tmp)) fs.rmSync(tmp, { force: true }); } catch { /* ignore */ }
+      throw new BadRequestException('擦除结果保存失败，请重试');
+    }
+
+    img.thumbPath = this.thumbPath(task, img);
+    await this.processor.makeThumb(abs, img.thumbPath);
+    img.resultPath = abs;
+    if (mode === 'ai') img.aiResultPath = abs;
+    else if (mode === 'algo') img.algoResultPath = abs;
+    img.processMode = mode === 'ai' ? 'ai' : mode === 'algo' ? 'algo' : img.processMode;
+    img.resultDeleted = false;
+    img.updatedAt = new Date();
+    await this.images.save(img);
+    this.logger.log(`Erased image ${img.id} (${mode}) -> ${path.basename(abs)}`);
+    return this.imageView(img);
+  }
+
+  /** 还原擦除：把结果图恢复为第一次擦除前的备份（算法/AI 结果各自独立） */
+  async restoreErasedImage(
+    userId: number,
+    taskId: number,
+    imageId: number,
+    body: { mode?: string },
+  ) {
+    const task = await this.get(userId, taskId);
+    const img = await this.getImage(userId, taskId, imageId);
+    if (img.status === 'processing') throw new BadRequestException('这一页正在处理中，请稍后再还原');
+
+    const mode: 'algo' | 'ai' | 'result' =
+      body?.mode === 'ai' ? 'ai' : body?.mode === 'algo' ? 'algo' : 'result';
+    const target =
+      mode === 'ai' ? img.aiResultPath : mode === 'algo' ? (img.algoResultPath || img.resultPath) : img.resultPath;
+    if (!target || !fs.existsSync(target)) throw new BadRequestException('这一页还没有可还原的结果图');
+
+    const outRoot = path.resolve(task.outputFolder || '');
+    const abs = path.resolve(target);
+    const rel = path.relative(outRoot, abs);
+    if (!outRoot || !rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+      throw new BadRequestException('结果图路径无效，不能还原');
+    }
+
+    const baseline = this.eraseBaselinePath(abs);
+    if (!fs.existsSync(baseline)) throw new BadRequestException('没有可还原的擦除前记录');
+
+    // 原子还原：先复制到临时文件再 rename；Windows 上偶发文件被占用（刚擦除后查看工作图缓存），重试并兜底直写
+    const tmp = abs + '.restore-' + process.pid + '-' + Date.now() + '.tmp';
+    let lastErr: any = null;
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      try {
+        fs.copyFileSync(baseline, tmp);
+        fs.renameSync(tmp, abs);
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+        try { if (fs.existsSync(tmp)) fs.rmSync(tmp, { force: true }); } catch { /* ignore */ }
+        await new Promise((r) => setTimeout(r, 150 * attempt));
+      }
+    }
+    if (lastErr) {
+      try {
+        fs.copyFileSync(baseline, abs);
+        lastErr = null;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    if (lastErr) {
+      this.logger.warn(`还原擦除文件失败: ${abs}; ${lastErr?.message || lastErr}`);
+      throw new BadRequestException('还原失败，请重试');
+    }
+    this.clearEraseBaseline(abs);
+    try {
+      const dir = path.dirname(baseline);
+      if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
+    } catch {
+      /* ignore */
+    }
+
+    img.thumbPath = this.thumbPath(task, img);
+    await this.processor.makeThumb(abs, img.thumbPath);
+    img.resultPath = abs;
+    if (mode === 'ai') img.aiResultPath = abs;
+    else if (mode === 'algo') img.algoResultPath = abs;
+    img.resultDeleted = false;
+    img.updatedAt = new Date();
+    await this.images.save(img);
+    this.logger.log(`Restored pre-erase image ${img.id} (${mode}) -> ${path.basename(abs)}`);
+    return this.imageView(img);
+  }
+
   /** 给前端的图片数据：附带访问地址与结果来源 */
   imageView(img: TaskImage, aiModel?: AiModel | null) {
     const bust = 't=' + new Date(img.updatedAt || Date.now()).getTime();
@@ -1684,6 +1886,7 @@ export class TasksService implements OnModuleInit {
       thumbUrl: img.resultDeleted ? null : withBust(this.fileUrl(img.thumbPath)),
       hasAlgoResult: !!(algoResultPath && fs.existsSync(algoResultPath)),
       hasAiResult: !!(aiResultPath && fs.existsSync(aiResultPath)),
+      hasEraseOriginal: !img.resultDeleted && !!img.resultPath && fs.existsSync(this.eraseBaselinePath(img.resultPath)),
       aiModelName: aiModel ? aiModel.displayName : undefined,
       aiWarning,
     };
@@ -2417,6 +2620,8 @@ export class TasksService implements OnModuleInit {
       true,
     );
     await this.processor.makeThumb(resultPath, thumbPath);
+    // 重新处理/预览会覆盖旧结果，旧的“擦除前备份”随之失效
+    this.clearEraseBaseline(resultPath);
     img.processingTimeMs = Date.now() - imgStartedAt;
 
     img.params = JSON.stringify(params);
@@ -2504,6 +2709,8 @@ export class TasksService implements OnModuleInit {
       true,
     );
     await this.processor.makeThumb(resultPath, thumbPath);
+    // 重新处理/预览会覆盖旧结果，旧的“擦除前备份”随之失效
+    this.clearEraseBaseline(resultPath);
     img.processingTimeMs = Date.now() - imgStartedAt;
 
     img.params = JSON.stringify(params);

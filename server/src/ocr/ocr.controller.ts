@@ -34,6 +34,26 @@ export class OcrController {
     return this.ocr.remove(req.user.id, id);
   }
 
+  /** 从 OCR 项目里移除某个卷的识别内容（图片处理结果不受影响） */
+  @Delete(':id/volumes/:volumeId')
+  removeVolume(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('volumeId', ParseIntPipe) volumeId: number,
+  ) {
+    return this.ocr.removeVolume(req.user.id, id, volumeId);
+  }
+
+  /** 重新并入之前移除的卷 */
+  @Post(':id/volumes/:volumeId/restore')
+  restoreVolume(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('volumeId', ParseIntPipe) volumeId: number,
+  ) {
+    return this.ocr.restoreVolume(req.user.id, id, volumeId);
+  }
+
   @Post(':id/start')
   start(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Body() body: any) {
     return this.ocr.start(req.user.id, id, body || {});
