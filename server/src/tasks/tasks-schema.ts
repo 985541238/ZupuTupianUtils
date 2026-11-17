@@ -26,4 +26,8 @@ export const TASKS_ALTER_SQL: string[] = [
   "ALTER TABLE `tasks` ADD COLUMN `client_type` VARCHAR(16) NOT NULL DEFAULT 'web' COMMENT '创建入口：web/desktop' AFTER `source_folder`",
   'ALTER TABLE `tasks` ADD COLUMN `client_device_id` VARCHAR(128) NULL COMMENT \'创建设备标识\' AFTER `client_type`',
   'ALTER TABLE `task_images` ADD COLUMN `erase_history` TEXT NULL COMMENT \'橡皮擦历史快照(JSON)\' AFTER `ai_result_path`',
+  'ALTER TABLE `task_images` ADD COLUMN `algo_processing_time_ms` INT NULL COMMENT \'算法结果耗时\' AFTER `processing_time_ms`',
+  'ALTER TABLE `task_images` ADD COLUMN `ai_processing_time_ms` INT NULL COMMENT \'大模型结果耗时\' AFTER `algo_processing_time_ms`',
+  "UPDATE `task_images` SET `ai_processing_time_ms` = `processing_time_ms` WHERE `process_mode` = 'ai' AND `ai_processing_time_ms` IS NULL",
+  "UPDATE `task_images` SET `algo_processing_time_ms` = `processing_time_ms` WHERE `process_mode` = 'algo' AND `algo_processing_time_ms` IS NULL",
 ];

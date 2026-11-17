@@ -132,6 +132,11 @@ export function classifyAiError(status: number, code: string, rawMsg: string, pl
 export class AliyunService {
   private readonly logger = new Logger(AliyunService.name);
 
+  /** 图生图请求全局并发上限：base64 大图并发过高会触发 HTTP/2 会话重置 */
+  private imageActive = 0;
+  private readonly imageWaiters: (() => void)[] = [];
+  private readonly imageMaxConcurrency = Math.max(1, Number(process.env.AI_IMAGE_CONCURRENCY) || 2);
+
   constructor(private readonly settings: SettingsService) {}
 
   private get mock() {
@@ -574,6 +579,28 @@ export class AliyunService {
    * imagePath 应是已按裁剪框裁好的图。
    */
   async cleanImage(
+    imagePath: string,
+    outPath: string,
+    model: AiModel,
+  ): Promise<{ usage: Usage; width: number; height: number }> {
+    return this.withImageSlot(() => this.cleanImageUnlocked(imagePath, outPath, model));
+  }
+
+  private async withImageSlot<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.imageActive >= this.imageMaxConcurrency) {
+      await new Promise<void>((resolve) => this.imageWaiters.push(resolve));
+    }
+    this.imageActive += 1;
+    try {
+      return await fn();
+    } finally {
+      this.imageActive -= 1;
+      const next = this.imageWaiters.shift();
+      if (next) next();
+    }
+  }
+
+  private async cleanImageUnlocked(
     imagePath: string,
     outPath: string,
     model: AiModel,

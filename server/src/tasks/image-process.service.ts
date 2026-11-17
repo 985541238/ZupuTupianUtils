@@ -22,6 +22,8 @@ export type ProcessParams = {
   method?: 'adaptive' | 'sauvola' | 'relative';
   preset?: 'auto' | 'clean' | 'aged' | 'damaged';
   minArea?: number; // connected-component despeckle
+  /** 透字增强：算法输出后再做一次白底黑字收口，去掉残余浅灰背透 */
+  bleedEnhance?: boolean;
 };
 
 export type CropBox = { x: number; y: number; w: number; h: number };
@@ -70,6 +72,24 @@ export class ImageProcessService {
     } catch {
       return { ...fallback };
     }
+  }
+
+  /**
+   * 去透字增强：只用于「算法图处理」的大模型输入。
+   * 比普通算法更积极地压低浅灰背透，同时保留深色正面笔画。
+   */
+  bleedEnhanceParams(params: ProcessParams): ProcessParams {
+    return {
+      ...params,
+      threshold: Math.max(Number(params.threshold) || 0, 190),
+      denoise: Math.max(Number(params.denoise) || 0, 10),
+      contrast: Math.max(Number(params.contrast) || 0, 1.5),
+      stain: 1,
+      strongDestain: true,
+      minArea: Math.max(Number(params.minArea) || 0, 80),
+      method: 'relative',
+      bleedEnhance: true,
+    };
   }
 
   parseCrop(raw?: string | null): CropBox | null {
@@ -333,6 +353,7 @@ export class ImageProcessService {
     ];
     if (params.strongDestain) args.push('--strong-destain');
     if (params.antiqueMode) args.push('--antique-mode');
+    if (params.bleedEnhance) args.push('--bleed-enhance');
     if (crop && crop.w > 0 && crop.h > 0) {
       args.push('--crop', `${crop.x},${crop.y},${crop.w},${crop.h}`);
     }
@@ -441,7 +462,9 @@ export class ImageProcessService {
       if (py && fs.existsSync(this.scriptPath())) {
         try {
           // Crop already applied to workPath; do not pass --crop again.
-          return await this.runPython(py, workPath, outPath, paramsForRun, null, fast, interactive);
+          const result = await this.runPython(py, workPath, outPath, paramsForRun, null, fast, interactive);
+          if (paramsForRun.bleedEnhance) await this.binarizeBleed(outPath);
+          return result;
         } catch (e) {
           if (wantedCrop) {
             // Never silently return a full-page clean when user asked for a crop.
@@ -451,12 +474,25 @@ export class ImageProcessService {
           this.logger.warn(`OpenCV pipeline failed, sharp fallback: ${e}`);
         }
       }
-      return await this.processWithSharp(workPath, outPath, paramsForRun, wantedCrop ? null : effectiveCrop);
+      const fallback = await this.processWithSharp(workPath, outPath, paramsForRun, wantedCrop ? null : effectiveCrop);
+      if (paramsForRun.bleedEnhance) await this.binarizeBleed(outPath);
+      return fallback;
     } finally {
       if (tmpCropPath) {
         try { fs.unlinkSync(tmpCropPath); } catch {}
       }
     }
+  }
+
+  /** 透字增强收口：只保留深色正面笔画，残余浅灰背透直接刷白 */
+  private async binarizeBleed(outPath: string) {
+    const tmp = outPath + '.bleed.png';
+    await sharp(outPath, { failOn: 'none' })
+      .grayscale()
+      .threshold(160)
+      .png()
+      .toFile(tmp);
+    fs.renameSync(tmp, outPath);
   }
 
   /** Fallback: improved sharp path (bg approx via blur divide is limited; keep usable) */

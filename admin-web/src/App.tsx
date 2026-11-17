@@ -13,7 +13,7 @@ import { AiSetupWizard } from './components/AiSetupWizard';
 import { AiProblemDialog, AiProblem, inferErrorCode } from './components/AiProblemDialog';
 import { api, clearAuth, getStoredUser, getToken } from './api/client';
 import { mapTask, mapUser, mapOcrTask } from './api/mappers';
-import { appAlert } from './components/AppDialog';
+import { appAlert, appConfirm } from './components/AppDialog';
 
 function parseReviewPath(pathname: string): string | null {
   const m = pathname.match(/^\/tasks\/([^/]+)\/review\/?$/);
@@ -235,12 +235,13 @@ export default function App() {
         .then((list) => {
           const mapped = (list || []).map((t) => mapTask(t));
           setTasks((prev) => mergeTasksPreserveItems(prev, mapped));
-          // 发现状态变化：处理中 → 已完成 = 完成提示；处理中 → 失败（被暂停）= 弹窗说明原因
+          // 发现状态变化：处理中 → 已完成 = 完成提示；任何状态 → 失败 = 主动弹窗说明原因。
           for (const t of mapped) {
             const prev = statusRef.current.get(t.id);
-            if (prev === 'processing' && t.nestStatus !== 'processing') {
-              if (t.nestStatus === 'failed' && t.errorMessage) showTaskProblem(t);
-              else if (t.nestStatus === 'reviewing' || t.nestStatus === 'completed') {
+            if (t.nestStatus === 'failed' && t.errorMessage && prev && prev !== 'failed') {
+              showTaskProblem(t);
+            } else if (prev === 'processing' && t.nestStatus !== 'processing') {
+              if (t.nestStatus === 'reviewing' || t.nestStatus === 'completed') {
                 setDoneNotice({ taskId: t.id, name: t.name, pages: t.totalPages, cost: t.actualCost });
               }
             }
@@ -363,6 +364,32 @@ export default function App() {
         setAiProblem({ taskId, taskName: t?.name, message: e.message, errorCode: e.errorCode });
       } else {
         void appAlert(e?.message || '开始处理失败');
+      }
+      await loadTasks();
+    }
+  };
+
+  const handleAiProcessTask = async (taskId: string) => {
+    const task = tasks.find((x) => x.id === taskId);
+    const pages = task?.totalPages || 0;
+    const ok = await appConfirm(
+      `将对本卷（共 ${pages} 页）中还没有 AI 结果的页面批量处理。\n本次统一使用原图处理；已 AI 处理的页面会跳过，不会重复扣费。\n处理会产生模型费用，并需要一些时间。继续吗？`,
+    );
+    if (!ok) return;
+    try {
+      await api.aiProcessTask(taskId, { inputSource: 'original' });
+      setProcessingTaskId(taskId);
+      setProcessingProgress(0);
+      setProcessingStatusText('已开始整卷 AI 处理');
+      statusRef.current.set(taskId, 'processing');
+      await loadTasks();
+    } catch (e: any) {
+      console.error(e);
+      setProcessingTaskId(null);
+      if (e?.errorCode) {
+        setAiProblem({ taskId, taskName: task?.name, message: e.message, errorCode: e.errorCode });
+      } else {
+        void appAlert(e?.message || '开始整卷 AI 处理失败');
       }
       await loadTasks();
     }
@@ -566,6 +593,7 @@ export default function App() {
           <TaskCenterView
             tasks={tasks}
             onStartProcessing={handleStartProcessing}
+            onAiProcessTask={(taskId) => void handleAiProcessTask(taskId)}
             onCreateTask={handleCreateTask}
             onOpenReview={handleOpenReview}
             onDeleteTask={handleDeleteTask}

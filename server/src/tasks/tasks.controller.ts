@@ -182,6 +182,16 @@ export class TasksController {
     return this.tasks.get(req.user.id, id);
   }
 
+  /** 整卷 AI 处理：只处理还没有 AI 结果的页面，已 AI 的页跳过 */
+  @Post(':id/ai-process')
+  aiProcessTask(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: { modelId?: number; inputSource?: 'original' | 'algo' } = {},
+  ) {
+    return this.tasks.startTaskAiProcess(req.user.id, id, body || {});
+  }
+
   @Post(':id/process')
   process(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
     return this.tasks.processTask(req.user.id, id);

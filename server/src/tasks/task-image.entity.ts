@@ -88,6 +88,14 @@ export class TaskImage {
   @Column({ name: 'processing_time_ms', type: 'int', nullable: true })
   processingTimeMs: number | null;
 
+  /** 算法结果的耗时；切换回算法结果时显示这个，而不是 AI 的耗时 */
+  @Column({ name: 'algo_processing_time_ms', type: 'int', nullable: true })
+  algoProcessingTimeMs: number | null;
+
+  /** 大模型结果的耗时；切换回 AI 结果时显示这个 */
+  @Column({ name: 'ai_processing_time_ms', type: 'int', nullable: true })
+  aiProcessingTimeMs: number | null;
+
   @Column({ name: 'ocr_model_id', type: 'bigint', unsigned: true, nullable: true })
   ocrModelId: number | null;
 

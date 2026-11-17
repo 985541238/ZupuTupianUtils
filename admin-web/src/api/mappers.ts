@@ -151,6 +151,7 @@ export function mapTask(raw: any, images?: any[]): Task {
     estimatedCost: raw.estimatedCost != null ? Number(raw.estimatedCost) : null,
     status: mapTaskStatus(raw.status),
     nestStatus: raw.status,
+    coverUrl: raw.coverUrl ? viewThumbUrl(raw.coverUrl, 256) : undefined,
     totalPages,
     reviewedPages,
     createdAt: formatTime(raw.createdAt),

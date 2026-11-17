@@ -16,7 +16,7 @@ export const AccountManagementView: React.FC = () => {
   const [modal, setModal] = useState<'create' | 'reset' | null>(null);
   const [target, setTarget] = useState<Account | null>(null);
   const [username, setUsername] = useState(''); const [displayName, setDisplayName] = useState(''); const [password, setPassword] = useState(''); const [error, setError] = useState('');
-  const load = async () => { setLoading(true); try { if (tab === 'accounts') setAccounts(await api.listUsers()); else setUsage(await api.listImageUsage()); } catch (e: any) { setError(e?.message || '加载失败'); } finally { setLoading(false); } };
+  const load = async () => { setLoading(true); try { if (tab === 'accounts') setAccounts((await api.listUsers()).filter((a: Account) => !a.deleted)); else setUsage(await api.listImageUsage()); } catch (e: any) { setError(e?.message || '加载失败'); } finally { setLoading(false); } };
   useEffect(() => { void load(); }, [tab]);
   const close = () => { setModal(null); setTarget(null); setUsername(''); setDisplayName(''); setPassword(''); setError(''); };
   const submit = async () => { setError(''); if (password.length < 6) return setError('密码至少 6 位'); try { if (modal === 'create') await api.createUser({ username: username.trim(), password, displayName: displayName.trim() }); else if (target) await api.resetUserPassword(target.id, password); close(); await load(); } catch (e: any) { setError(e?.message || '操作失败'); } };

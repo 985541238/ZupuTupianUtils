@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, startTransition } from 'react';
 import { Task, ScanItem, ProcessParams, CropRect } from '../types';
 import { api, previewImageBlob, previewFastBlob, viewThumbUrl } from '../api/client';
 import { buildPreviewBody, nestCropToUi, PROCESS_MODES, modeParams, matchMode } from '../api/params';
@@ -219,7 +219,25 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
   const supplementInputRef = useRef<HTMLInputElement>(null);
   /** 正在后台用大模型处理的页（可同时处理多页，处理期间可翻页） */
   const [aiBusyIds, setAiBusyIds] = useState<string[]>([]);
+  /** 大模型输入：原图 / 算法处理后的图（去透字用） */
+  const [aiInputSource, setAiInputSource] = useState<'original' | 'algo'>('original');
+  const [algoEnhanceBusy, setAlgoEnhanceBusy] = useState(false);
+  /** 每页 AI 处理开始时间，用于列表中显示已耗时 */
+  const [aiBusyStartedAt, setAiBusyStartedAt] = useState<Record<string, number>>({});
+  const [nowTick, setNowTick] = useState(() => Date.now());
   const curAiBusy = !!currentItem && aiBusyIds.includes(currentItem.id);
+
+  // 换页后默认回到“原图处理”，避免无意中沿用算法图选项
+  useEffect(() => {
+    setAiInputSource('original');
+  }, [currentItem?.id]);
+
+  // AI 处理中每秒刷新一次耗时显示
+  useEffect(() => {
+    if (!aiBusyIds.length) return;
+    const timer = window.setInterval(() => setNowTick(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [aiBusyIds.length]);
   const skipAutoPreviewRef = useRef(false);
   /** LRU of recently viewed page result URLs (server URLs) for instant flip-back. */
   const pageUrlCacheRef = useRef<Map<string, { clean?: string; original?: string }>>(new Map());
@@ -823,6 +841,21 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
    * 「使用大模型处理」：提交后台任务后轮询结果。处理期间可以翻页审核别的页，
    * 不会被代理的请求超时打断；处理完自动刷新这一页。
    */
+  const handleAlgoEnhance = async () => {
+    if (!currentItem || algoEnhanceBusy || aiProcessBusy || isProcessing) return;
+    const item = currentItem;
+    setAlgoEnhanceBusy(true);
+    try {
+      const raw = await api.reprocessImage(task.id, item.id, { bleedEnhance: true });
+      applyServerImage(raw, item);
+      triggerToast('已用透字增强算法处理本页，可在「算法结果」查看');
+    } catch (e: any) {
+      void appAlert(e?.message || '算法增强失败');
+    } finally {
+      setAlgoEnhanceBusy(false);
+    }
+  };
+
   const handleAiProcessPage = async () => {
     if (!currentItem || aiBusyIds.includes(currentItem.id)) return;
     if (!cleanModels.length) {
@@ -841,9 +874,17 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
       return n;
     });
     setAiBusyIds((ids) => [...ids, item.id]);
-    const finish = () => setAiBusyIds((ids) => ids.filter((x) => x !== item.id));
+    setAiBusyStartedAt((o) => ({ ...o, [item.id]: Date.now() }));
+    const finish = () => {
+      setAiBusyIds((ids) => ids.filter((x) => x !== item.id));
+      setAiBusyStartedAt((o) => {
+        const next = { ...o };
+        delete next[item.id];
+        return next;
+      });
+    };
     try {
-      await api.aiProcessImage(task.id, item.id, { modelId: selectedCleanModelId || undefined });
+      await api.aiProcessImage(task.id, item.id, { modelId: selectedCleanModelId || undefined, inputSource: aiInputSource });
     } catch (e: any) {
       finish();
       setAiNotes((o) => ({ ...o, [item.id]: { type: 'error', text: e?.message || '提交大模型处理失败' } }));
@@ -1091,9 +1132,12 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
 
   const handleEraserStateChange = (state: { canUndo: boolean; dirty: boolean; saveState: EraseSaveState }) => {
     eraserDirtyRef.current = state.dirty;
-    setEraserDirty(state.dirty);
-    setEraserCanUndo(state.canUndo);
-    setEraserSaveState(state.saveState);
+    // 保存状态/脏标记用低优先级更新：大列表重渲染时不阻塞画笔移动
+    startTransition(() => {
+      setEraserDirty(state.dirty);
+      setEraserCanUndo(state.canUndo);
+      setEraserSaveState(state.saveState);
+    });
   };
 
   /** 撤销已保存的擦除：一次一步；快速连触发的 Ctrl+Z 会排队执行，不会丢按键 */
@@ -1799,6 +1843,10 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                 const item = visibleItems[idx];
                 const itemIndex = task.items.indexOf(item);
                 const isActive = itemIndex === currentPageIndex;
+                const aiBusy = aiBusyIds.includes(item.id);
+                const aiElapsed = aiBusy
+                  ? Math.max(0, Math.floor((nowTick - (aiBusyStartedAt[item.id] || nowTick)) / 1000))
+                  : 0;
                 const thumbSrc = item.resultThumbnailUrl || item.thumbnailUrl || item.processedUrl || '';
                 nodes.push(
                   <div
@@ -1835,7 +1883,13 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                       </div>
                       <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 mt-1">
                         {item.splitSourceKey && <span className="inline-flex items-center px-1.5 py-0.5 rounded-full bg-[#0071E3]/10 text-[10px] font-semibold text-[#0071E3]">{task.items.filter((page) => page.splitSourceKey === item.splitSourceKey).length === 2 ? '已分页' : '已裁剪'}</span>}
-                        {item.processMode === 'ai' ? (
+                        {aiBusy ? (
+                          <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-[#AF52DE]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#8944AB]">
+                            <Sparkles className="h-2.5 w-2.5 animate-spin" />
+                            <span>AI处理中</span>
+                            {aiElapsed > 0 ? <span className="font-normal tabular-nums opacity-70">{aiElapsed}s</span> : null}
+                          </span>
+                        ) : item.processMode === 'ai' ? (
                           <span className="inline-flex items-center px-1.5 py-0.5 rounded-full bg-[#AF52DE]/12 text-[10px] font-semibold text-[#8944AB]">AI处理</span>
                         ) : !item.processedUrl ? (
                           <span className="inline-flex items-center px-1.5 py-0.5 rounded-full bg-black/[0.05] text-[10px] text-[#86868B]">未处理</span>
@@ -2216,9 +2270,11 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                       onStateChange={handleEraserStateChange}
                       />
                   ) : null}
-                  <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-[#0071E3] text-[10px] font-semibold text-white shadow-2xs">
-                    处理结果
-                  </div>
+                  {!eraserActive && (
+                    <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-[#0071E3] text-[10px] font-semibold text-white shadow-2xs pointer-events-none">
+                      处理结果
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -2467,6 +2523,40 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
                   <Sparkles className={`w-3.5 h-3.5 ${curAiBusy ? 'animate-spin' : ''}`} />
                   <span>{curAiBusy ? '处理中…（约 20~60 秒）' : currentItem?.hasAiResult ? '用大模型重新处理' : '使用大模型处理'}</span>
                 </button>
+                <div className="pt-2 border-t border-black/[0.06]">
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[11px] font-semibold text-[#1D1D1F]">处理图片源</label>
+                    <span className="text-[9px] text-[#86868B]">默认原图</span>
+                  </div>
+                  <div className="flex items-center gap-4 px-3 py-1.5 bg-[#F5F5F7] border border-black/[0.06] rounded-xl text-[11px]">
+                    <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="radio"
+                        name={`ai-input-${currentItem?.id || 'page'}`}
+                        checked={aiInputSource === 'original'}
+                        onChange={() => setAiInputSource('original')}
+                        disabled={curAiBusy}
+                        className="accent-[#0071E3]"
+                      />
+                      原图处理
+                    </label>
+                    <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="radio"
+                        name={`ai-input-${currentItem?.id || 'page'}`}
+                        checked={aiInputSource === 'algo'}
+                        onChange={() => setAiInputSource('algo')}
+                        disabled={curAiBusy}
+                        className="accent-[#AF52DE]"
+                      />
+                      算法图处理
+                    </label>
+                  </div>
+                  <p className="text-[10px] leading-relaxed text-[#86868B] mt-1">
+                    <span className="block">1. 原图：直接送扫描图，适合正常页；</span>
+                    <span className="block">2. 算法图：先去透字再送大模型，适合有透字的页。</span>
+                  </p>
+                </div>
                 {currentItem && aiNotes[currentItem.id] && !curAiBusy ? (() => {
                   const rawNote = aiNotes[currentItem.id];
                   const isError = typeof rawNote === 'object' ? rawNote.type === 'error' : typeof rawNote === 'string' && rawNote.includes('失败');

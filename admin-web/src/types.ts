@@ -105,6 +105,8 @@ export interface Task {
   useAi?: boolean;
   useAiClean?: boolean;
   cleanModelId?: number | null;
+  /** 卷列表封面（首张原图）；列表接口不带 items 时用于显示预览 */
+  coverUrl?: string;
   ocrModelId?: number | null;
   estimatedCost?: number | null;
   batchCrop?: { enabled: true; quads: number[][][] } | null;

@@ -21,6 +21,7 @@ import dataclasses
 from scanwash.classify import classify
 from scanwash.pipeline import imread, imwrite_gray, process_page
 from scanwash.presets import PRESETS, Preset
+from scanwash.bleed import suppress_bleed
 
 
 def _through_mid(x: float, x_mid: float, y0: float, y_mid: float, y1: float) -> float:
@@ -149,6 +150,7 @@ def main() -> int:
     p.add_argument("--stain", type=float, default=0.4)
     p.add_argument("--strong-destain", action="store_true")
     p.add_argument("--antique-mode", action="store_true")
+    p.add_argument("--bleed-enhance", action="store_true")
     p.add_argument("--min-area", type=float, default=35)
     # Product: full page unless Nest already carved a manual cropBox. Default OFF.
     p.add_argument("--auto-crop", type=int, default=0)
@@ -182,6 +184,11 @@ def main() -> int:
             meta = dict(meta)
             meta["manual_crop"] = args.crop.strip()
             meta["crop_applied_before"] = True
+
+        if args.bleed_enhance:
+            image = suppress_bleed(image)
+            meta = dict(meta)
+            meta["bleed_enhance"] = True
 
         imwrite_gray(Path(args.out), image)
         hh, ww = image.shape[:2]

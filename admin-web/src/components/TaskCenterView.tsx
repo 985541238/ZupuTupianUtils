@@ -3,7 +3,6 @@ import { Task, ScanItem } from '../types';
 import { api, downloadUrl, projectDownloadUrl, authImageUrl } from '../api/client';
 import { BatchCropDialog, BatchCropConfig } from './BatchCropDialog';
 import { formatProcessingTime } from '../api/mappers';
-import { inferErrorCode } from './AiProblemDialog';
 import { appAlert } from './AppDialog';
 import {
   Play,
@@ -27,6 +26,8 @@ import {
 interface TaskCenterViewProps {
   tasks: Task[];
   onStartProcessing: (taskId: string) => void;
+  /** 整卷 AI 处理：只处理还没有 AI 结果的页；卷列表统一用原图 */
+  onAiProcessTask?: (taskId: string) => void;
   onCreateTask: (newTask: Partial<Task>, items: ScanItem[], startImmediately: boolean) => Promise<any>;
   onOpenReview: (taskId: string) => void;
   onDeleteTask?: (taskId: string) => void | Promise<void>;
@@ -141,6 +142,7 @@ function modelPriceText(m: any) {
 export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
   tasks,
   onStartProcessing,
+  onAiProcessTask,
   onCreateTask,
   onOpenReview,
   onDeleteTask,
@@ -1570,11 +1572,16 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                 >
                   <div className="flex items-start sm:items-center gap-3.5 sm:gap-4 flex-1 min-w-0">
                     <div className="w-12 h-[3.75rem] bg-[#F5F5F7] rounded-[12px] border border-black/[0.06] overflow-hidden shrink-0 flex items-center justify-center text-[15px] font-semibold text-[#0071E3] tracking-tight">
-                      {task.items[0]?.thumbnailUrl || task.items[0]?.originalUrl ? (
+                      {task.coverUrl || task.items[0]?.thumbnailUrl || task.items[0]?.originalUrl ? (
                         <img
-                          src={task.items[0]?.thumbnailUrl || task.items[0]?.processedUrl || task.items[0]?.originalUrl}
+                          src={task.coverUrl || task.items[0]?.thumbnailUrl || task.items[0]?.processedUrl || task.items[0]?.originalUrl}
                           alt=""
                           className="w-full h-full object-cover"
+                          onError={(e) => {
+                            const el = e.currentTarget;
+                            const fallback = task.items[0]?.thumbnailUrl || task.items[0]?.originalUrl || '';
+                            if (fallback && el.src !== fallback) el.src = fallback;
+                          }}
                         />
                       ) : (
                         <span>{(task.name || '卷').slice(0, 1)}</span>
@@ -1601,9 +1608,20 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                             处理中
                           </span>
                         ) : task.status === 'pending' || task.nestStatus === 'failed' ? (
-                          <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#FF9500]/12 text-[#FF9500]">
-                            {task.nestStatus === 'failed' ? '失败' : '待处理'}
-                          </span>
+                          task.nestStatus === 'failed' && onShowProblem ? (
+                            <button
+                              type="button"
+                              onClick={() => onShowProblem(task)}
+                              className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#FF3B30]/10 text-[#C62828] border border-[#FF3B30]/20 cursor-pointer hover:bg-[#FF3B30]/15"
+                              title="查看失败原因"
+                            >
+                              失败
+                            </button>
+                          ) : (
+                            <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#FF9500]/12 text-[#FF9500]">
+                              {task.nestStatus === 'failed' ? '失败' : '待处理'}
+                            </span>
+                          )
                         ) : task.status === 'completed' ? (
                           <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#34C759]/12 text-[#34C759]">
                             已完成
@@ -1664,29 +1682,21 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                         </div>
                       )}
 
-                      {!isProcessing && task.errorMessage ? (
-                        <div
-                          className={`flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] leading-relaxed max-w-3xl ${
-                            task.nestStatus === 'failed' ? 'text-[#C62828]' : 'text-[#C93400]'
-                          }`}
-                        >
-                          <span>{task.errorMessage.split('\n详情：')[0]}</span>
-                          {onShowProblem && (task.errorCode || inferErrorCode(task.errorMessage)) ? (
-                            <button
-                              type="button"
-                              onClick={() => onShowProblem(task)}
-                              className="px-2 py-0.5 rounded-full bg-white border border-current/30 font-semibold cursor-pointer hover:bg-[#FFF2F2]"
-                            >
-                              怎么处理？
-                            </button>
-                          ) : null}
-                        </div>
-                      ) : null}
-
                     </div>
                   </div>
 
                   <div className="flex items-center justify-end gap-4 shrink-0 md:pl-2">
+                    {!foreignLocalTask && !isProcessing && !isQueued && onAiProcessTask && (
+                      <button
+                        type="button"
+                        onClick={() => onAiProcessTask(task.id)}
+                        className="h-10 px-4 text-sm font-semibold rounded-full bg-white hover:bg-[#F7F0FC] border border-[#AF52DE]/30 text-[#8944AB] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
+                        title="用大模型批量处理本卷中还没有 AI 结果的页面（已 AI 的页跳过，避免重复扣费）"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>AI处理</span>
+                      </button>
+                    )}
                     {!foreignLocalTask && !isProcessing && !isQueued && (
                       <button
                         type="button"
@@ -1696,6 +1706,17 @@ export const TaskCenterView: React.FC<TaskCenterViewProps> = ({
                       >
                         <RotateCcw className="w-3.5 h-3.5" />
                         <span>重新扫描</span>
+                      </button>
+                    )}
+                    {!foreignLocalTask && !isProcessing && !isQueued && task.status !== 'completed' && task.totalPages > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenReview(task.id)}
+                        className="h-10 px-4 text-sm font-semibold rounded-full bg-[#F5F5F7] hover:bg-[#EBEBED] text-[#1D1D1F] transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
+                        title="查看原图和处理结果（失败/未完成也可以查看）"
+                      >
+                        <ArrowRight className="w-3.5 h-3.5 text-[#0071E3]" />
+                        <span>进入查看</span>
                       </button>
                     )}
                     {!foreignLocalTask && (task.status === 'pending' || task.nestStatus === 'failed') && !isProcessing && !isQueued && (

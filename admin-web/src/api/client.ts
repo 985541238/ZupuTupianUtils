@@ -139,6 +139,9 @@ export const api = {
   getTask: (id: string | number) => request<any>('/tasks/' + id),
   processTask: (id: string | number) =>
     request<any>('/tasks/' + id + '/process', { method: 'POST', body: '{}' }),
+  /** 整卷 AI 处理：只处理还没有 AI 结果的页；服务端全局最多并发 2 页 */
+  aiProcessTask: (id: string | number, body?: { modelId?: number; inputSource?: 'original' | 'algo' }) =>
+    request<any>('/tasks/' + id + '/ai-process', { method: 'POST', body: JSON.stringify(body || {}) }),
   rescanTask: (id: string | number, autoStart = true, sourceFolder?: string) =>
     request<{ taskId: number; addedImages: number }>(`/tasks/${id}/rescan`, {
       method: 'POST', body: JSON.stringify({ autoStart, sourceFolder }),
@@ -172,7 +175,7 @@ export const api = {
   reprocessImage: (
     taskId: string | number,
     imageId: string | number,
-    body: { params?: any; cropBox?: any }
+    body: { params?: any; cropBox?: any; bleedEnhance?: boolean }
   ) =>
     request<any>(`/tasks/${taskId}/images/${imageId}/reprocess`, {
       method: 'PUT',
@@ -422,7 +425,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body || {}),
     }),
-  aiProcessImage: (taskId: string | number, imageId: string | number, body?: { modelId?: number }) =>
+  aiProcessImage: (taskId: string | number, imageId: string | number, body?: { modelId?: number; inputSource?: 'original' | 'algo' }) =>
     request<any>(`/tasks/${taskId}/images/${imageId}/ai-process`, {
       method: 'POST',
       body: JSON.stringify(body || {}),

@@ -56,6 +56,10 @@ export const EraseCanvas = React.forwardRef<EraseCanvasHandle, EraseCanvasProps>
   const canvasElRef = useRef<HTMLCanvasElement | null>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   const baseImgRef = useRef<HTMLImageElement | null>(null);
+  /** 原图真实尺寸：笔画坐标始终按原图保存 */
+  const baseSizeRef = useRef({ w: 0, h: 0 });
+  const cursorElRef = useRef<HTMLDivElement | null>(null);
+  const cursorPosRef = useRef({ x: 0, y: 0 });
   const strokesRef = useRef<Stroke[]>([]);
   /** 尚未保存到服务端的笔画（只传笔画，前端不做大图编码） */
   const pendingStrokesRef = useRef<Stroke[]>([]);
@@ -69,12 +73,14 @@ export const EraseCanvas = React.forwardRef<EraseCanvasHandle, EraseCanvasProps>
   const lastSavedRef = useRef<any>(null);
   const saveTimerRef = useRef<number | null>(null);
   const retryTimerRef = useRef<number | null>(null);
+  const undoVisualTimerRef = useRef<number | null>(null);
+  const raf2Ref = useRef<number | null>(null);
+  /** 撤销后等服务端新图真正显示，再清空覆盖层，避免闪一下未擦除的旧底图 */
+  const pendingUndoVisualRef = useRef(false);
   const saveChainRef = useRef<Promise<boolean>>(Promise.resolve(true));
   const [ready, setReady] = useState(false);
   const [loadError, setLoadError] = useState('');
-  const [cursor, setCursor] = useState<{ x: number; y: number; r: number; visible: boolean }>({
-    x: 0,
-    y: 0,
+  const [cursor, setCursor] = useState<{ r: number; visible: boolean }>({
     r: 0,
     visible: false,
   });
@@ -122,11 +128,32 @@ export const EraseCanvas = React.forwardRef<EraseCanvasHandle, EraseCanvasProps>
     ctx.restore();
   }, []);
 
+  /** 覆盖层画布限制在约 2K 内：超大扫描图不再按原图分辨率反复重绘，避免画笔卡顿 */
+  const setupOverlayCanvas = useCallback((img: HTMLImageElement) => {
+    const w = img.naturalWidth || 0;
+    const h = img.naturalHeight || 0;
+    baseSizeRef.current = { w, h };
+    const canvas = canvasElRef.current;
+    if (!canvas || !w || !h) return;
+    const scale = Math.min(1, 2048 / Math.max(w, h));
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(h * scale));
+    const ctx = canvas.getContext('2d');
+    ctxRef.current = ctx;
+    if (ctx) {
+      // 笔画仍按原图坐标绘制，覆盖层自动缩放显示
+      ctx.setTransform(canvas.width / w, 0, 0, canvas.height / h, 0, 0);
+    }
+  }, []);
+
   /** 覆盖层只画笔画（透明底），底图由下面的 <img> 显示 */
   const redrawOverlay = useCallback(() => {
     const ctx = ctxRef.current;
     if (!ctx) return;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    ctx.restore();
     for (const stroke of strokesRef.current) drawStroke(ctx, stroke);
   }, [drawStroke]);
 
@@ -228,18 +255,41 @@ export const EraseCanvas = React.forwardRef<EraseCanvasHandle, EraseCanvasProps>
       img.decoding = 'async';
       img.onload = () => {
         baseImgRef.current = img;
-        const canvas = canvasElRef.current;
-        if (canvas) {
-          canvas.width = img.naturalWidth;
-          canvas.height = img.naturalHeight;
-          ctxRef.current = canvas.getContext('2d');
-        }
+        setupOverlayCanvas(img);
         resolve();
       };
       img.onerror = () => resolve();
       img.src = bust;
     });
   }, []);
+
+  /** 把撤销后的覆盖层清空；调用前必须确保父级底图已经切到新图 */
+  const finishUndoVisual = useCallback(() => {
+    if (undoVisualTimerRef.current != null) {
+      window.clearTimeout(undoVisualTimerRef.current);
+      undoVisualTimerRef.current = null;
+    }
+    pendingUndoVisualRef.current = false;
+    strokesRef.current = [];
+    pendingStrokesRef.current = [];
+    dirtyRef.current = false;
+    redrawOverlay();
+  }, [redrawOverlay]);
+
+  // 父级 src 切到撤销后的新图后再清空笔画，避免露出旧底图（未擦除画面）
+  useEffect(() => {
+    if (!pendingUndoVisualRef.current) return;
+    const raf1 = window.requestAnimationFrame(() => {
+      const raf2 = window.requestAnimationFrame(() => {
+        if (pendingUndoVisualRef.current) finishUndoVisual();
+      });
+      raf2Ref.current = raf2;
+    });
+    return () => {
+      window.cancelAnimationFrame(raf1);
+      if (raf2Ref.current != null) window.cancelAnimationFrame(raf2Ref.current);
+    };
+  }, [src, finishUndoVisual]);
 
   /** 撤销最近一次已保存的擦除（一次一步，可连续撤到未擦除状态） */
   const undo = useCallback(() => {
@@ -262,14 +312,16 @@ export const EraseCanvas = React.forwardRef<EraseCanvasHandle, EraseCanvasProps>
         }
         const raw = await api.undoErase(taskId, imageId);
         lastSavedRef.current = raw;
-        strokesRef.current = [];
-        pendingStrokesRef.current = [];
-        dirtyRef.current = false;
+        // 先预加载撤销后的底图，再让父级切换显示；覆盖层等父级新图生效后再清
         await reloadBase(raw);
-        redrawOverlay();
+        pendingUndoVisualRef.current = true;
+        onSaved?.(raw);
+        if (undoVisualTimerRef.current != null) window.clearTimeout(undoVisualTimerRef.current);
+        undoVisualTimerRef.current = window.setTimeout(() => {
+          if (pendingUndoVisualRef.current) finishUndoVisual();
+        }, 400);
         saveStateRef.current = 'idle';
         notify();
-        onSaved?.(raw);
       } catch (e: any) {
         const msg = String(e?.message || '');
         if (msg.includes('未擦除') || msg.includes('没有可撤销')) {
@@ -284,7 +336,7 @@ export const EraseCanvas = React.forwardRef<EraseCanvasHandle, EraseCanvasProps>
         notify();
       }
     })();
-  }, [clearTimer, dismissRetryTimer, imageId, notify, onSaved, onUndoEmpty, redrawOverlay, reloadBase, saveNow, taskId]);
+  }, [clearTimer, dismissRetryTimer, finishUndoVisual, imageId, notify, onSaved, onUndoEmpty, reloadBase, saveNow, taskId]);
 
   const dispose = useCallback(() => {
     clearTimer();
@@ -320,9 +372,7 @@ export const EraseCanvas = React.forwardRef<EraseCanvasHandle, EraseCanvasProps>
       baseImgRef.current = img;
       const canvas = canvasElRef.current;
       if (!canvas) return;
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
-      ctxRef.current = canvas.getContext('2d');
+      setupOverlayCanvas(img);
       redrawOverlay();
       setReady(true);
     };
@@ -359,23 +409,30 @@ export const EraseCanvas = React.forwardRef<EraseCanvasHandle, EraseCanvasProps>
   const toPoint = (e: React.PointerEvent<HTMLCanvasElement>): [number, number] => {
     const canvas = e.currentTarget;
     const rect = canvas.getBoundingClientRect();
-    const sx = canvas.width / Math.max(1, rect.width);
-    const sy = canvas.height / Math.max(1, rect.height);
-    const x = Math.max(0, Math.min(canvas.width, (e.clientX - rect.left) * sx));
-    const y = Math.max(0, Math.min(canvas.height, (e.clientY - rect.top) * sy));
+    const base = baseSizeRef.current;
+    const w = base.w || canvas.width;
+    const h = base.h || canvas.height;
+    const x = Math.max(0, Math.min(w, ((e.clientX - rect.left) / Math.max(1, rect.width)) * w));
+    const y = Math.max(0, Math.min(h, ((e.clientY - rect.top) / Math.max(1, rect.height)) * h));
     return [x, y];
   };
 
   const updateCursor = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    const canvas = e.currentTarget;
-    const rect = canvas.getBoundingClientRect();
-    const screenScale = rect.width > 0 ? rect.width / canvas.width : 1;
-    setCursor({
-      x: e.clientX,
-      y: e.clientY,
-      r: Math.max(1, (brushRef.current * screenScale) / 2),
-      visible: true,
-    });
+    const rect = e.currentTarget.getBoundingClientRect();
+    const base = baseSizeRef.current;
+    const screenScale = base.w > 0 && rect.width > 0 ? rect.width / base.w : 1;
+    const r = Math.max(1, (brushRef.current * screenScale) / 2);
+    cursorPosRef.current = { x: e.clientX, y: e.clientY };
+    // 直接更新 DOM，避免每个 pointermove 都触发 React 重渲染
+    const el = cursorElRef.current;
+    if (el) {
+      el.style.width = `${r * 2}px`;
+      el.style.height = `${r * 2}px`;
+      el.style.transform = `translate3d(${e.clientX - r}px, ${e.clientY - r}px, 0)`;
+    }
+    if (!cursor.visible || Math.abs(cursor.r - r) > 0.5) {
+      setCursor({ r, visible: true });
+    }
   };
 
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -465,13 +522,13 @@ export const EraseCanvas = React.forwardRef<EraseCanvasHandle, EraseCanvasProps>
       {ready && cursor.visible && !loadError
         ? createPortal(
             <div
+              ref={cursorElRef}
               data-erase-cursor="1"
-              className="fixed z-[9999] rounded-full border-2 border-[#0071E3] bg-[#0071E3]/10 pointer-events-none"
+              className="fixed left-0 top-0 z-[9999] rounded-full border-2 border-[#0071E3] bg-[#0071E3]/10 pointer-events-none"
               style={{
-                left: cursor.x - cursor.r,
-                top: cursor.y - cursor.r,
                 width: cursor.r * 2,
                 height: cursor.r * 2,
+                transform: `translate3d(${cursorPosRef.current.x - cursor.r}px, ${cursorPosRef.current.y - cursor.r}px, 0)`,
               }}
             />,
             document.body,

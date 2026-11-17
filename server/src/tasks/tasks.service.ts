@@ -563,9 +563,42 @@ export class TasksService implements OnModuleInit {
     // 兜底处理运行期间因进程重载/异常导致只剩数据库 queued 状态的卷。
     await this.recoverQueuedVolumes();
     const admin = await this.isAdminUser(userId);
-    return this.tasks.find({
+    const tasks = await this.tasks.find({
       where: admin ? {} : { userId },
       order: { id: 'DESC' },
+    });
+    // 卷列表不带 images；单独补一张封面，保证失败/未打开过的卷也有原图预览。
+    // 只取每个卷 sortOrder 最小的一条，避免每 2.5 秒轮询时把所有页都查出来。
+    const ids = tasks.map((t) => Number(t.id));
+    const covers = ids.length
+      ? await this.images
+          .createQueryBuilder('img')
+          .select(['img.id', 'img.taskId', 'img.sourcePath', 'img.resultPath', 'img.thumbPath', 'img.sortOrder'])
+          .where('img.taskId IN (:...ids)', { ids })
+          .andWhere((qb) => {
+            const sub = qb
+              .subQuery()
+              .select('MIN(i2.sortOrder)')
+              .from(TaskImage, 'i2')
+              .where('i2.taskId = img.taskId')
+              .getQuery();
+            return 'img.sortOrder = ' + sub;
+          })
+          .getMany()
+      : [];
+    const coverByTask = new Map<number, TaskImage>();
+    for (const img of covers) {
+      const tid = Number(img.taskId);
+      if (!coverByTask.has(tid)) coverByTask.set(tid, img);
+    }
+    return tasks.map((t) => {
+      const cover = coverByTask.get(Number(t.id));
+      return {
+        ...t,
+        // 优先用结果缩略图，这样整卷 AI 处理完成后卷列表能直接看到 AI 结果；
+        // 没有结果时才退回原图封面。
+        coverUrl: this.fileUrl(cover?.thumbPath || cover?.resultPath || cover?.sourcePath || null),
+      };
     });
   }
 
@@ -892,6 +925,8 @@ export class TasksService implements OnModuleInit {
     img.status = 'pending';
     img.errorMessage = null;
     img.processingTimeMs = null;
+    img.algoProcessingTimeMs = null;
+    img.aiProcessingTimeMs = null;
     img.updatedAt = new Date();
     const saved = await this.images.save(img);
     if (derived.length) {
@@ -1136,9 +1171,14 @@ export class TasksService implements OnModuleInit {
       this.logger.warn(`Task ${id} marked processing but no live job — resuming`);
     }
 
-    // 选了大模型：先做不花钱的检查（模型还在、Key 已填），有问题直接告诉用户，不进入处理
+    // 继续处理以「模型配置」里的默认图片处理模型为准；默认模型欠费也照用，不擅自切换
     if (task.cleanModelId && process.env.AI_MOCK !== '1') {
-      const m = await this.settings.getModel(task.cleanModelId);
+      let m = await this.settings.defaultModel('clean');
+      if (!m) m = await this.settings.getModel(task.cleanModelId);
+      if (m && Number(m.id) !== Number(task.cleanModelId)) {
+        task.cleanModelId = Number(m.id);
+        await this.tasks.save(task);
+      }
       if (!m || !m.enabled || m.purpose !== 'clean') {
         throw new BadRequestException({
           message: '这本书选用的图片处理模型已被删除或停用。请到「模型配置」点「引导配置」重新设置。',
@@ -1165,6 +1205,177 @@ export class TasksService implements OnModuleInit {
     return { message: waiting ? '已加入处理队列' : '已开始处理', task };
   }
 
+  /**
+   * 整卷「AI处理」：只处理还没有 AI 结果的页，已 AI 的页跳过（避免重复扣费）。
+   * 与单页 AI 共用 AliyunService 的全局并发上限（默认 2），不会一次把整卷并发发出去。
+   */
+  async startTaskAiProcess(userId: number, taskId: number, body?: { modelId?: number; inputSource?: 'original' | 'algo' }) {
+    const task = await this.get(userId, taskId);
+    const id = Number(task.id);
+    if (this.running.has(id) || this.volQueued.has(id)) {
+      return { message: '正在处理中', task };
+    }
+    if (task.status === 'processing') {
+      throw new BadRequestException('这一卷正在处理中，请等处理完成后再试');
+    }
+    if (process.env.AI_MOCK !== '1') {
+      const explicit = Number(body?.modelId || 0);
+      let model = explicit
+        ? await this.settings.getModel(explicit)
+        : (await this.settings.defaultModel('clean')) ||
+          (task.cleanModelId ? await this.settings.getModel(Number(task.cleanModelId)) : null);
+      if (!model || !model.enabled || model.purpose !== 'clean') {
+        throw new BadRequestException({
+          message: '没有可用的图片处理模型，请先到「模型配置」添加并启用一个图片处理模型',
+          errorCode: 'model:',
+        });
+      }
+      const creds = await this.settings.resolveCredentials(model);
+      if (!creds.apiKey) {
+        throw new BadRequestException({
+          message: `还没有填写${this.platformName(creds.platform)}的 API Key。请到「模型配置」点「引导配置」按步骤填写。`,
+          errorCode: 'auth:' + (creds.platform || ''),
+        });
+      }
+      const imgs = await this.images.find({ where: { taskId: id }, order: { sortOrder: 'ASC' } });
+      // 旧版本可能留下“有 AI 结果但 result_deleted=true”的页，导致预览地址为空。
+      // 先修复这种脏标记，不重新调用模型、不重复扣费。
+      for (const img of imgs) {
+        if (img.processMode === 'ai' && img.resultDeleted && img.aiResultPath && fs.existsSync(img.aiResultPath)) {
+          img.resultDeleted = false;
+          img.updatedAt = new Date();
+          await this.images.save(img);
+        }
+      }
+      const candidates = imgs.filter((img) => {
+        const aiReady = img.processMode === 'ai' && !!img.aiResultPath && fs.existsSync(img.aiResultPath) && !img.resultDeleted;
+        return !aiReady && this.aiJobs.get(Number(img.id))?.state !== 'running';
+      });
+      if (!candidates.length) {
+        throw new BadRequestException('这一卷的所有页面都已经用大模型处理过了');
+      }
+      task.cleanModelId = Number(model.id);
+      task.status = 'processing';
+      task.errorMessage = null;
+      task.errorCode = null;
+      task.doneCount = imgs.length - candidates.length;
+      task.updatedAt = new Date();
+      await this.tasks.save(task);
+      this.running.add(id);
+      setImmediate(() => {
+        void this.runTaskAiProcess(task, imgs, candidates, model!, Number(userId), body?.inputSource === 'algo' ? 'algo' : 'original', false)
+          .catch((e: any) => this.logger.warn(`整卷 AI 处理失败 task=${id}: ${e?.message || e}`))
+          .finally(() => this.running.delete(id));
+      });
+      return {
+        message: '已开始 AI 处理',
+        task,
+        model: { id: Number(model.id), displayName: model.displayName || model.model },
+        todoCount: candidates.length,
+      };
+    }
+
+    // 本地 mock 模式：仍走 aiProcessOne，方便开发验证流程
+    const imgs = await this.images.find({ where: { taskId: id }, order: { sortOrder: 'ASC' } });
+    for (const img of imgs) {
+      if (img.processMode === 'ai' && img.resultDeleted && img.aiResultPath && fs.existsSync(img.aiResultPath)) {
+        img.resultDeleted = false;
+        img.updatedAt = new Date();
+        await this.images.save(img);
+      }
+    }
+    const candidates = imgs.filter((img) => {
+      const aiReady = img.processMode === 'ai' && !!img.aiResultPath && fs.existsSync(img.aiResultPath) && !img.resultDeleted;
+      return !aiReady;
+    });
+    if (!candidates.length) throw new BadRequestException('这一卷的所有页面都已经用大模型处理过了');
+    task.status = 'processing';
+    task.errorMessage = null;
+    task.errorCode = null;
+    task.doneCount = imgs.length - candidates.length;
+    task.updatedAt = new Date();
+    await this.tasks.save(task);
+    const mockModel = await this.settings.defaultModel('clean');
+    if (!mockModel) throw new BadRequestException('没有可用的图片处理模型');
+    this.running.add(id);
+    setImmediate(() => {
+      void this.runTaskAiProcess(task, imgs, candidates, mockModel, Number(userId), body?.inputSource === 'algo' ? 'algo' : 'original', false)
+        .catch((e: any) => this.logger.warn(`整卷 AI 处理失败 task=${id}: ${e?.message || e}`))
+        .finally(() => this.running.delete(id));
+    });
+    return {
+      message: '已开始 AI 处理',
+      task,
+      model: { id: Number(mockModel.id), displayName: mockModel.displayName || mockModel.model },
+      todoCount: candidates.length,
+    };
+  }
+
+  private async runTaskAiProcess(
+    task: Task,
+    allImages: TaskImage[],
+    candidates: TaskImage[],
+    model: AiModel,
+    actorUserId: number,
+    inputSource: 'original' | 'algo' = 'original',
+    algoEnhance = false,
+  ) {
+    const taskId = Number(task.id);
+    const queue = [...candidates];
+    let processed = allImages.length - candidates.length;
+    let failed = 0;
+    let success = 0;
+    let stopReason: AiConfigError | null = null;
+    const started = Date.now();
+    const worker = async () => {
+      while (queue.length && !stopReason && !this.cancelled.has(taskId)) {
+        const img = queue.shift()!;
+        try {
+          img.status = 'processing';
+          img.updatedAt = new Date();
+          await this.images.save(img);
+          await this.aiProcessOne(task, img, model, true, actorUserId, inputSource, algoEnhance);
+          // aiProcessOne 只修改内存中的实体，必须落库；否则预览仍显示旧的算法结果
+          img.updatedAt = new Date();
+          await this.images.save(img);
+          processed += 1;
+          success += 1;
+        } catch (e: any) {
+          if (e instanceof AiConfigError) {
+            stopReason = e;
+            img.status = 'pending';
+            img.errorMessage = null;
+          } else {
+            failed += 1;
+            img.status = img.resultPath && fs.existsSync(img.resultPath) ? 'ready' : 'failed';
+            img.errorMessage = e?.message || String(e);
+          }
+          img.updatedAt = new Date();
+          await this.images.save(img);
+        }
+        task.doneCount = Math.min(allImages.length, processed + failed);
+        task.updatedAt = new Date();
+        await this.tasks.save(task);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(2, queue.length) }, () => worker()));
+    const stop = stopReason as AiConfigError | null;
+    if (stop) {
+      task.status = 'failed';
+      task.errorMessage = 'AI处理已暂停：' + stop.message + (stop.detail ? '\n详情：' + stop.detail : '');
+      task.errorCode = `${stop.kind}:${stop.platform || ''}`;
+    } else {
+      // 有成功的页就按完成处理（失败页保留原结果）；全部失败则标为失败，让用户看到错误弹窗
+      task.status = success === 0 && failed > 0 ? 'failed' : 'completed';
+      task.errorMessage = failed ? `${failed} 页 AI 处理失败，其余已就绪` : null;
+      task.errorCode = null;
+    }
+    task.doneCount = allImages.filter((img) => img.status === 'ready' || img.status === 'confirmed').length;
+    task.processingTimeMs = Date.now() - started;
+    task.updatedAt = new Date();
+    await this.tasks.save(task);
+    this.logger.log(`Task ${taskId} AI finished: ok=${processed} failed=${failed} status=${task.status}`);
+  }
   private async runProcess(taskId: number, actorUserId?: number) {
     const task = await this.tasks.findOne({ where: { id: taskId } });
     if (!task) return;
@@ -1221,8 +1432,8 @@ export class TasksService implements OnModuleInit {
       const concurrency = cleanModel
         ? (await this.settings.getGeneral()).concurrency
         : Number(process.env.ALGO_CONCURRENCY) ||
-          // 每页处理峰值约 1GB（图越大越高）：按内存算并发，最多 4 路，至少 1 路
-          Math.max(1, Math.min(os.cpus().length, 4, Math.floor((os.totalmem() / 1073741824) * 0.5)));
+          // 每页处理峰值约 1GB（图越大越高）：默认最多 2 路，给 Web/擦除留 CPU；可用 ALGO_CONCURRENCY 覆盖
+          Math.max(1, Math.min(os.cpus().length, 2, Math.floor((os.totalmem() / 1073741824) * 0.5)));
       let stopReason: AiConfigError | null = null;
 
       const finishOne = async () => {
@@ -1384,10 +1595,12 @@ export class TasksService implements OnModuleInit {
     this.clearEraseBaseline(resultPath);
     this.clearEraseHistory(task, img);
     img.processingTimeMs = Date.now() - started;
+    img.algoProcessingTimeMs = img.processingTimeMs;
     img.algoResultPath = resultPath;
     img.resultPath = resultPath;
     img.processMode = 'algo';
     img.thumbPath = thumbPath;
+    img.resultDeleted = false;
     if (img.width == null || img.height == null) {
       img.width = size.width;
       img.height = size.height;
@@ -1402,13 +1615,22 @@ export class TasksService implements OnModuleInit {
    * 图生图大模型处理一页：按裁剪框取图 → 模型出图 → 存为 AI 结果并设为当前结果。
    * 临时性失败自动重试 1 次；配置错误（AiConfigError）直接抛出。
    */
-  private async aiProcessOne(task: Task, img: TaskImage, model: AiModel, retry: boolean, actorUserId: number) {
+  private async aiProcessOne(
+    task: Task,
+    img: TaskImage,
+    model: AiModel,
+    retry: boolean,
+    actorUserId: number,
+    inputSource: 'original' | 'algo' = 'original',
+    algoEnhance = true,
+  ) {
     await this.restoreOriginalSource(task, img);
     if (!img.sourcePath || !fs.existsSync(img.sourcePath)) throw new Error('原图不存在：' + img.fileName);
     const crop = (await this.finalOriginalCrop(img)) || this.processor.parseCrop(img.cropBox);
+    const useAlgoInput = inputSource === 'algo';
     let input = img.sourcePath;
     let tmp: string | null = null;
-    if (crop && crop.w > 0 && crop.h > 0) {
+    if (!useAlgoInput && crop && crop.w > 0 && crop.h > 0) {
       const resolved = await this.processor.resolveCropAgainstSource(img.sourcePath, crop);
       if (resolved.crop) {
         tmp = (await this.processor.materializeCrop(img.sourcePath, resolved.crop)).path;
@@ -1424,9 +1646,13 @@ export class TasksService implements OnModuleInit {
       // 先跑现有算法（不花钱）并保留为备用结果；大模型结果不再经过自动判定或拦截，
       // 用户已经为本次调用付费，最终是否采用由用户在工作台自行决定。
       const algoOut = this.algoPath(task, img);
-      const pageParams = this.processor.parseParams(img.params, this.processor.parseParams(task.defaultParams));
+      const baseParams = this.processor.parseParams(img.params, this.processor.parseParams(task.defaultParams));
+      // 单页「算法图处理」默认透字增强；卷列表「算法图处理」用普通算法
+      const pageParams = useAlgoInput && algoEnhance ? this.processor.bleedEnhanceParams(baseParams) : baseParams;
       await this.processor.processToFile(img.sourcePath, algoOut, pageParams, crop && crop.w > 0 && crop.h > 0 ? crop : null);
       img.algoResultPath = algoOut;
+      // 去透字：算法处理完的图作为大模型输入（提示词不变）
+      if (useAlgoInput) input = algoOut;
 
       // 上次模型已出图（已付费）但后续步骤没做完：直接复用那张图，不再重复付费
       const key = this.aiInputKey(input, model);
@@ -1482,7 +1708,10 @@ export class TasksService implements OnModuleInit {
       img.resultPath = resultPath;
       img.processMode = 'ai';
       img.thumbPath = thumbPath;
+      // 之前若被删除/重置过 resultDeleted 仍为 true，会导致明明有 AI 结果但预览拿不到结果地址
+      img.resultDeleted = false;
       img.processingTimeMs = Date.now() - started;
+      img.aiProcessingTimeMs = img.processingTimeMs;
       img.status = 'ready';
       img.errorMessage = null;
       img.updatedAt = new Date();
@@ -1516,7 +1745,7 @@ export class TasksService implements OnModuleInit {
    * 审核页「使用大模型处理」：放到后台执行，立即返回，前端轮询 getAiJob。
    * 只处理这一页，不改变整本任务的处理方式。
    */
-  async startAiProcess(userId: number, taskId: number, imageId: number, body?: { modelId?: number }) {
+  async startAiProcess(userId: number, taskId: number, imageId: number, body?: { modelId?: number; inputSource?: 'original' | 'algo' }) {
     const task = await this.get(userId, taskId);
     const img = await this.getImage(userId, taskId, imageId);
     const cur = this.aiJobs.get(Number(img.id));
@@ -1530,10 +1759,18 @@ export class TasksService implements OnModuleInit {
         throw new BadRequestException('所选的图片处理模型已被停用或删除，请重新选择一个模型');
       }
     }
-    const modelId = explicitId || Number(img.aiModelId || task.cleanModelId || 0);
-    let model = modelId ? await this.settings.getModel(modelId) : null;
-    if (!model || !model.enabled || model.purpose !== 'clean') model = await this.settings.defaultModel('clean');
-    if (!model) throw new BadRequestException('请先在「模型配置」添加并启用图片处理模型');
+    // 未显式选择模型时，以「模型配置」里的默认图片处理模型为准；
+    // 默认模型即使欠费也照用，不擅自切换，失败时直接返回平台的具体错误。
+    let model = explicitId
+      ? await this.settings.getModel(explicitId)
+      : await this.settings.defaultModel('clean');
+    if (!model) {
+      const fallbackId = Number(img.aiModelId || task.cleanModelId || 0);
+      model = fallbackId ? await this.settings.getModel(fallbackId) : null;
+    }
+    if (!model || !model.enabled || model.purpose !== 'clean') {
+      throw new BadRequestException('请先在「模型配置」添加并启用图片处理模型');
+    }
     const creds = await this.settings.resolveCredentials(model);
     if (!creds.apiKey && process.env.AI_MOCK !== '1') {
       throw new BadRequestException({
@@ -1548,7 +1785,7 @@ export class TasksService implements OnModuleInit {
     this.aiJobs.set(Number(img.id), job);
     const m = model;
     setImmediate(() => {
-      this.runAiProcess(task, img, m, userId)
+      this.runAiProcess(task, img, m, userId, body?.inputSource === 'algo' ? 'algo' : 'original')
         .then((result) => {
           job.state = 'done';
           job.result = result;
@@ -1589,7 +1826,13 @@ export class TasksService implements OnModuleInit {
     };
   }
 
-  private async runAiProcess(task: Task, img: TaskImage, model: AiModel, actorUserId: number) {
+  private async runAiProcess(
+    task: Task,
+    img: TaskImage,
+    model: AiModel,
+    actorUserId: number,
+    inputSource: 'original' | 'algo' = 'original',
+  ) {
     // 当前是算法结果时先记下来，便于「恢复算法结果」
     if (img.processMode !== 'ai' && img.resultPath && fs.existsSync(img.resultPath) && !img.algoResultPath) {
       img.algoResultPath = img.resultPath;
@@ -1597,7 +1840,7 @@ export class TasksService implements OnModuleInit {
     const costBefore = Number(img.cleanCost || 0) || 0;
     let aiWarning: string | null = null;
     try {
-      const res = await this.aiProcessOne(task, img, model, false, actorUserId);
+      const res = await this.aiProcessOne(task, img, model, false, actorUserId, inputSource);
       aiWarning = res?.aiWarning || null;
     } catch (e) {
       {
@@ -1641,6 +1884,8 @@ export class TasksService implements OnModuleInit {
     }
     img.resultPath = target;
     img.processMode = mode as 'ai' | 'algo';
+    // 切换结果时显示对应结果自己的耗时，不能用另一种结果的耗时
+    img.processingTimeMs = mode === 'ai' ? img.aiProcessingTimeMs : img.algoProcessingTimeMs;
     this.clearEraseHistory(task, img);
     const thumbPath = this.thumbPath(task, img);
     await this.processor.makeThumb(target, thumbPath);
@@ -2808,18 +3053,21 @@ export class TasksService implements OnModuleInit {
     userId: number,
     taskId: number,
     imageId: number,
-    body: { params?: ProcessParams; cropBox?: CropBox | null },
+    body: { params?: ProcessParams; cropBox?: CropBox | null; bleedEnhance?: boolean },
   ) {
     const task = await this.get(userId, taskId);
     const img = await this.getImage(userId, taskId, imageId);
     const prevCrop = img.cropBox || null;
+    const paramsBefore = img.params;
     if (img.finalCrop) {
       try { if (JSON.parse(img.finalCrop)?.source !== 'original') img.finalCrop = null; } catch { img.finalCrop = null; }
     }
-    const params = {
+    const baseParams = {
       ...DEFAULT_PARAMS,
       ...(body.params || this.processor.parseParams(img.params)),
     };
+    // 「算法增强」按钮：只增强算法结果，不调用大模型
+    const params = body.bleedEnhance ? this.processor.bleedEnhanceParams(baseParams) : baseParams;
 
     // Original must never change — always process from the import file
     await this.restoreOriginalSource(task, img);
@@ -2879,9 +3127,11 @@ export class TasksService implements OnModuleInit {
     this.clearEraseBaseline(resultPath);
     this.clearEraseHistory(task, img);
     img.processingTimeMs = Date.now() - imgStartedAt;
+    img.algoProcessingTimeMs = img.processingTimeMs;
 
-    img.params = JSON.stringify(params);
+    img.params = body.bleedEnhance ? paramsBefore : JSON.stringify(params);
     const keptAi = await this.settleAfterAlgo(task, img, resultPath, thumbPath, prevCrop);
+    if (keptAi && img.aiProcessingTimeMs != null) img.processingTimeMs = img.aiProcessingTimeMs;
     // width/height remain original page dims (set by restoreOriginalSource)
     if (img.width == null || img.height == null) {
       img.width = size.width;
@@ -2969,9 +3219,11 @@ export class TasksService implements OnModuleInit {
     this.clearEraseBaseline(resultPath);
     this.clearEraseHistory(task, img);
     img.processingTimeMs = Date.now() - imgStartedAt;
+    img.algoProcessingTimeMs = img.processingTimeMs;
 
     img.params = JSON.stringify(params);
     const keptAi = await this.settleAfterAlgo(task, img, resultPath, thumbPath, prevCrop);
+    if (keptAi && img.aiProcessingTimeMs != null) img.processingTimeMs = img.aiProcessingTimeMs;
     if (img.width == null || img.height == null) {
       img.width = size.width;
       img.height = size.height;

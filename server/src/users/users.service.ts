@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { IsNull, Repository } from 'typeorm';
 import { User } from './user.entity';
 import * as bcrypt from 'bcryptjs';
 
@@ -36,7 +36,8 @@ export class UsersService implements OnModuleInit {
   }
 
   async list() {
-    const rows = await this.repo.find({ order: { createdAt: 'DESC' } });
+    // 已软删除的账号只保留历史数据，不再出现在账号管理列表
+    const rows = await this.repo.find({ where: { deletedAt: IsNull() }, order: { createdAt: 'DESC' } });
     let counts = new Map<number, number>();
     try {
       const stats = await this.repo.query('SELECT user_id AS userId, COUNT(*) AS total FROM ai_usage_records WHERE action=\'image_generation\' GROUP BY user_id');
@@ -49,7 +50,18 @@ export class UsersService implements OnModuleInit {
     const name = String(username || '').trim();
     if (!/^[A-Za-z0-9_.@-]{3,32}$/.test(name)) throw new BadRequestException('账号为 3~32 位字母、数字或 _ . @ -');
     if (!password || password.length < 6) throw new BadRequestException('密码至少 6 位');
-    if (await this.findByUsername(name)) throw new ConflictException('这个账号已被使用');
+    const existing = await this.findByUsername(name);
+    if (existing) {
+      if (!existing.deletedAt) throw new ConflictException('这个账号已被使用');
+      // 软删除的账号重新注册：恢复原账号并更新密码/显示名，历史生图记录继续沿用
+      existing.passwordHash = await bcrypt.hash(password, 10);
+      existing.displayName = String(displayName || '').trim().slice(0, 64);
+      existing.role = 'user';
+      existing.enabled = true;
+      existing.deletedAt = null;
+      existing.updatedAt = new Date();
+      return this.publicUser(await this.repo.save(existing));
+    }
     const now = new Date();
     const user = this.repo.create({ username: name, passwordHash: await bcrypt.hash(password, 10), displayName: String(displayName || '').trim().slice(0, 64), role: 'user', enabled: true, deletedAt: null, createdAt: now, updatedAt: now });
     return this.publicUser(await this.repo.save(user));
