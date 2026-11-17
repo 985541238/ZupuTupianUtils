@@ -73,6 +73,8 @@ export interface ScanItem {
   hasAiResult?: boolean;
   /** 当前结果图是否有「擦除前备份」，可还原擦除 */
   hasEraseOriginal?: boolean;
+  /** 已保存的擦除历史剩余步数（Ctrl+Z 可撤销次数） */
+  eraseUndoSteps?: number;
   aiModelId?: number | null;
   aiWarning?: string | null;
   /** 图片处理费用（元） */

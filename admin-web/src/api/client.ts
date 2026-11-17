@@ -184,11 +184,34 @@ export const api = {
     }),
   applyFinalCrop: (taskId: string | number, imageId: string | number, source: 'original' | 'result', quad: number[][], rotation = 0) =>
     request<any>(`/tasks/${taskId}/images/${imageId}/final-crop`, { method: 'PUT', body: JSON.stringify({ source, quad, rotation }) }),
-  /** 橡皮擦：保存前端画布擦除后的结果图（覆盖算法/大模型对应的结果文件，原图不动） */
-  eraseImage: (taskId: string | number, imageId: string | number, mode: 'algo' | 'ai' | 'result', pngDataUrl: string) =>
+  /** 橡皮擦：只传笔画，由服务端渲染（前端不做大图编码，避免卡顿）；每次调用记一个撤销步骤 */
+  eraseStrokes: (
+    taskId: string | number,
+    imageId: string | number,
+    mode: 'algo' | 'ai' | 'result',
+    strokes: { width: number; points: [number, number][] }[],
+  ) =>
     request<any>(`/tasks/${taskId}/images/${imageId}/erase`, {
       method: 'PUT',
-      body: JSON.stringify({ mode, png: pngDataUrl }),
+      body: JSON.stringify({ mode, strokes }),
+    }),
+  /** 橡皮擦：保存前端画布擦除后的结果图（覆盖算法/大模型对应的结果文件，原图不动） */
+  eraseImage: (
+    taskId: string | number,
+    imageId: string | number,
+    mode: 'algo' | 'ai' | 'result',
+    pngDataUrl: string,
+    options?: { historyContinue?: boolean },
+  ) =>
+    request<any>(`/tasks/${taskId}/images/${imageId}/erase`, {
+      method: 'PUT',
+      body: JSON.stringify({ mode, png: pngDataUrl, history: options?.historyContinue ? 'continue' : 'begin' }),
+    }),
+  /** 橡皮擦：撤销上一次已保存的擦除（可重复调用，直到回到未擦除状态） */
+  undoErase: (taskId: string | number, imageId: string | number) =>
+    request<any>(`/tasks/${taskId}/images/${imageId}/erase-undo`, {
+      method: 'POST',
+      body: '{}',
     }),
   /** 橡皮擦：还原到第一次擦除前的结果图 */
   restoreErasedImage: (taskId: string | number, imageId: string | number, mode: 'algo' | 'ai' | 'result') =>

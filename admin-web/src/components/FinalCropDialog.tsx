@@ -6,6 +6,19 @@ type CropCache = { version: 3; quad: Pt[]; rotation: number };
 const LABELS = ['左上', '右上', '右下', '左下'];
 const clamp = (v: number) => Math.max(0, Math.min(1, v));
 const QUAD_CACHE_KEY = 'zupu-final-crop:global-quad:v3';
+const ZOOM_CACHE_KEY = 'zupu-final-crop:global-zoom:v1';
+const readCachedZoom = () => {
+  try {
+    const raw = localStorage.getItem(ZOOM_CACHE_KEY);
+    if (raw == null || raw === '') return 1;
+    const value = Number(raw);
+    if (Number.isFinite(value)) return Math.max(0.5, Math.min(2.5, Math.round(value * 10) / 10));
+  } catch { /* 浏览器缓存不可用时用默认 */ }
+  return 1;
+};
+const saveCachedZoom = (value: number) => {
+  try { localStorage.setItem(ZOOM_CACHE_KEY, String(Math.max(0.5, Math.min(2.5, Math.round(value * 10) / 10)))); } catch { /* 忽略浏览器缓存异常 */ }
+};
 const orderQuad = (value: Pt[]): Pt[] => {
   if (value.length !== 4) return value;
   const cx = value.reduce((s, p) => s + p.x, 0) / 4;
@@ -65,7 +78,8 @@ export function FinalCropDialog({ open, imageUrl, source, onClose, onApply }: {
     setLoaded(false);
     setBusy(false);
     setError('');
-    setZoom(1);
+    // 记住上次「确认截图」时的缩放比例；换图/下次打开继续沿用
+    setZoom(readCachedZoom());
     setRotatedUrl('');
     setSourceSize({ w: 0, h: 0 });
     setHoverPoint(null);
@@ -142,15 +156,17 @@ export function FinalCropDialog({ open, imageUrl, source, onClose, onApply }: {
       if (!validQuadShape(points)) throw new Error('四个角点发生重叠或交叉，请调整后重试');
       const outputQuad = points.map((p) => [clamp(p.x), clamp(p.y)]);
       await onApply(outputQuad, rotation);
+      // 只有确认截图成功才更新“上次缩放比例”，取消不会覆盖
+      saveCachedZoom(zoom);
     } catch (e: any) { setError(e?.message || '截图失败，请重试'); }
     finally { pending.current = false; setBusy(false); }
   };
   return <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
     <div className="absolute inset-0 bg-black/50" onClick={() => !busy && onClose()} />
-    <div className="relative bg-white rounded-2xl shadow-xl w-[calc(100vw-32px)] max-w-[1180px] h-[calc(100vh-32px)] max-h-[900px] min-h-[600px] flex flex-col overflow-hidden">
+    <div className="relative bg-white rounded-2xl shadow-xl w-[calc(100vw-24px)] max-w-[1500px] h-[calc(100vh-24px)] max-h-[96vh] min-h-[600px] flex flex-col overflow-hidden">
       <div className="flex-none px-6 py-5 border-b border-black/10"><div className="text-lg font-semibold">{source === 'original' ? '截图原图' : '截图处理结果'}</div><div className="text-sm text-gray-500 mt-1">请依次点击四个角确定四边形网格；完成后可拖动区域或四角修正。</div></div>
-      <div className="flex-1 min-h-0 overflow-auto bg-gray-100 p-6 flex items-center justify-center"><div ref={frame} style={{ transform: `scale(${zoom})` }} className={`relative max-w-full max-h-full select-none touch-none origin-center ${complete ? 'cursor-move' : 'cursor-crosshair'}`} onPointerDown={addPoint} onPointerMove={move} onPointerLeave={() => { if (!drag.current) setHoverPoint(null); }} onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; setHoverPoint(null); }}>
-        <img src={rotatedUrl || imageUrl} onLoad={() => setLoaded(true)} onError={() => setError('图片加载失败，请关闭后重试')} alt="待截图图片" draggable={false} className="block max-w-[calc(100vw-220px)] max-h-[calc(100vh-320px)] w-auto h-auto" />
+      <div className="flex-1 min-h-0 overflow-auto bg-gray-100 p-6"><div className="m-auto w-fit"><div ref={frame} style={{ zoom }} className={`relative max-w-full max-h-full select-none touch-none ${complete ? 'cursor-move' : 'cursor-crosshair'}`} onPointerDown={addPoint} onPointerMove={move} onPointerLeave={() => { if (!drag.current) setHoverPoint(null); }} onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; setHoverPoint(null); }}>
+        <img src={rotatedUrl || imageUrl} onLoad={() => setLoaded(true)} onError={() => setError('图片加载失败，请关闭后重试')} alt="待截图图片" draggable={false} className="block max-w-[calc(100vw-160px)] max-h-[calc(100vh-260px)] w-auto h-auto" />
         {loaded && !complete && drawingPoints.length >= 2 && <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
           {drawingPoints.length === 2
             ? <polyline points={drawingPath} fill="none" stroke="#0071E3" strokeWidth="0.45" vectorEffect="non-scaling-stroke" />
@@ -158,7 +174,7 @@ export function FinalCropDialog({ open, imageUrl, source, onClose, onApply }: {
         </svg>}
         {loaded && complete && <svg className="absolute inset-0 w-full h-full pointer-events-auto" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points={polygon} fill="rgba(0,113,227,.12)" stroke="#0071E3" strokeWidth="0.45" vectorEffect="non-scaling-stroke" onPointerDown={(e) => { e.stopPropagation(); e.preventDefault(); drag.current = { mode: 'move', start: pointFromEvent(e), points }; }} />{[.25,.5,.75].map((t) => <React.Fragment key={t}><line pointerEvents="none" x1={(displayPoints[0].x+(displayPoints[1].x-displayPoints[0].x)*t)*100} y1={(displayPoints[0].y+(displayPoints[1].y-displayPoints[0].y)*t)*100} x2={(displayPoints[3].x+(displayPoints[2].x-displayPoints[3].x)*t)*100} y2={(displayPoints[3].y+(displayPoints[2].y-displayPoints[3].y)*t)*100} stroke="#0071E3" strokeWidth="0.18" vectorEffect="non-scaling-stroke" /><line pointerEvents="none" x1={(displayPoints[0].x+(displayPoints[3].x-displayPoints[0].x)*t)*100} y1={(displayPoints[0].y+(displayPoints[3].y-displayPoints[0].y)*t)*100} x2={(displayPoints[1].x+(displayPoints[2].x-displayPoints[1].x)*t)*100} y2={(displayPoints[1].y+(displayPoints[2].y-displayPoints[1].y)*t)*100} stroke="#0071E3" strokeWidth="0.18" vectorEffect="non-scaling-stroke" /></React.Fragment>)}</svg>}
         {points.map((p, i) => { const shown = displayPoints[i] || p; return <button key={i} type="button" aria-label={`调整第${i + 1}个点（${LABELS[i]}）`} onPointerDown={(e) => { e.stopPropagation(); e.preventDefault(); (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); drag.current = { mode: 'point', index: i }; }} onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }} style={{ left: `${shown.x * 100}%`, top: `${shown.y * 100}%` }} className="absolute -translate-x-1/2 -translate-y-1/2 w-6 h-6 cursor-grab bg-transparent border-0" />; })}
-      </div></div>
+      </div></div></div>
       {error && <div role="alert" className="mx-5 mt-2 p-2 text-xs text-red-700 bg-red-50 rounded">{error}</div>}
       <div className="flex-none flex items-center justify-between p-5"><div className="text-xs text-gray-500">{points.length < 4 ? `已选择 ${points.length}/4 个点` : !ready ? '底图加载中…' : '四边形已确定，可拖动区域或四角修正'}</div><div className="flex items-center gap-2"><button type="button" disabled={busy} onClick={() => setZoom((z) => Math.max(.5, +(z - .1).toFixed(1)))} className="p-3 rounded-full bg-gray-100 hover:bg-gray-200 disabled:opacity-50" title="缩小预览"><Minus className="w-5 h-5" /></button><span className="w-12 text-center text-sm tabular-nums">{Math.round(zoom * 100)}%</span><button type="button" disabled={busy} onClick={() => setZoom((z) => Math.min(2.5, +(z + .1).toFixed(1)))} className="p-3 rounded-full bg-gray-100 hover:bg-gray-200 disabled:opacity-50" title="放大预览"><Plus className="w-5 h-5" /></button><button type="button" disabled={busy} onPointerDown={() => startRotation(-1)} onPointerUp={stopRotation} onPointerLeave={stopRotation} onPointerCancel={stopRotation} className="p-3 rounded-full bg-gray-100 hover:bg-gray-200 disabled:opacity-50" title="按住连续逆时针旋转"><RotateCcw className="w-5 h-5" /></button><input aria-label="旋转角度" disabled={busy} type="number" min="-360" max="360" step="0.1" value={rotation} onChange={(e) => setRotation(Math.max(-360, Math.min(360, Number(e.target.value) || 0)))} className="w-20 px-2 py-2.5 text-sm text-center border border-black/10 rounded-lg" /><span className="text-sm text-gray-500">°</span><button type="button" disabled={busy} onPointerDown={() => startRotation(1)} onPointerUp={stopRotation} onPointerLeave={stopRotation} onPointerCancel={stopRotation} className="p-3 rounded-full bg-gray-100 hover:bg-gray-200 disabled:opacity-50" title="按住连续顺时针旋转"><RotateCw className="w-5 h-5" /></button><button disabled={busy || points.length === 0} onClick={() => setPoints([])} className="px-5 py-2.5 bg-gray-100 rounded-full text-sm">重新选择</button><button disabled={busy} onClick={onClose} className="px-5 py-2.5 bg-gray-100 rounded-full text-sm">取消</button><button disabled={busy || !ready} onClick={submit} className="px-5 py-2.5 bg-blue-600 text-white rounded-full text-sm disabled:opacity-50">{busy ? '正在截图…' : '确认截图'}</button></div></div>
     </div>

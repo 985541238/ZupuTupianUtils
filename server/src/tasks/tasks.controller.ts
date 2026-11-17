@@ -380,9 +380,25 @@ export class TasksController {
     @Req() req: any,
     @Param('id', ParseIntPipe) id: number,
     @Param('imageId', ParseIntPipe) imageId: number,
-    @Body() body: { mode?: 'algo' | 'ai' | 'result'; png?: string },
+    @Body()
+    body: {
+      mode?: 'algo' | 'ai' | 'result';
+      png?: string;
+      history?: 'begin' | 'continue';
+      strokes?: { width?: number; points?: number[][] }[];
+    },
   ) {
     return this.tasks.eraseImage(req.user.id, id, imageId, body || {});
+  }
+
+  /** 橡皮擦：撤销上一次已保存的擦除（可重复，直到回到未擦除状态） */
+  @Post(':id/images/:imageId/erase-undo')
+  undoErase(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('imageId', ParseIntPipe) imageId: number,
+  ) {
+    return this.tasks.undoErase(req.user.id, id, imageId);
   }
 
   /** 橡皮擦：还原到第一次擦除前的结果图 */

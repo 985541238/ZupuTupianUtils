@@ -6,10 +6,16 @@ export type EraseSaveState = 'idle' | 'saving' | 'error';
 export type EraseMode = 'algo' | 'ai' | 'result';
 
 export type EraseCanvasHandle = {
+  /** 撤销最近一次已保存的擦除（可连续调用直到未擦除状态） */
   undo: () => void;
-  /** 把当前擦除结果保存到服务器；返回是否成功（无改动时直接成功） */
-  finish: () => Promise<boolean>;
+  /** 立即把当前笔画状态保存到服务器；返回是否成功（无改动时直接成功） */
+  flush: () => Promise<boolean>;
+  /** 是否有尚未保存到服务器的改动 */
   isDirty: () => boolean;
+  /** 最近一次成功保存的 imageView（父级退出橡皮擦时用于刷新当前页） */
+  getLastSaved: () => any;
+  /** 清理定时器 */
+  dispose: () => void;
 };
 
 type Stroke = { width: number; points: Array<[number, number]> };
@@ -23,30 +29,47 @@ interface EraseCanvasProps {
   brushSize: number;
   /** 分屏对比时只允许擦结果图可见区域（右侧），传 0-100 的百分比 */
   clipRightPercent?: number | null;
-  onSaved: (raw: any) => void;
+  /** 按住空格进入抓手平移时，画布让出鼠标事件、隐藏画笔圆圈 */
+  panMode?: boolean;
+  /** 自动保存成功（含撤销后）回调，父级用于刷新当前页缓存 */
+  onSaved?: (raw: any) => void;
+  /** 已经没有可撤销的擦除时回调（用于提示） */
+  onUndoEmpty?: () => void;
   onStateChange?: (state: { canUndo: boolean; dirty: boolean; saveState: EraseSaveState }) => void;
 }
+
+/** 自动保存节流：每画完一笔后短暂停顿即保存，一次保存=一个可撤销步骤 */
+const AUTO_SAVE_DELAY = 300;
 
 /**
  * 结果图橡皮擦覆盖层（只擦结果图，黑白图涂白；原图不动）。
  * - 以绝对定位覆盖在结果图元素上，画布 backing store = 结果图原始像素；
- * - 笔画先只画在覆盖层（白线），不改动底图；点「完成」时再合成整图上传保存；
- * - 双联对比只覆盖右侧结果图，分屏对比按可见区域裁剪，移动到原图上不会生效；
- * - 撤销仅本页本次会话；未点「完成」就离开则丢弃。
+ * - 每画完一笔自动保存（无需「完成」按钮），每次保存都会记一个服务端撤销步骤；
+ * - 保存失败自动重试，不阻塞继续操作；
+ * - 撤销（Ctrl+Z/撤销按钮）直接撤服务端最近一步，因此可以一步步退回，而不是一次跳回原图；
+ * - 双联对比只覆盖右侧结果图，分屏对比按可见区域裁剪。
  */
 export const EraseCanvas = React.forwardRef<EraseCanvasHandle, EraseCanvasProps>(function EraseCanvas(
-  { src, taskId, imageId, mode, brushSize, clipRightPercent, onSaved, onStateChange },
+  { src, taskId, imageId, mode, brushSize, clipRightPercent, panMode, onSaved, onUndoEmpty, onStateChange },
   ref,
 ) {
   const canvasElRef = useRef<HTMLCanvasElement | null>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   const baseImgRef = useRef<HTMLImageElement | null>(null);
   const strokesRef = useRef<Stroke[]>([]);
+  /** 尚未保存到服务端的笔画（只传笔画，前端不做大图编码） */
+  const pendingStrokesRef = useRef<Stroke[]>([]);
   const drawingRef = useRef<Stroke | null>(null);
   const brushRef = useRef(brushSize);
   const mountedRef = useRef(false);
   const savingRef = useRef(false);
+  const undoingRef = useRef(false);
   const saveStateRef = useRef<EraseSaveState>('idle');
+  const dirtyRef = useRef(false);
+  const lastSavedRef = useRef<any>(null);
+  const saveTimerRef = useRef<number | null>(null);
+  const retryTimerRef = useRef<number | null>(null);
+  const saveChainRef = useRef<Promise<boolean>>(Promise.resolve(true));
   const [ready, setReady] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [cursor, setCursor] = useState<{ x: number; y: number; r: number; visible: boolean }>({
@@ -60,10 +83,15 @@ export const EraseCanvas = React.forwardRef<EraseCanvasHandle, EraseCanvasProps>
     brushRef.current = brushSize;
   }, [brushSize]);
 
+  // 按住空格切到抓手平移时隐藏画笔圆圈
+  useEffect(() => {
+    if (panMode) setCursor((c) => (c.visible ? { ...c, visible: false } : c));
+  }, [panMode]);
+
   const notify = useCallback(() => {
     onStateChange?.({
-      canUndo: strokesRef.current.length > 0,
-      dirty: strokesRef.current.length > 0,
+      canUndo: true,
+      dirty: dirtyRef.current || savingRef.current,
       saveState: saveStateRef.current,
     });
   }, [onStateChange]);
@@ -102,53 +130,177 @@ export const EraseCanvas = React.forwardRef<EraseCanvasHandle, EraseCanvasProps>
     for (const stroke of strokesRef.current) drawStroke(ctx, stroke);
   }, [drawStroke]);
 
-  const finish = useCallback(async () => {
-    if (savingRef.current) return false;
-    if (!strokesRef.current.length) return true; // 没有改动，直接离开
-    const base = baseImgRef.current;
-    if (!base) return false;
-    const w = base.naturalWidth || 0;
-    const h = base.naturalHeight || 0;
-    if (!w || !h) return false;
-    savingRef.current = true;
-    saveStateRef.current = 'saving';
-    notify();
-    try {
-      const out = document.createElement('canvas');
-      out.width = w;
-      out.height = h;
-      const octx = out.getContext('2d');
-      if (!octx) throw new Error('无法创建保存画布');
-      octx.drawImage(base, 0, 0);
-      for (const stroke of strokesRef.current) drawStroke(octx, stroke);
-      const raw = await api.eraseImage(taskId, imageId, mode, out.toDataURL('image/png'));
-      onSaved(raw);
-      strokesRef.current = [];
-      saveStateRef.current = 'idle';
-      savingRef.current = false;
-      notify();
-      return true;
-    } catch (e) {
-      console.warn('erase save failed', e);
-      saveStateRef.current = 'error';
-      savingRef.current = false;
-      if (mountedRef.current) notify();
-      return false;
+  const clearTimer = useCallback(() => {
+    if (saveTimerRef.current != null) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
     }
-  }, [drawStroke, imageId, mode, notify, onSaved, taskId]);
+  }, []);
 
-  const undo = useCallback(() => {
-    if (!strokesRef.current.length) return;
-    strokesRef.current.pop();
-    redrawOverlay();
+  const dismissRetryTimer = useCallback(() => {
+    if (retryTimerRef.current != null) {
+      window.clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleSave = useCallback((delay = AUTO_SAVE_DELAY) => {
+    if (saveTimerRef.current != null) window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = window.setTimeout(() => {
+      saveTimerRef.current = null;
+      void saveNowRef.current?.();
+    }, delay);
+  }, []);
+
+  const saveNow = useCallback((): Promise<boolean> => {
+    const run = async (): Promise<boolean> => {
+      const batch = pendingStrokesRef.current.slice();
+      if (!batch.length) {
+        dirtyRef.current = false;
+        return true;
+      }
+      savingRef.current = true;
+      saveStateRef.current = 'saving';
+      notify();
+      try {
+        const raw = await api.eraseStrokes(
+          taskId,
+          imageId,
+          mode,
+          batch.map((s) => ({ width: s.width, points: s.points })),
+        );
+        // 成功提交的这批笔画移出待保存队列（期间新增的笔画保留）
+        pendingStrokesRef.current = pendingStrokesRef.current.slice(batch.length);
+        lastSavedRef.current = raw;
+        dirtyRef.current = pendingStrokesRef.current.length > 0;
+        saveStateRef.current = 'idle';
+        savingRef.current = false;
+        dismissRetryTimer();
+        notify();
+        if (dirtyRef.current) scheduleSave(0);
+        return true;
+      } catch (e) {
+        console.warn('erase auto-save failed, will retry', e);
+        savingRef.current = false;
+        saveStateRef.current = 'error';
+        notify();
+        if (retryTimerRef.current == null) {
+          retryTimerRef.current = window.setTimeout(() => {
+            retryTimerRef.current = null;
+            void saveNow();
+          }, 2000);
+        }
+        return false;
+      }
+    };
+    const next = saveChainRef.current.then(run, run);
+    saveChainRef.current = next.catch(() => false);
+    return next;
+  }, [dismissRetryTimer, imageId, mode, notify, scheduleSave, taskId]);
+  const saveNowRef = useRef<(() => Promise<boolean>) | null>(null);
+  saveNowRef.current = saveNow;
+
+  const flush = useCallback(async () => {
+    clearTimer();
+    if (!dirtyRef.current && !savingRef.current) return true;
+    for (let i = 0; i < 4; i += 1) {
+      const ok = await saveNow();
+      if (!ok) return false;
+      if (!dirtyRef.current) return true;
+    }
+    return !dirtyRef.current;
+  }, [clearTimer, saveNow]);
+
+  const markDirty = useCallback(() => {
+    dirtyRef.current = true;
     if (saveStateRef.current === 'error') saveStateRef.current = 'idle';
     notify();
-  }, [notify, redrawOverlay]);
+  }, [notify]);
+
+  /** 从服务端返回的结果地址重新载入全分辨率底图（撤销后使用） */
+  const reloadBase = useCallback(async (raw: any) => {
+    const u = String(raw?.resultUrl || '');
+    if (!u) return;
+    const full = u.includes('/files/local') ? u.replace(/([?&])w=\d+/g, '$1w=0') : u;
+    const bust = full + (full.includes('?') ? '&' : '?') + 't=' + Date.now();
+    await new Promise<void>((resolve) => {
+      const img = new Image();
+      img.decoding = 'async';
+      img.onload = () => {
+        baseImgRef.current = img;
+        const canvas = canvasElRef.current;
+        if (canvas) {
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+          ctxRef.current = canvas.getContext('2d');
+        }
+        resolve();
+      };
+      img.onerror = () => resolve();
+      img.src = bust;
+    });
+  }, []);
+
+  /** 撤销最近一次已保存的擦除（一次一步，可连续撤到未擦除状态） */
+  const undo = useCallback(() => {
+    if (undoingRef.current) return;
+    undoingRef.current = true;
+    clearTimer();
+    dismissRetryTimer();
+    void (async () => {
+      saveStateRef.current = 'saving';
+      notify();
+      try {
+        // 先把尚未保存的笔画落盘，确保撤销的是最近一步
+        if (dirtyRef.current) {
+          const ok = await saveNow();
+          if (!ok) {
+            saveStateRef.current = 'error';
+            notify();
+            return;
+          }
+        }
+        const raw = await api.undoErase(taskId, imageId);
+        lastSavedRef.current = raw;
+        strokesRef.current = [];
+        pendingStrokesRef.current = [];
+        dirtyRef.current = false;
+        await reloadBase(raw);
+        redrawOverlay();
+        saveStateRef.current = 'idle';
+        notify();
+        onSaved?.(raw);
+      } catch (e: any) {
+        const msg = String(e?.message || '');
+        if (msg.includes('未擦除') || msg.includes('没有可撤销')) {
+          saveStateRef.current = 'idle';
+          onUndoEmpty?.();
+        } else {
+          saveStateRef.current = 'error';
+          notify();
+        }
+      } finally {
+        undoingRef.current = false;
+        notify();
+      }
+    })();
+  }, [clearTimer, dismissRetryTimer, imageId, notify, onSaved, onUndoEmpty, redrawOverlay, reloadBase, saveNow, taskId]);
+
+  const dispose = useCallback(() => {
+    clearTimer();
+    dismissRetryTimer();
+  }, [clearTimer, dismissRetryTimer]);
 
   useImperativeHandle(
     ref,
-    () => ({ undo, finish, isDirty: () => strokesRef.current.length > 0 }),
-    [finish, undo],
+    () => ({
+      undo,
+      flush,
+      isDirty: () => dirtyRef.current || savingRef.current,
+      getLastSaved: () => lastSavedRef.current,
+      dispose,
+    }),
+    [dispose, flush, undo],
   );
 
   // 审阅页显示的是服务端 2400px 工作图（w=2400）；擦除要基于全分辨率结果图，w=0 返回原文件。
@@ -158,7 +310,7 @@ export const EraseCanvas = React.forwardRef<EraseCanvasHandle, EraseCanvasProps>
     return u.replace(/([?&])w=\d+/g, '$1w=0');
   })();
 
-  // 载入全分辨率结果图（只用于最终合成）；key 变化（切页/切结果）时父级会重新挂载
+  // 载入全分辨率结果图（只用于合成）；key 变化（切页/切结果）时父级会重新挂载
   useEffect(() => {
     mountedRef.current = true;
     const img = new Image();
@@ -180,7 +332,26 @@ export const EraseCanvas = React.forwardRef<EraseCanvasHandle, EraseCanvasProps>
     img.src = fullSrc;
     return () => {
       mountedRef.current = false;
-      // 未点完成就离开：直接丢弃（不自动保存）
+      clearTimer();
+      dismissRetryTimer();
+      // 极端情况：父级没走 flush 就卸载（快速切页），尽力把未保存的笔画提交给服务器
+      if (pendingStrokesRef.current.length) {
+        const batch = pendingStrokesRef.current.slice();
+        pendingStrokesRef.current = [];
+        try {
+          void api
+            .eraseStrokes(
+              taskId,
+              imageId,
+              mode,
+              batch.map((s) => ({ width: s.width, points: s.points })),
+            )
+            .then((raw) => onSaved?.(raw))
+            .catch(() => undefined);
+        } catch {
+          /* ignore */
+        }
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -208,7 +379,7 @@ export const EraseCanvas = React.forwardRef<EraseCanvasHandle, EraseCanvasProps>
   };
 
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!ready || e.button !== 0) return;
+    if (panMode || !ready || e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
     const ctx = ctxRef.current;
@@ -225,6 +396,7 @@ export const EraseCanvas = React.forwardRef<EraseCanvasHandle, EraseCanvasProps>
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (panMode) return;
     updateCursor(e);
     const stroke = drawingRef.current;
     if (!stroke) return;
@@ -259,7 +431,9 @@ export const EraseCanvas = React.forwardRef<EraseCanvasHandle, EraseCanvasProps>
     }
     if (stroke.points.length) {
       strokesRef.current.push(stroke);
-      notify();
+      pendingStrokesRef.current.push(stroke);
+      markDirty();
+      scheduleSave();
     }
   };
 
@@ -280,7 +454,7 @@ export const EraseCanvas = React.forwardRef<EraseCanvasHandle, EraseCanvasProps>
         ref={(el) => {
           if (el) canvasElRef.current = el;
         }}
-        className={`absolute inset-0 w-full h-full touch-none select-none z-10 ${ready ? 'cursor-none' : 'cursor-wait'}`}
+        className={`absolute inset-0 w-full h-full touch-none select-none z-10 ${panMode ? 'pointer-events-none' : ''} ${ready ? 'cursor-none' : 'cursor-wait'}`}
         style={clipStyle}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}

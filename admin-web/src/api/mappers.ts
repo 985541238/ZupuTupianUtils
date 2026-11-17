@@ -93,6 +93,7 @@ export function mapImage(raw: any, taskId: string | number, pageNumber: number):
     hasAlgoResult: !!raw.hasAlgoResult,
     hasAiResult: !!raw.hasAiResult,
     hasEraseOriginal: !!raw.hasEraseOriginal,
+    eraseUndoSteps: Number(raw.eraseUndoSteps) || 0,
     aiModelId: raw.aiModelId != null ? Number(raw.aiModelId) : null,
     aiWarning: raw.aiWarning || null,
     cleanCost: raw.cleanCost != null ? Number(raw.cleanCost) || 0 : 0,

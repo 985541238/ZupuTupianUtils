@@ -1,4 +1,4 @@
-﻿import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
 import { Task } from './task.entity';
 
 @Entity('task_images')
@@ -49,6 +49,10 @@ export class TaskImage {
   /** 生成大模型结果所用模型 */
   @Column({ name: 'ai_model_id', type: 'bigint', unsigned: true, nullable: true })
   aiModelId: number | null;
+
+  /** 橡皮擦历史快照：JSON { target, steps:[{file,at}] }，用于 Ctrl+Z 无限撤销到擦除前 */
+  @Column({ name: 'erase_history', type: 'text', nullable: true })
+  eraseHistory: string | null;
 
   /** 图片处理费用（元，累计），与识别费用 cost 分开 */
   @Column({ name: 'clean_cost', type: 'decimal', precision: 12, scale: 4, default: 0 })
