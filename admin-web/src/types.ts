@@ -161,6 +161,9 @@ export interface OcrProject {
   description?: string | null;
   /** 项目根目录：浏览器上传会话目录 / 桌面本机目录 */
   rootPath?: string | null;
+  /** table 横表 / lineage 世系 */
+  layoutStyle?: string;
+  layoutLabel?: string;
   volumeCount: number;
   totalCount: number;
   doneCount: number;

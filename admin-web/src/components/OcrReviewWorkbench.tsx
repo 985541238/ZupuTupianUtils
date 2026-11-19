@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { OcrTask, OcrPage, OcrColumn, OcrChar, OcrTextPage } from '../types';
-import { api, ocrExportUrl } from '../api/client';
+import { orderColumnsLeftToRight } from '../readingOrder';
+import { ReadingRow, charsOutsideRows, loadReading, readRowColumns, rowsForPage, writeRows } from '../readingRows';
+import { api, ocrExportUrl, viewThumbUrl } from '../api/client';
 import { mapOcrPage, mapOcrTextPage } from '../api/mappers';
 import { OcrModelPicker } from './OcrModelPicker';
 import { appAlert, appConfirm } from './AppDialog';
@@ -19,7 +21,7 @@ import {
   Download,
   Copy,
   Sparkles,
-  BookOpen,
+  ListTree,
   ScanText,
   Trash2,
   Plus,
@@ -43,9 +45,226 @@ interface Props {
 
 type Sel = { col: number; idx: number } | null;
 type LayoutMode = 'overlay' | 'compare';
-type ViewMode = 'review' | 'overview';
+/** 三个阶段：校对 → 篇目 → 完成 */
+type ViewMode = 'review' | 'toc' | 'finish';
 
 const FONT = "'Songti SC','Noto Serif SC','STSong','SimSun','Source Han Serif SC',serif";
+const ROW_COLORS = ['#0071E3', '#34C759', '#FF9500', '#AF52DE', '#FF2D55', '#5AC8FA'];
+
+/** 一卷的三步流程 */
+const STEPS = [
+  { key: 'review' as ViewMode, label: '校对', Icon: ScanText },
+  { key: 'toc' as ViewMode, label: '篇目', Icon: ListTree },
+  { key: 'finish' as ViewMode, label: '完成', Icon: CheckCircle2 },
+];
+
+const STEP_HINTS: Record<ViewMode, string> = {
+  review: '对照原图逐字核对识别结果',
+  toc: '全书文字合集 + 按人名抽出来的谱系',
+  finish: '交付前总检，确认无误后结束整本任务',
+};
+
+// ---------------------------------------------------------------------------
+// 大模型按图整理出来的阅读顺序
+// ---------------------------------------------------------------------------
+// 一页一条，存在本机（后端不落库，随时可以重新整理）。
+// 校对页和篇目页共用这一份，谁整理的对方都能看到。
+
+export type PagePerson = {
+  /** 世次，如「一世」 */
+  gen: string;
+  /** 排行，如「始祖」「長子」 */
+  order: string;
+  /** 名，带公，如「清獻公」 */
+  name: string;
+  /** 这一格的全部文字，按图上从右到左的顺序连成一段（只断句、拼字，不调序） */
+  text: string;
+};
+
+const readingStoreKey = (taskId: string) => `ocr-page-reading:${taskId}`;
+
+/** 老版本按字段拆开存的（courtesy/spouse/sons/bio），读出来时拼回一段，别让以前的整理白做 */
+function normalizePerson(raw: any): PagePerson | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const s = (v: unknown) => String(v ?? '').trim();
+  const text =
+    s(raw.text) ||
+    [s(raw.courtesy), s(raw.spouse), s(raw.sons), s(raw.bio)].filter(Boolean).join(' ');
+  const p: PagePerson = { gen: s(raw.gen), order: s(raw.order), name: s(raw.name), text };
+  return p.name || p.text ? p : null;
+}
+
+export function loadPageReadings(taskId: string): Record<string, PagePerson[]> {
+  try {
+    const raw = localStorage.getItem(readingStoreKey(taskId));
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+    const out: Record<string, PagePerson[]> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!Array.isArray(v)) continue;
+      const list = v.map(normalizePerson).filter(Boolean) as PagePerson[];
+      if (list.length) out[k] = list;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+export function savePageReadings(taskId: string, map: Record<string, PagePerson[]>) {
+  try {
+    localStorage.setItem(readingStoreKey(taskId), JSON.stringify(map));
+  } catch {}
+}
+
+/**
+ * 通读：一个人一段，抬头是「世次 排行 名」，后面直接跟这一格按图上顺序连好的文字。
+ * 校对页和篇目共用——用户要的是「按书上的顺序读一遍」，不是把字段拆出来。
+ * 传了 columns 就能一段一段展开逐字对照：模型给的 text 和原始列是同一个阅读顺序，
+ * 拿头尾几个字在列里对齐，就知道这一格落在哪几列上。
+ */
+const PersonReading: React.FC<{
+  people: PagePerson[];
+  compact?: boolean;
+  model?: string;
+  columns?: OcrColumn[];
+}> = ({ people, compact, model, columns }) => {
+  const [open, setOpen] = useState<number | null>(null);
+  // 顺序算：每段都从上一段结束的位置往后找，避免两段开头一样时落到同一列
+  const spans = useMemo(() => {
+    if (!columns) return null;
+    const { flat, clean } = buildFlatChars(columns);
+    let cursor = 0;
+    const starts = people.map((p) => {
+      // 只用正文定位：有的页人名在版框外，OCR 根本没切出来，拿名字找会落到别人那列
+      const r = locateFrom(flat, clean, p.text || p.name || '', cursor);
+      if (r) cursor = r.next;
+      return r ? r.start : null;
+    });
+    // 一个人的范围 = 他的起点 → 下一个人的起点之前；最后一个到本页最后一列
+    const lastCol = Math.max(0, columns.length - 1);
+    return starts.map((s, i) => {
+      if (s == null) return null;
+      let end = lastCol;
+      for (let j = i + 1; j < starts.length; j++) {
+        if (starts[j] != null && starts[j]! > s) {
+          end = starts[j]! - 1;
+          break;
+        }
+      }
+      return [s, Math.max(s, end)] as [number, number];
+    });
+  }, [columns, people]);
+  return (
+    <div className={compact ? 'space-y-2' : 'space-y-1.5'}>
+      {people.map((p, i) => {
+        const span = spans ? spans[i] : null;
+        const showCols = open === i && span;
+        return (
+          <div key={i}>
+            <p
+              className={`${compact ? 'text-[14px] leading-[1.9]' : 'text-[15px] leading-[1.95]'} text-[#1D1D1F] break-all select-text`}
+              style={{ fontFamily: FONT }}
+            >
+              {p.gen || p.order ? (
+                <span className="text-[12px] font-semibold text-[#0071E3] mr-1">
+                  {[p.gen, p.order].filter(Boolean).join(' · ')}
+                </span>
+              ) : null}
+              {p.name ? <span className="font-semibold">{p.name}</span> : null}
+              {p.text ? (
+                <span>
+                  {p.name ? ' ' : ''}
+                  {p.text}
+                </span>
+              ) : null}
+              {columns && span ? (
+                <button
+                  type="button"
+                  onClick={() => setOpen(open === i ? null : i)}
+                  className="ml-1.5 align-baseline text-[10.5px] font-medium text-[#0071E3] hover:underline"
+                  title={`${p.name || '这一段'} 在图上是第 ${span[0] + 1}~${span[1] + 1} 列`}
+                >
+                  {open === i ? '收起' : `逐字 ${span[0] + 1}-${span[1] + 1}`}
+                </button>
+              ) : null}
+            </p>
+            {showCols ? (
+              <div className="mt-1 mb-1.5 ml-1 space-y-0.5 border-l-2 border-[#0071E3]/30 pl-2">
+                {columns!.slice(span![0], span![1] + 1).map((c, k) => {
+                  const raw = c.chars.map((ch) => ch.t).join('');
+                  const genBox = /^[一二三四五六七八九十]{1,3}世$/.test(raw);
+                  return (
+                    <div key={k} className="flex items-start gap-1.5">
+                      <span className="w-6 shrink-0 pt-px text-right text-[9px] text-[#B0B0B6] tabular-nums">
+                        {span![0] + k + 1}
+                      </span>
+                      <span
+                        className={`text-[13px] leading-[1.7] break-all ${genBox ? 'font-semibold text-[#8A4B00]' : 'text-[#3A3A3C]'}`}
+                        style={{ fontFamily: FONT }}
+                      >
+                        {raw}
+                      </span>
+                      {genBox ? (
+                        <span className="shrink-0 rounded bg-[#FF9500]/15 px-1 py-px text-[9px] font-semibold text-[#8A4B00]">
+                          世次框 · 对图核
+                        </span>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+      {model ? (
+        <div className="text-[10px] text-[#B0B0B6] text-right pt-1">由 {model} 按这一页的图通读</div>
+      ) : null}
+    </div>
+  );
+};
+
+/**
+ * 一段通读文字对应原始哪几列：拿开头/结尾几个字在「按列排好」的字流里对齐。
+ * 模型会加标点、偶尔漏字，所以只在 60% 的字能对上时就算命中，不要求一字不差。
+ * 关键是必须从上一段结束的地方往后找——天禎、天祥都以「配X氏生卒葬」开头，
+ * 不带着位置找就会双双落到同一列上。
+ */
+function buildFlatChars(columns: OcrColumn[]) {
+  const clean = (s: string) => String(s || '').replace(/[\s，。、；：？！「」『』〔〕（）()·—－]/g, '');
+  const flat: { t: string; col: number }[] = [];
+  columns.forEach((c, ci) => (c.chars || []).forEach((ch) => flat.push({ t: clean(ch.t), col: ci })));
+  return { flat, clean };
+}
+
+function locateFrom(
+  flat: { t: string; col: number }[],
+  clean: (s: string) => string,
+  text: string,
+  cursor: number,
+): { start: number; next: number } | null {
+  const target = clean(text);
+  if (target.length < 2 || flat.length < 2) return null;
+  const needleLen = Math.min(8, target.length);
+  const head = target.slice(0, needleLen);
+  const scan = (need: number) => {
+    for (let i = Math.max(0, cursor); i <= flat.length - needleLen; i++) {
+      let hit = 0;
+      for (let k = 0; k < needleLen; k++) if (flat[i + k].t === head[k]) hit++;
+      if (hit >= need) return i;
+    }
+    return -1;
+  };
+  // 先要求一字不差：「配陳氏生卒葬」和「配黃氏生卒墓」长得太像，松着来会串到上一个人的列
+  let hitAt = scan(needleLen);
+  // 模型偶尔换异体字、漏一两个，退一步再找一次
+  if (hitAt < 0) hitAt = scan(Math.ceil(needleLen * 0.65));
+  if (hitAt < 0) return null;
+  return { start: flat[hitAt].col, next: hitAt + 1 };
+}
+
 
 /** 图上单个字的裁切尺寸：按字框宽高比换算成固定高度的缩略图 */
 function charTileMetrics(b: [number, number, number, number], tileH = 20) {
@@ -80,6 +299,86 @@ const countPending = (cols?: OcrColumn[]) => (cols || []).reduce((a, c) => a + c
 const countPlaceholder = (cols?: OcrColumn[]) => (cols || []).reduce((a, c) => a + c.chars.filter((x) => x.t === '□').length, 0);
 const countChars = (cols?: OcrColumn[]) => (cols || []).reduce((a, c) => a + c.chars.length, 0);
 
+const THUMB_STATUS: Record<string, string> = {
+  confirmed: 'bg-[#34C759]',
+  ready: 'bg-[#0071E3]',
+  processing: 'bg-[#FF9500]',
+  failed: 'bg-[#FF3B30]',
+};
+
+/** 左侧页列表单独渲染：校对区鼠标移动时不重画缩略图。图只用小图，避免整卷原图参与滚动。 */
+const PageThumbList = React.memo(function PageThumbList({
+  pages,
+  curId,
+  loading,
+  onOpen,
+  onReorder,
+}: {
+  pages: OcrPage[];
+  curId: string | null;
+  loading: boolean;
+  onOpen: (id: string) => void;
+  onReorder: (from: number, to: number) => void;
+}) {
+  const dragFrom = useRef<number | null>(null);
+  const [over, setOver] = useState<number | null>(null);
+  return (
+    <div className="flex-1 overflow-y-auto p-2.5 space-y-1.5">
+      {loading ? (
+        <div className="text-xs text-[#86868B] p-3">加载中…</div>
+      ) : (
+        pages.map((p, idx) => (
+          <button
+            key={p.id}
+            draggable
+            onDragStart={(event) => {
+              dragFrom.current = idx;
+              event.dataTransfer.effectAllowed = 'move';
+              event.dataTransfer.setData('text/plain', String(idx));
+            }}
+            onDragOver={(event) => {
+              event.preventDefault();
+              if (over !== idx) setOver(idx);
+            }}
+            onDragLeave={() => setOver((v) => (v === idx ? null : v))}
+            onDragEnd={() => {
+              dragFrom.current = null;
+              setOver(null);
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              const from = dragFrom.current ?? Number(event.dataTransfer.getData('text/plain'));
+              dragFrom.current = null;
+              setOver(null);
+              if (Number.isFinite(from)) onReorder(from, idx);
+            }}
+            onClick={() => onOpen(p.id)}
+            style={{ contentVisibility: 'auto', containIntrinsicSize: '128px 88px' }}
+            className={`relative w-full text-left rounded-md border overflow-hidden cursor-grab ${
+              p.id === curId ? 'border-[#0071E3] shadow-[0_2px_10px_rgba(0,113,227,0.18)]' : 'border-black/[0.08] hover:border-black/[0.18]'
+            } ${over === idx ? 'ring-2 ring-[#0071E3]/60' : ''}`}
+            title={`${p.fileName}（拖动可调整页顺序）`}
+          >
+            <img
+              src={viewThumbUrl(p.imageUrl, 320)}
+              alt=""
+              draggable={false}
+              loading="lazy"
+              decoding="async"
+              fetchPriority="low"
+              className="w-full h-20 object-cover bg-white"
+            />
+            <span className="absolute top-1 left-1 min-w-[16px] h-4 px-1 rounded bg-black/55 text-white text-[10px] font-semibold leading-4 text-center tabular-nums">
+              {p.pageNumber}
+            </span>
+            <span className={`absolute top-1 right-1 w-2 h-2 rounded-full ${THUMB_STATUS[p.status] || 'bg-[#C7C7CC]'}`} />
+          </button>
+        ))
+      )}
+    </div>
+  );
+});
+
 export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTaskChanged, onOpenSetup }) => {
   const [mode, setMode] = useState<ViewMode>('review');
   const [pages, setPages] = useState<OcrPage[]>([]);
@@ -90,6 +389,14 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
   const [sel, setSel] = useState<Sel>(null);
   const [showText, setShowText] = useState(true);
   const [onlyPending, setOnlyPending] = useState(false);
+  /** 划行：用户在图上框出每一行，本卷后面的页沿用同一套框 */
+  const [editRows, setEditRows] = useState(false);
+  const [pageOnly, setPageOnly] = useState(false);
+  const [readingRows, setReadingRows] = useState<ReadingRow[]>([]);
+  /** 大模型按这一页图整理出的阅读顺序，只含这一页上的人 */
+  const [pageReadings, setPageReadings] = useState<Record<string, PagePerson[]>>({});
+  const [ordering, setOrdering] = useState(false);
+  const [showRawCols, setShowRawCols] = useState(false);
   /** 拖拽调整列顺序 */
   const dragColRef = useRef<number | null>(null);
   const [dragOverCol, setDragOverCol] = useState<number | null>(null);
@@ -114,6 +421,14 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
   const [textOpacity, setTextOpacity] = useState(0.85);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [toast, setToast] = useState('');
+  /** 每页整理结果用的是哪个模型，显示在卡片下面 */
+  const [readingModels, setReadingModels] = useState<Record<string, string>>({});
+  /** 后端给这一页留的提醒（例如「去掉 3 个重复人名」），提醒人回头核 */
+  const [readingNotes, setReadingNotes] = useState<Record<string, string>>({});
+  useEffect(() => {
+    setPageReadings(loadPageReadings(task.id));
+    setShowRawCols(false);
+  }, [task.id]);
   const [busy, setBusy] = useState(false);
   const [confirmDlg, setConfirmDlg] = useState<null | { pending: number; placeholder: number; thenNext: boolean }>(null);
   const [rerunDlg, setRerunDlg] = useState(false);
@@ -130,6 +445,22 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
   const cur = pages.find((p) => p.id === curId) || null;
   const curIdx = cur ? pages.indexOf(cur) : -1;
 
+  useEffect(() => {
+    if (!curId) return;
+    const hit = rowsForPage(loadReading(task.id), curId);
+    setReadingRows(hit.rows);
+    setPageOnly(hit.pageOnly);
+  }, [curId, task.id]);
+
+  const commitRows = useCallback(
+    (next: ReadingRow[], only = pageOnly) => {
+      if (!curId) return;
+      setReadingRows(next);
+      writeRows(task.id, curId, next, only);
+    },
+    [curId, pageOnly, task.id],
+  );
+
   // ---------- 提示 ----------
   const toastTimer = useRef<number | null>(null);
   const showToast = useCallback((t: string) => {
@@ -141,14 +472,73 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
   /** 复制本页全部文字（按列换行） */
   const copyAllText = useCallback(async () => {
     if (!columns) return;
-    const text = columns.map((c) => c.chars.map((x) => x.t).join('')).join('\n');
+    const pageW = cur?.width || 0;
+    const pageH = cur?.height || 0;
+    const text =
+      readingRows.length && pageW && pageH
+        ? readingRows
+            .map((row) => readRowColumns(columns, row, pageW, pageH).map((g) => g.map((x) => x.ch.t).join('')).join(''))
+            .join('\n')
+        : columns.map((c) => c.chars.map((x) => x.t).join('')).join('\n');
     try {
       await navigator.clipboard.writeText(text);
       showToast('本页文字已复制');
     } catch {
       void appAlert('复制失败，请手动选择文字');
     }
-  }, [columns, showToast]);
+  }, [columns, cur?.height, cur?.width, readingRows, showToast]);
+
+  // ---------- 大模型按图整理本页阅读顺序 ----------
+  const putReading = useCallback(
+    (pageId: string, people: PagePerson[], model?: string) => {
+      setPageReadings((prev) => {
+        const next = { ...prev, [pageId]: people };
+        savePageReadings(task.id, next);
+        return next;
+      });
+      if (model) setReadingModels((prev) => ({ ...prev, [pageId]: model }));
+    },
+    [task.id],
+  );
+
+  const dropReading = useCallback(
+    (pageId: string) => {
+      setPageReadings((prev) => {
+        const next = { ...prev };
+        delete next[pageId];
+        savePageReadings(task.id, next);
+        return next;
+      });
+    },
+    [task.id],
+  );
+
+  /** 把这一页的图 + OCR 文字发给大模型，要回按书上读法排好的人 */
+  const orderCurrentPage = useCallback(async () => {
+    if (!cur) return;
+    setOrdering(true);
+    try {
+      const r = await api.orderOcrPage(task.id, cur.id);
+      if (!r?.people?.length) {
+        // 序、引、图版这类页本来就没有人，提示一句就走，不算失败
+        showToast(r?.note || '这一页没有人物条目');
+        return;
+      }
+      putReading(cur.id, r.people, r.model);
+      setReadingNotes((prev) => {
+        const next = { ...prev };
+        if (r.note) next[cur.id] = r.note;
+        else delete next[cur.id];
+        return next;
+      });
+      setShowRawCols(false);
+      showToast(`已按图整理第 ${cur.pageNumber} 页：${r.people.length} 个人`);
+    } catch (e: any) {
+      void appAlert(e?.message || '整理失败');
+    } finally {
+      setOrdering(false);
+    }
+  }, [cur, putReading, showToast, task.id]);
 
   // ---------- 加载页面列表 ----------
   const loadList = useCallback(
@@ -165,8 +555,6 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
   const [addPos, setAddPos] = useState<'start' | 'after' | 'end'>('end');
   const [adding, setAdding] = useState(false);
   const addInputRef = useRef<HTMLInputElement>(null);
-  const dragPageRef = useRef<number | null>(null);
-  const [dragOverPage, setDragOverPage] = useState<number | null>(null);
 
   const onAddImages = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const input = event.currentTarget;
@@ -202,7 +590,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
     }
   };
 
-  const reorderPagesByDrag = async (from: number, to: number) => {
+  const reorderPagesByDrag = useCallback(async (from: number, to: number) => {
     if (from === to || from < 0 || to < 0 || from >= pages.length || to >= pages.length) return;
     const next = [...pages];
     const [moved] = next.splice(from, 1);
@@ -217,7 +605,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
       void appAlert(e?.message || '保存页顺序失败');
       await loadList();
     }
-  };
+  }, [pages, task.id, showToast, loadList, onTaskChanged]);
 
   useEffect(() => {
     let off = false;
@@ -348,8 +736,9 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
       .then((raw) => {
         if (off) return;
         const cols: OcrColumn[] | undefined = raw?.data?.columns;
-        if (cols) cache.current.set(curId, cols);
-        setColumns(cols || null);
+        const ordered = cols ? orderColumnsLeftToRight(cols) : undefined;
+        if (ordered) cache.current.set(curId, ordered);
+        setColumns(ordered || null);
       })
       .catch((e) => !off && showToast(e?.message || '加载本页失败'))
       .finally(() => !off && setLoadingPage(false));
@@ -365,6 +754,14 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
       setCurId(id);
     },
     [curId, flushSave],
+  );
+
+  const openThumb = useCallback(
+    (id: string) => {
+      setMode('review');
+      void gotoPage(id);
+    },
+    [gotoPage],
   );
 
   // 编辑后同步左侧列表里本页的待核对数
@@ -545,9 +942,10 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
       await flushSave();
       const raw = await api.realignOcrPage(task.id, cur.id);
       const cols: OcrColumn[] | undefined = raw?.data?.columns;
-      if (cols) {
-        cache.current.set(cur.id, cols);
-        setColumns(cols);
+      const ordered = cols ? orderColumnsLeftToRight(cols) : undefined;
+      if (ordered) {
+        cache.current.set(cur.id, ordered);
+        setColumns(ordered);
       }
       patchPage(cur.id, {
         imageUrl: mapOcrPage(raw, task.id, cur.pageNumber).imageUrl,
@@ -575,9 +973,10 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
       await flushSave();
       const raw = await api.recognizeOcrColumn(task.id, cur.id, col, modelId);
       const cols: OcrColumn[] | undefined = raw?.data?.columns;
-      if (cols) {
-        cache.current.set(cur.id, cols);
-        setColumns(cols);
+      const ordered = cols ? orderColumnsLeftToRight(cols) : undefined;
+      if (ordered) {
+        cache.current.set(cur.id, ordered);
+        setColumns(ordered);
       }
       patchPage(cur.id, {
         status: 'ready',
@@ -616,9 +1015,10 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
       await flushSave();
       const raw = await api.restoreOcrPage(task.id, cur.id);
       const cols: OcrColumn[] | undefined = raw?.data?.columns;
-      if (cols) {
-        cache.current.set(cur.id, cols);
-        setColumns(cols);
+      const ordered = cols ? orderColumnsLeftToRight(cols) : undefined;
+      if (ordered) {
+        cache.current.set(cur.id, ordered);
+        setColumns(ordered);
       }
       patchPage(cur.id, {
         status: 'ready',
@@ -672,8 +1072,19 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
   const switchMode = async (m: ViewMode) => {
     if (m === mode) return;
     await flushSave();
+    // 篇目那边也能整理，回来时从本机存储重新读一遍，省得两边各看各的
+    if (m === 'review') setPageReadings(loadPageReadings(task.id));
     setMode(m);
   };
+
+  /** 从篇目/完成页跳到某一页并回到校对 */
+  const jumpToReview = useCallback(
+    (pageId: string) => {
+      setMode('review');
+      void gotoPage(pageId);
+    },
+    [gotoPage],
+  );
 
   // ---------- 渲染 ----------
   const navBar = (
@@ -686,24 +1097,19 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
         {showList ? <PanelLeftClose className="w-3.5 h-3.5" /> : <PanelLeftOpen className="w-3.5 h-3.5" />}
       </button>
       <div className="flex items-center p-0.5 bg-[#E5E5EA]/70 rounded-full">
-        <button
-          onClick={() => void switchMode('review')}
-          className={`h-7 px-3 text-[12px] rounded-full transition-all cursor-pointer flex items-center gap-1 ${
-            mode === 'review' ? 'bg-white text-[#1D1D1F] shadow-xs font-semibold' : 'text-[#6E6E73] hover:text-[#1D1D1F] font-medium'
-          }`}
-        >
-          <ScanText className="w-3 h-3 text-[#0071E3]" />
-          逐页核对
-        </button>
-        <button
-          onClick={() => void switchMode('overview')}
-          className={`h-7 px-3 text-[12px] rounded-full transition-all cursor-pointer flex items-center gap-1 ${
-            mode === 'overview' ? 'bg-white text-[#1D1D1F] shadow-xs font-semibold' : 'text-[#6E6E73] hover:text-[#1D1D1F] font-medium'
-          }`}
-        >
-          <BookOpen className="w-3 h-3 text-[#0071E3]" />
-          全文总览
-        </button>
+        {STEPS.map(({ key, label, Icon }) => (
+          <button
+            key={key}
+            onClick={() => void switchMode(key)}
+            className={`h-7 px-3 text-[12px] rounded-full transition-all cursor-pointer flex items-center gap-1 ${
+              mode === key ? 'bg-white text-[#1D1D1F] shadow-xs font-semibold' : 'text-[#6E6E73] hover:text-[#1D1D1F] font-medium'
+            }`}
+            title={STEP_HINTS[key]}
+          >
+            <Icon className="w-3 h-3 text-[#0071E3]" />
+            {label}
+          </button>
+        ))}
       </div>
       <span className="hidden md:inline text-[11px] text-[#86868B] tabular-nums ml-1">
         {saveState === 'saving' ? '保存中…' : saveState === 'saved' ? '已保存' : saveState === 'error' ? '保存失败' : ''}
@@ -721,7 +1127,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
 
       <div className="flex-1 flex overflow-hidden relative">
         {/* 左：页面列表 */}
-        <aside className={`apple-glass border-r border-black/[0.06] flex flex-col shrink-0 z-20 transition-all duration-300 overflow-hidden ${showList ? 'w-36' : 'w-0 border-r-0'}`}>
+        <aside className={`bg-[#F6F6F8] border-r border-black/[0.06] flex flex-col shrink-0 z-20 overflow-hidden ${showList ? 'w-36' : 'w-0 border-r-0'}`}>
           <div className="p-3 border-b border-black/[0.06] space-y-2">
             <div>
               <div className="text-xs font-bold text-[#1D1D1F] truncate" title={task.name}>
@@ -770,77 +1176,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-2.5 space-y-1.5">
-            {loadingList ? (
-              <div className="text-xs text-[#86868B] p-3">加载中…</div>
-            ) : (
-              pages.map((p, idx) => {
-                const active = p.id === curId && mode === 'review';
-                return (
-                  <button
-                    key={p.id}
-                    draggable
-                    onDragStart={(event) => {
-                      dragPageRef.current = idx;
-                      event.dataTransfer.effectAllowed = 'move';
-                      event.dataTransfer.setData('text/plain', p.id);
-                    }}
-                    onDragOver={(event) => {
-                      event.preventDefault();
-                      event.dataTransfer.dropEffect = 'move';
-                      if (dragOverPage !== idx) setDragOverPage(idx);
-                    }}
-                    onDragLeave={() => setDragOverPage((v) => (v === idx ? null : v))}
-                    onDragEnd={() => {
-                      dragPageRef.current = null;
-                      setDragOverPage(null);
-                    }}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      const from = dragPageRef.current ?? Number(event.dataTransfer.getData('text/plain'));
-                      dragPageRef.current = null;
-                      setDragOverPage(null);
-                      if (Number.isFinite(from)) void reorderPagesByDrag(from, idx);
-                    }}
-                    onClick={() => {
-                      setMode('review');
-                      void gotoPage(p.id);
-                    }}
-                    className={`relative w-full text-left rounded-md border overflow-hidden transition-all cursor-grab ${
-                      active ? 'border-[#0071E3] shadow-[0_2px_10px_rgba(0,113,227,0.18)]' : 'border-black/[0.08] hover:border-black/[0.18]'
-                    } ${dragOverPage === idx ? 'ring-2 ring-[#0071E3]/60' : ''}`}
-                    title={`${p.fileName}（拖动可调整页顺序）`}
-                  >
-                    <img
-                      src={p.imageUrl}
-                      alt={`第 ${p.pageNumber} 页`}
-                      draggable={false}
-                      className="w-full h-20 object-cover bg-white"
-                    />
-                    <span className="absolute top-1 left-1 min-w-[16px] h-4 px-1 rounded bg-black/55 text-white text-[10px] font-semibold leading-4 text-center tabular-nums">
-                      {p.pageNumber}
-                    </span>
-                    <span
-                      className={`absolute top-1 right-1 w-2 h-2 rounded-full ${
-                        p.status === 'confirmed'
-                          ? 'bg-[#34C759]'
-                          : p.status === 'ready'
-                            ? 'bg-[#0071E3]'
-                            : p.status === 'processing'
-                              ? 'bg-[#FF9500]'
-                              : p.status === 'failed'
-                                ? 'bg-[#FF3B30]'
-                                : 'bg-[#C7C7CC]'
-                      }`}
-                      title={
-                        p.status === 'confirmed' ? '已完成' : p.status === 'ready' ? '待核对' : p.status === 'processing' ? '识别中' : p.status === 'failed' ? '识别失败' : '未识别'
-                      }
-                    />
-                  </button>
-                );
-              })
-            )}
-          </div>
+          <PageThumbList pages={pages} curId={curId} loading={loadingList} onOpen={openThumb} onReorder={reorderPagesByDrag} />
 
           <div className="p-3 border-t border-black/[0.06] space-y-2">
             <div className="flex items-center gap-2">
@@ -879,14 +1215,10 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
         <main className="flex-1 flex flex-col min-w-0 relative">
           {navSlot ? createPortal(navBar, navSlot) : null}
 
-          {mode === 'overview' ? (
-            <OcrOverview
-              taskId={task.id}
-              onJump={(pageId) => {
-                setMode('review');
-                void gotoPage(pageId);
-              }}
-            />
+          {mode === 'toc' ? (
+            <OcrToc taskId={task.id} pages={pages} onJump={jumpToReview} />
+          ) : mode === 'finish' ? (
+            <OcrFinish task={task} pages={pages} onJump={jumpToReview} onFinish={() => setFinishDlg(true)} />
           ) : !cur ? (
             <div className="flex-1 flex items-center justify-center text-xs text-[#86868B]">没有可审阅的页面</div>
           ) : (
@@ -917,6 +1249,10 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                 stepSel={stepSel}
                 busy={busy}
                 onRecognize={() => setRerunDlg(true)}
+                editRows={editRows}
+                readingRows={readingRows}
+                onAddRow={(row) => commitRows([...readingRows, row])}
+                onDeleteRow={(id) => commitRows(readingRows.filter((r) => r.id !== id))}
               />
 
               {/* 右：本页文字与操作 */}
@@ -933,6 +1269,38 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                     <ScanText className="w-3.5 h-3.5 text-[#0071E3]" />
                     重新识别
                   </button>
+                  <button
+                    type="button"
+                    disabled={ordering || !columns || cur.status === 'processing'}
+                    onClick={() => void orderCurrentPage()}
+                    className={`h-7 px-2 rounded-md cursor-pointer flex items-center gap-1 disabled:opacity-40 ${
+                      pageReadings[cur.id]?.length ? 'text-[#0071E3] font-semibold hover:bg-[#0071E3]/10' : 'hover:bg-black/[0.05]'
+                    }`}
+                    title="把这一页的图和 OCR 文字发给大模型，让它按书上的读法重新排一遍；结果只放这一页，不动别人的页"
+                  >
+                    <Sparkles className={`w-3.5 h-3.5 text-[#0071E3] ${ordering ? 'animate-spin' : ''}`} />
+                    {ordering ? '整理中…' : 'AI 整理顺序'}
+                  </button>
+                  {pageReadings[cur.id]?.length ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setShowRawCols((v) => !v)}
+                        className="h-7 px-2 rounded-md hover:bg-black/[0.05] cursor-pointer text-[#6E6E73]"
+                        title="在「整理结果」和「原始识别列」之间来回切"
+                      >
+                        {showRawCols ? '看整理结果' : '看原始列'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => dropReading(cur.id)}
+                        className="h-7 px-2 rounded-md hover:bg-black/[0.05] cursor-pointer text-[#6E6E73]"
+                        title="丢掉这一页的整理结果，按原始识别列显示"
+                      >
+                        清除
+                      </button>
+                    </>
+                  ) : null}
                   <button
                     type="button"
                     disabled={!columns}
@@ -973,6 +1341,17 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                     <AlertTriangle className="w-3.5 h-3.5" />
                     待核对 {columns ? countPending(columns) : 0}
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditRows((v) => !v)}
+                    className={`h-7 px-2 rounded-md cursor-pointer flex items-center gap-1 ${
+                      editRows ? 'bg-[#0071E3] text-white font-semibold' : 'hover:bg-black/[0.05]'
+                    }`}
+                    title="在图上拖出每一行。框里从右往左读，下一页沿用同样的框"
+                  >
+                    <Crosshair className="w-3.5 h-3.5" />
+                    划行
+                  </button>
                   <div className="ml-auto flex items-center gap-0.5">
                     <span className="px-1 text-[11px] text-[#9CA3AF] tabular-nums">
                       {cur.pageNumber}/{pages.length}
@@ -1010,7 +1389,68 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                     <div className="rounded-2xl bg-[#FF9500]/10 border border-[#FF9500]/25 p-3 text-[13px] text-[#C93400] leading-relaxed">{cur.errorMessage}</div>
                   ) : null}
 
-                  {columns ? (
+                  {editRows ? (
+                    <div className="mb-2 rounded-xl bg-[#0071E3]/[0.06] border border-[#0071E3]/15 px-3 py-2 text-[12px] text-[#0A4FA8] leading-relaxed">
+                      <p>在左边图上按住拖出一行。先框的是第 1 行，右侧按这个顺序排。框里从右往左、字从上往下。</p>
+                      <div className="mt-1.5 flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const next = !pageOnly;
+                            setPageOnly(next);
+                            if (curId) writeRows(task.id, curId, readingRows, next);
+                          }}
+                          className={`h-7 px-2 rounded-md cursor-pointer ${pageOnly ? 'bg-[#FF9500] text-white font-semibold' : 'bg-white border border-black/[0.08]'}`}
+                        >
+                          {pageOnly ? '仅本页' : '后面的页也用'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!readingRows.length}
+                          onClick={() => commitRows([])}
+                          className="h-7 px-2 rounded-md bg-white border border-black/[0.08] cursor-pointer disabled:opacity-40"
+                        >
+                          清空框
+                        </button>
+                        <span className="text-[#6E6E73]">已划 {readingRows.length} 行</span>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {pageReadings[cur.id]?.length && !showRawCols ? (
+                    <div className="space-y-2">
+                      <div className="rounded-xl bg-[#0071E3]/[0.06] border border-[#0071E3]/15 px-3 py-2 text-[12px] text-[#0A4FA8] leading-relaxed flex items-start gap-2">
+                        <Sparkles className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                        <span>
+                          这一页是按图重新排的（{pageReadings[cur.id].length} 个人）。顺序和文字都不是逐字坐标，要对照原图核一眼；
+                          想改单字就切「看原始列」。
+                        </span>
+                      </div>
+                      <PersonReading
+                        people={pageReadings[cur.id]}
+                        compact
+                        model={readingModels[cur.id]}
+                        columns={columns}
+                      />
+                      {readingNotes[cur.id] ? (
+                        <div className="rounded-lg bg-[#FF9500]/10 border border-[#FF9500]/25 px-3 py-1.5 text-[11.5px] text-[#8A4B00] leading-relaxed flex items-start gap-1.5">
+                          <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" />
+                          <span>{readingNotes[cur.id]}。切「看原始列」逐字核一遍再确认。</span>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : columns && readingRows.length > 0 && cur ? (
+                    <ReadingRowList
+                      rows={readingRows}
+                      columns={columns}
+                      pageW={cur.width || 1}
+                      pageH={cur.height || 1}
+                      imageUrl={cur.imageUrl}
+                      sel={sel}
+                      setSel={setSel}
+                      setHover={setHover}
+                    />
+                  ) : columns ? (
                     <div className="divide-y divide-black/[0.04]">
                       {columns.map((c, ci) => (
                             <div
@@ -1045,6 +1485,16 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                               <GripVertical className="w-3.5 h-3.5 text-[#C7C7CC] mt-1 shrink-0" />
                               <span className="text-[10px] text-[#86868B] tabular-nums w-5 pt-1 shrink-0 text-right">{ci + 1}</span>
                               <div className="min-w-0 flex-1">
+                                {/* 世次框单独标出来：OCR 常把「二世」认成「一世」，得对着图核一眼 */}
+                                {(() => {
+                                  const colText = c.chars.map((ch) => ch.t).join('').replace(/\s/g, '');
+                                  return /^[一二三四五六七八九十]{1,2}世$/.test(colText) ? (
+                                    <div className="mb-1 inline-flex items-center gap-1 rounded bg-[#FF9500]/15 px-1.5 py-0.5 text-[10px] font-semibold text-[#8A4B00]">
+                                      <AlertTriangle className="w-2.5 h-2.5" />
+                                      这是世次框，图上核对一下 OCR 读的「{colText}」对不对
+                                    </div>
+                                  ) : null;
+                                })()}
                                 {/* 每个字一组：上=图上原字，下=识别文字；同组一起换行，避免上下两行错位 */}
                                 <div className="flex flex-wrap items-start gap-x-[2px] gap-y-1">
                                   {c.chars.map((ch, k) => {
@@ -1290,6 +1740,68 @@ const Stat: React.FC<{ label: string; value: number; unit: string; warn?: boolea
   </div>
 );
 
+const ReadingRowList: React.FC<{
+  rows: ReadingRow[];
+  columns: OcrColumn[];
+  pageW: number;
+  pageH: number;
+  imageUrl: string;
+  sel: Sel;
+  setSel: (s: Sel) => void;
+  setHover: (s: Sel) => void;
+}> = ({ rows, columns, pageW, pageH, imageUrl, sel, setSel, setHover }) => {
+  const rest = charsOutsideRows(columns, rows, pageW, pageH);
+  return (
+    <div className="space-y-3">
+      {rows.map((row, i) => {
+        const groups = readRowColumns(columns, row, pageW, pageH);
+        return (
+          <section key={row.id} className="rounded-xl border border-black/[0.06] overflow-hidden">
+            <div className="px-2.5 py-1 text-[12px] font-semibold text-white" style={{ background: ROW_COLORS[i % ROW_COLORS.length] }}>
+              第 {i + 1} 行 · {groups.reduce((n, g) => n + g.length, 0)} 字
+            </div>
+            <div className="px-2 py-2">
+              {groups.length === 0 ? <p className="text-[12px] text-[#86868B]">这个框里没有字，把框拖到文字上。</p> : null}
+              <div className="flex flex-wrap items-start gap-x-3 gap-y-1">
+              {groups.map((g, gi) => (
+                <div key={gi} className="flex flex-wrap items-start gap-x-[2px]">
+                  {g.map(({ col, idx, ch }) => {
+                    const on = sel && sel.col === col && sel.idx === idx;
+                    const w = charTileMetrics(ch.b, 28).width;
+                    return (
+                      <div key={`${col}-${idx}`} className="flex flex-col items-center" style={{ width: w }}>
+                        <span
+                          onClick={() => setSel({ col, idx })}
+                          onMouseEnter={() => setHover({ col, idx })}
+                          onMouseLeave={() => setHover(null)}
+                          className={`rounded-[1px] bg-[#F7F7F8] border cursor-pointer ${on ? 'border-[#0071E3]' : 'border-[#E5E5EA]'}`}
+                          style={{ ...charCropStyle(imageUrl, pageW, pageH, ch.b, 28), width: w }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setSel({ col, idx })}
+                          onMouseEnter={() => setHover({ col, idx })}
+                          onMouseLeave={() => setHover(null)}
+                          style={{ width: w, fontFamily: FONT }}
+                          className={`h-8 text-[18px] leading-8 rounded cursor-pointer text-center ${on ? 'bg-[#0071E3] text-white' : 'hover:bg-[#EFF6FF]'}`}
+                        >
+                          {ch.t}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+              </div>
+            </div>
+          </section>
+        );
+      })}
+      {rest.length > 0 ? <p className="text-[12px] text-[#86868B] px-1">还有 {rest.length} 个字没划进任何一行。</p> : null}
+    </div>
+  );
+};
+
 // ---------------------------------------------------------------------------
 // 图片 + 逐字悬浮层
 // ---------------------------------------------------------------------------
@@ -1318,6 +1830,10 @@ interface CanvasProps {
   stepSel: (from: { col: number; idx: number }, dir: 1 | -1) => Sel;
   busy: boolean;
   onRecognize: () => void;
+  editRows: boolean;
+  readingRows: ReadingRow[];
+  onAddRow: (row: ReadingRow) => void;
+  onDeleteRow: (id: string) => void;
 }
 
 /** 这一列的字数和图上对不上（模型漏字或几个字并成一个） */
@@ -1378,10 +1894,16 @@ const PageCanvas: React.FC<CanvasProps> = ({
   stepSel,
   busy,
   onRecognize,
+  editRows,
+  readingRows,
+  onAddRow,
+  onDeleteRow,
 }) => {
   const boxRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 800, h: 600 });
   const [natural, setNatural] = useState({ w: page.width || 0, h: page.height || 0 });
+  const drawRef = useRef<{ x: number; y: number } | null>(null);
+  const [draft, setDraft] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   /** 高亮是从哪一侧触发的：从文字侧移上去时，图要自动滚到对应位置；从图上移时，文字侧滚到对应字 */
   const hoverFrom = useRef<'img' | 'text'>('img');
   const compare = layoutMode === 'compare';
@@ -1448,12 +1970,55 @@ const PageCanvas: React.FC<CanvasProps> = ({
     setHover(s);
   };
 
+  const pointOf = (e: React.PointerEvent<HTMLDivElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    return { x: (e.clientX - r.left) / scale, y: (e.clientY - r.top) / scale };
+  };
+  const onDrawStart = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    const p = pointOf(e);
+    drawRef.current = p;
+    setDraft({ x: p.x, y: p.y, w: 0, h: 0 });
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* 个别环境不支持捕获，拖动仍然按移动事件完成 */
+    }
+  };
+  const onDrawMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const start = drawRef.current;
+    if (!start) return;
+    const p = pointOf(e);
+    setDraft({ x: Math.min(start.x, p.x), y: Math.min(start.y, p.y), w: Math.abs(p.x - start.x), h: Math.abs(p.y - start.y) });
+  };
+  const onDrawEnd = (e: React.PointerEvent<HTMLDivElement>) => {
+    const start = drawRef.current;
+    drawRef.current = null;
+    if (!start) return;
+    const p = pointOf(e);
+    setDraft(null);
+    const x1 = Math.min(start.x, p.x);
+    const y1 = Math.min(start.y, p.y);
+    const w = Math.abs(p.x - start.x);
+    const h = Math.abs(p.y - start.y);
+    if (w * scale < 12 || h * scale < 12) return;
+    onAddRow({
+      id: `r${Date.now().toString(36)}`,
+      x: x1 / W,
+      y: y1 / H,
+      w: w / W,
+      h: h / H,
+    });
+  };
+
   const imagePane = (
     <div ref={boxRef} className="flex-1 overflow-auto relative min-w-0">
       <div
         className="relative mx-auto bg-white shadow-[0_8px_40px_rgba(0,0,0,0.12)] rounded-sm"
         style={{ width: dw, height: dh, marginTop: compare ? 56 : Math.max(56, (size.h - dh) / 2), marginBottom: 32 }}
-        onClick={() => setSel(null)}
+        onClick={() => {
+          if (!editRows) setSel(null);
+        }}
       >
         <img
           src={page.imageUrl}
@@ -1572,7 +2137,7 @@ const PageCanvas: React.FC<CanvasProps> = ({
                   }}
                   onMouseEnter={() => onHoverImg({ col: ci, idx: k })}
                   onMouseLeave={() => setHover(null)}
-                  className={`absolute border rounded-[3px] flex items-center justify-center cursor-pointer transition-colors ${tone} ${
+                  className={`absolute border rounded-[3px] flex items-center justify-center transition-colors ${editRows ? 'pointer-events-none' : 'cursor-pointer'} ${tone} ${
                     isSel ? 'ring-2 ring-[#0071E3] z-10 !bg-[#0071E3]/25' : ''
                   } ${isHover ? '!bg-[#FFD60A]/45 !border-[#FF9500] ring-2 ring-[#FF9500] z-20' : ''} ${dim ? 'opacity-25' : ''}`}
                   style={{ left: x1 * scale, top: y1 * scale, width: w, height: h }}
@@ -1587,6 +2152,64 @@ const PageCanvas: React.FC<CanvasProps> = ({
               );
             }),
           )}
+
+        {readingRows.map((row, i) => (
+          <div
+            key={row.id}
+            className={`absolute border-2 rounded-sm ${editRows ? 'pointer-events-none' : 'pointer-events-none'}`}
+            style={{
+              left: row.x * dw,
+              top: row.y * dh,
+              width: row.w * dw,
+              height: row.h * dh,
+              borderColor: ROW_COLORS[i % ROW_COLORS.length],
+              background: `${ROW_COLORS[i % ROW_COLORS.length]}14`,
+            }}
+          >
+            <span
+              className="absolute -top-5 left-0 text-[11px] font-semibold text-white rounded px-1.5 py-0.5"
+              style={{ background: ROW_COLORS[i % ROW_COLORS.length] }}
+            >
+              第 {i + 1} 行
+            </span>
+          </div>
+        ))}
+
+        {editRows ? (
+          <div
+            className="absolute inset-0 z-30 cursor-crosshair touch-none"
+            onPointerDown={onDrawStart}
+            onPointerMove={onDrawMove}
+            onPointerUp={onDrawEnd}
+            onPointerCancel={() => {
+              drawRef.current = null;
+              setDraft(null);
+            }}
+          >
+            {readingRows.map((row, i) => (
+              <button
+                key={row.id}
+                type="button"
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDeleteRow(row.id);
+                }}
+                className="absolute z-40 -top-5 right-0 h-5 px-1.5 text-[11px] font-semibold text-white bg-[#1D1D1F]/80 rounded cursor-pointer"
+                style={{ left: row.x * dw + Math.max(0, row.w * dw - 36), top: row.y * dh - 20, width: 36 }}
+                title="去掉这一行"
+              >
+                去掉
+              </button>
+            ))}
+            {draft && draft.w > 0 && draft.h > 0 ? (
+              <div
+                className="absolute border-2 border-dashed border-[#0071E3] bg-[#0071E3]/10 pointer-events-none"
+                style={{ left: draft.x * scale, top: draft.y * scale, width: draft.w * scale, height: draft.h * scale }}
+              />
+            ) : null}
+          </div>
+        ) : null}
 
         {columns && sel && selChar && (
           <CharEditor
@@ -1697,7 +2320,7 @@ const PageCanvas: React.FC<CanvasProps> = ({
 };
 
 // ---------------------------------------------------------------------------
-// 右侧文字区（左图右文模式）：竖排、右到左，和书上的排法一致
+// 右侧文字区：竖排、从左往右，和第 1 列在最左边
 // ---------------------------------------------------------------------------
 
 const TextReader: React.FC<{
@@ -1712,10 +2335,10 @@ const TextReader: React.FC<{
 }> = ({ columns, hover, sel, onlyPending, onHover, onLeave, onPick, status }) => {
   // 图上悬停某个字时，文字区滚到对应位置
   const wrapRef = useRef<HTMLDivElement>(null);
-  // 从右往左读：换页时先滚到最右边，让第 1 列在视野里
+  // 从左往右读：换页时先滚到最左边，让第 1 列在视野里
   useEffect(() => {
     const w = wrapRef.current;
-    if (w) w.scrollLeft = w.scrollWidth;
+    if (w) w.scrollLeft = 0;
   }, [columns?.length, status]);
   useEffect(() => {
     if (!hover) return;
@@ -1738,7 +2361,7 @@ const TextReader: React.FC<{
             {status === 'processing' ? '识别完成后文字会显示在这里' : '这一页还没有识别结果'}
           </div>
         ) : (
-          <div className="mx-auto w-max flex flex-row-reverse gap-3 items-start" style={{ fontFamily: FONT }}>
+          <div className="mx-auto w-max flex flex-row gap-3 items-start" style={{ fontFamily: FONT }}>
             {columns.map((c, ci) => (
               <div key={ci} className="flex flex-col items-center pt-1">
                 <span
@@ -1967,177 +2590,731 @@ const CharEditor: React.FC<{
 };
 
 // ---------------------------------------------------------------------------
-// 全文总览
+// 各阶段共用
 // ---------------------------------------------------------------------------
 
-type OverviewStyle = 'flow' | 'columns' | 'vertical';
+async function copyText(s: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(s);
+      return true;
+    }
+    // 用 IP 走 http 访问时没有 clipboard API，退回到临时文本框 + execCommand
+    const ta = document.createElement('textarea');
+    ta.value = s;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
 
-const OcrOverview: React.FC<{ taskId: string; onJump: (pageId: string) => void }> = ({ taskId, onJump }) => {
-  const [pages, setPages] = useState<OcrTextPage[] | null>(null);
-  const [totals, setTotals] = useState({ chars: 0, uncertain: 0 });
-  const [style, setStyle] = useState<OverviewStyle>('flow');
+const statusBadge = (s: string) => {
+  const map: Record<string, { t: string; c: string }> = {
+    pending: { t: '未识别', c: 'text-[#86868B] bg-black/[0.05]' },
+    processing: { t: '识别中', c: 'text-[#C93400] bg-[#FF9500]/15' },
+    ready: { t: '待核对', c: 'text-[#0071E3] bg-[#0071E3]/10' },
+    confirmed: { t: '已完成', c: 'text-[#248A3D] bg-[#34C759]/12' },
+    failed: { t: '失败', c: 'text-[#C62828] bg-[#FF3B30]/12' },
+  };
+  const v = map[s] || map.pending;
+  return (
+    <span className={`inline-block px-1.5 py-0.5 rounded-full text-[10px] font-semibold whitespace-nowrap ${v.c}`}>{v.t}</span>
+  );
+};
+
+
+// ---------------------------------------------------------------------------
+// 篇目：全书文字合集 + 按人名的谱系（同一屏，左字右谱）
+// ---------------------------------------------------------------------------
+
+interface GenRef {
+  pageId: string;
+  pageNo: number;
+  box: [number, number, number, number];
+}
+
+interface GenPerson {
+  key: string;
+  name: string;
+  gen: number | null;
+  refs: GenRef[];
+  pageNo: number;
+  pageId: string;
+  box: [number, number, number, number];
+  note: string;
+  fatherName: string | null;
+  birthOrder: number | null;
+  sonNames: string[];
+  fatherKey: string | null;
+  childKeys: string[];
+}
+
+interface GenResult {
+  layoutLabel?: string;
+  persons: GenPerson[];
+  stats: {
+    pages: number;
+    pagesWithNames: number;
+    names: number;
+    linked: number;
+    dupMerged: number;
+    minGen: number | null;
+    maxGen: number | null;
+  };
+  warnings: string[];
+}
+
+const GEN_LABEL = (g: number) => {
+  const d = '〇一二三四五六七八九';
+  if (g <= 10) return g === 10 ? '十' : d[g];
+  if (g < 20) return '十' + d[g - 10];
+  return String(g);
+};
+
+/** 谱系图：按世次分行、按父系顺序排位、父子画肘形线 */
+const GenChart: React.FC<{ persons: GenPerson[]; selected: string | null; onSelect: (k: string | null) => void }> = ({
+  persons,
+  selected,
+  onSelect,
+}) => {
+  const NW = 70;
+  const NH = 34;
+  const GAP = 14;
+  const ROWH = 94;
+  const LEFT = 56;
+
+  const { nodes, lines, w, h, rows } = useMemo(() => {
+    const known = persons.filter((p) => p.gen != null);
+    const unknown = persons.filter((p) => p.gen == null);
+    const minG = known.length ? Math.min(...known.map((p) => p.gen as number)) : 1;
+    const maxG = known.length ? Math.max(...known.map((p) => p.gen as number)) : 1;
+
+    const pos = new Map<string, { x: number; y: number; p: GenPerson }>();
+    const rowsOut: Array<{ gen: number | null; y: number }> = [];
+    let cols = 1;
+    const xFor = (i: number) => LEFT + i * (NW + GAP);
+
+    for (let g = minG; g <= maxG; g++) {
+      const arr = known.filter((p) => p.gen === g).sort((a, b) => {
+        // 先按父亲在上一行的位置排，兄弟姐妹自然挨在一起，线不交叉
+        const pa = pos.get(a.fatherKey || '')?.x ?? a.box[0];
+        const pb = pos.get(b.fatherKey || '')?.x ?? b.box[0];
+        if (pa !== pb) return pa - pb;
+        if (a.birthOrder !== b.birthOrder) return (a.birthOrder ?? 99) - (b.birthOrder ?? 99);
+        return b.box[0] - a.box[0];
+      });
+      const y = 28 + (g - minG) * ROWH;
+      arr.forEach((p, i) => pos.set(p.key, { x: xFor(i), y, p }));
+      cols = Math.max(cols, arr.length);
+      rowsOut.push({ gen: g, y });
+    }
+    if (unknown.length) {
+      const y = 28 + (maxG - minG + 1) * ROWH;
+      unknown.forEach((p, i) => pos.set(p.key, { x: xFor(i), y, p }));
+      cols = Math.max(cols, unknown.length);
+      rowsOut.push({ gen: null, y });
+    }
+
+    const segs: string[] = [];
+    for (const p of persons) {
+      if (!p.fatherKey) continue;
+      const f = pos.get(p.fatherKey);
+      const c = pos.get(p.key);
+      if (!f || !c) continue;
+      const fx = f.x + NW / 2;
+      const cx = c.x + NW / 2;
+      const y1 = f.y + NH;
+      const y2 = c.y;
+      const mid = y1 + Math.min(24, (y2 - y1) / 2);
+      segs.push(`M${fx} ${y1} V${mid} H${cx} V${y2}`);
+    }
+
+    return {
+      nodes: [...pos.values()],
+      lines: segs,
+      w: LEFT + cols * (NW + GAP) + 40,
+      h: 28 + rowsOut.length * ROWH,
+      rows: rowsOut,
+    };
+  }, [persons]);
+
+  if (!persons.length) {
+    return (
+      <div className="flex-1 flex items-center justify-center px-8 text-center text-[13px] text-[#86868B] leading-relaxed">
+        这一卷还没抽出人名。
+        <br />
+        谱系靠「大字人名 + X世世次 + 某公長子」三样东西认，识别结果里缺哪样都会抽不出来。
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 overflow-auto bg-[#FAFAFB]">
+      <svg width={w} height={h} className="block">
+        <defs>
+          <marker id="gen-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M2 1L8 5L2 9" fill="none" stroke="#0071E3" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+          </marker>
+        </defs>
+
+        {/* 世次行标 */}
+        {rows.map((r) => (
+          <g key={String(r.gen)}>
+            <line x1={8} y1={r.y + NH / 2} x2={w - 8} y2={r.y + NH / 2} stroke="#E5E5EA" strokeWidth={1} />
+            <text x={10} y={r.y + NH / 2} fontSize={11} fill="#86868B" dominantBaseline="central">
+              {r.gen != null ? GEN_LABEL(r.gen) + '世' : '未定'}
+            </text>
+          </g>
+        ))}
+
+        {/* 父子线 */}
+        {lines.map((d, i) => (
+          <path key={i} d={d} fill="none" stroke="#0071E3" strokeWidth={1.3} opacity={0.55} strokeLinejoin="round" />
+        ))}
+
+        {/* 人名框 */}
+        {nodes.map(({ x, y, p }) => {
+          const on = p.key === selected;
+          return (
+            <g key={p.key} onClick={() => onSelect(on ? null : p.key)} style={{ cursor: 'pointer' }}>
+              <rect
+                x={x}
+                y={y}
+                width={NW}
+                height={NH}
+                rx={8}
+                fill={on ? '#0071E3' : '#FFFFFF'}
+                stroke={on ? '#0071E3' : p.fatherKey ? '#0071E3' : '#C7C7CC'}
+                strokeWidth={on ? 1.6 : 1}
+              />
+              <text
+                x={x + NW / 2}
+                y={y + NH / 2}
+                textAnchor="middle"
+                dominantBaseline="central"
+                fontSize={14}
+                fill={on ? '#FFFFFF' : '#1D1D1F'}
+                style={{ fontFamily: FONT }}
+              >
+                {p.name}
+              </text>
+              {p.refs.length > 1 ? (
+                <text x={x + NW - 4} y={y + 8} textAnchor="end" fontSize={9} fill={on ? '#FFFFFF' : '#B0B0B6'}>
+                  {p.refs.length}页
+                </text>
+              ) : null}
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+};
+
+const OcrToc: React.FC<{ taskId: string; pages: OcrPage[]; onJump: (pageId: string) => void }> = ({
+  taskId,
+  pages,
+  onJump,
+}) => {
+  const [texts, setTexts] = useState<OcrTextPage[] | null>(null);
+  const [spans, setSpans] = useState<Array<{ gen: number | null; label: string; parts: Array<{ pageId: string; pageNo: number; lines: string[] }> }> | null>(null);
+  const [gen, setGen] = useState<GenResult | null>(null);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [q, setQ] = useState('');
+  const [sel, setSel] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  /** 大模型按图整理的每页结果，和校对页共用同一份 */
+  const [readings, setReadings] = useState<Record<string, PagePerson[]>>(() => loadPageReadings(taskId));
+  const [busyPage, setBusyPage] = useState<string | null>(null);
+
+  const orderOne = useCallback(
+    async (pageId: string) => {
+      setBusyPage(pageId);
+      try {
+        const r = await api.orderOcrPage(taskId, pageId);
+        if (!r?.people?.length) {
+          void appAlert(r?.note || '这一页没有人物条目');
+          return;
+        }
+        setReadings((prev) => {
+          const next = { ...prev, [pageId]: r.people };
+          savePageReadings(taskId, next);
+          return next;
+        });
+      } catch (e: any) {
+        void appAlert(e?.message || '整理失败');
+      } finally {
+        setBusyPage(null);
+      }
+    },
+    [taskId],
+  );
 
   const load = useCallback(() => {
     setError('');
-    api
-      .getOcrText(taskId)
-      .then((r) => {
-        setPages((r.pages || []).map(mapOcrTextPage));
-        setTotals({ chars: Number(r.totalChars) || 0, uncertain: Number(r.totalUncertain) || 0 });
+    setLoading(true);
+    Promise.all([api.getOcrText(taskId), api.getOcrGenealogy(taskId)])
+      .then(([t, g]) => {
+        setTexts((t?.pages || []).map(mapOcrTextPage));
+        setSpans(Array.isArray(t?.generations) ? t.generations : null);
+        setGen({
+          layoutLabel: g?.layoutLabel || '',
+          persons: g?.persons || [],
+          stats: g?.stats || { pages: 0, pagesWithNames: 0, names: 0, linked: 0, dupMerged: 0, minGen: null, maxGen: null },
+          warnings: g?.warnings || [],
+        });
       })
-      .catch((e) => setError(e?.message || '加载失败'));
+      .catch((e) => setError(e?.message || '加载失败'))
+      .finally(() => setLoading(false));
   }, [taskId]);
 
   useEffect(() => load(), [load]);
 
-  const fullText = useMemo(() => {
-    if (!pages) return '';
-    return pages
-      .map((p) => {
-        const head = `【第 ${p.pageNo} 页】`;
-        if (!p.columns.length) return head + '\n（本页没有识别结果）';
-        return head + '\n' + (style === 'flow' ? p.columns.join('') : p.columns.join('\n'));
-      })
-      .join('\n\n');
-  }, [pages, style]);
+  const totalChars = (texts || []).reduce((a, p) => a + p.charCount, 0);
+  const selected = (gen?.persons || []).find((p) => p.key === sel) || null;
 
-  const copy = async () => {
-    try {
-      if (navigator.clipboard && window.isSecureContext) {
-        await navigator.clipboard.writeText(fullText);
-      } else {
-        // 用 IP 走 http 访问时没有 clipboard API，退回到临时文本框 + execCommand
-        const ta = document.createElement('textarea');
-        ta.value = fullText;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        const ok = document.execCommand('copy');
-        document.body.removeChild(ta);
-        if (!ok) throw new Error('copy failed');
+  const kw = q.trim();
+  const shownPages = useMemo(() => {
+    if (!texts) return [];
+    if (!kw) return texts;
+    return texts.filter((p) => p.columns.join('').includes(kw) || String(p.pageNo) === kw);
+  }, [texts, kw]);
+
+  const shownSpans = useMemo(() => {
+    const list = spans || [];
+    if (!kw) return list;
+    return list
+      .map((span) => ({
+        ...span,
+        parts: span.parts
+          .map((part) => ({ ...part, lines: part.lines.filter((line) => line.includes(kw)) }))
+          .filter((part) => part.lines.length),
+      }))
+      .filter((span) => span.parts.length);
+  }, [spans, kw]);
+
+  /**
+   * 一页可能同时属于几个「世」（跨代的页），整理出来的人也分属不同世。
+   * 按世次把人物分回各自的段落，同一页就不会在几个段落里各贴一遍；
+   * 世次为空或者对不上任何段落的，挂在这一页第一次出现的地方，保证不漏。
+   */
+  const tocBlocks = useMemo(() => {
+    const labelsOfPage = new Map<string, Set<string>>();
+    for (const span of shownSpans) {
+      for (const part of span.parts) {
+        const set = labelsOfPage.get(part.pageId) || new Set<string>();
+        set.add(span.label);
+        labelsOfPage.set(part.pageId, set);
       }
+    }
+    const placed = new Set<string>();
+    return shownSpans.map((span) => {
+      const parts = span.parts.map((part) => {
+        const all = readings[part.pageId] || [];
+        const own = all.filter((p) => p.gen && p.gen === span.label);
+        const labels = labelsOfPage.get(part.pageId) || new Set<string>();
+        const loose = placed.has(part.pageId) ? [] : all.filter((p) => !p.gen || !labels.has(p.gen));
+        if (all.length) placed.add(part.pageId);
+        return { part, hasReading: all.length > 0, people: [...own, ...loose] };
+      });
+      // 这一页的文字归别的世管，这里就不重复贴
+      return { key: `${span.gen ?? 'x'}-${span.label}`, label: span.label, parts: parts.filter((p) => !p.hasReading || p.people.length) };
+    });
+  }, [shownSpans, readings]);
+
+  const fullText = useMemo(() => {
+    if (spans && spans.length) {
+      return spans
+        .map((span) => `【${span.label}】\n` + span.parts.map((part) => part.lines.join('')).join(''))
+        .join('\n\n');
+    }
+    if (!texts) return '';
+    return texts
+      .map((p) => `【第 ${p.pageNo} 页】\n` + (p.columns.length ? p.columns.join('') : '（本页没有识别结果）'))
+      .join('\n\n');
+  }, [spans, texts]);
+
+  const doCopy = async () => {
+    if (await copyText(fullText)) {
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 1800);
-    } catch {
-      void appAlert('复制失败，请手动选中文字复制');
+      window.setTimeout(() => setCopied(false), 1600);
+    } else {
+      void appAlert('复制失败，请手动选中复制');
     }
   };
 
-  /** □ 高亮 */
-  const renderText = (s: string) =>
-    Array.from(s).map((c, i) =>
-      c === '□' ? (
-        <span key={i} className="bg-[#FF3B30]/18 text-[#C62828] rounded-[3px] px-[1px]">
-          □
-        </span>
-      ) : (
-        <React.Fragment key={i}>{c}</React.Fragment>
-      ),
-    );
+  /** 命中处高亮 */
+  const mark = (s: string) => {
+    if (!kw) return s;
+    const parts = s.split(kw);
+    return parts.map((seg, i) => (
+      <React.Fragment key={i}>
+        {seg}
+        {i < parts.length - 1 ? <mark className="bg-[#FFEB99] text-[#1D1D1F] rounded-sm px-0">{kw}</mark> : null}
+      </React.Fragment>
+    ));
+  };
+
+  const st = gen?.stats;
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      <div className="px-6 py-3 border-b border-black/[0.06] bg-white/50 flex flex-wrap items-center gap-3 shrink-0">
-        <div className="text-[13px] text-[#6E6E73]">
-          共 <b className="text-[#1D1D1F] tabular-nums">{pages?.length ?? 0}</b> 页 · <b className="text-[#1D1D1F] tabular-nums">{totals.chars}</b> 字
-          {totals.uncertain ? (
-            <span className="ml-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#FF9500]/12 text-[#C93400]">
-              <AlertTriangle className="w-3 h-3" />
-              {totals.uncertain} 处待核对
+      {/* 顶部条 */}
+      <div className="px-5 py-2 border-b border-black/[0.06] bg-white/60 flex flex-wrap items-center gap-x-4 gap-y-1 shrink-0">
+        <div className="text-[13px] text-[#1D1D1F]">
+          全书 <b className="tabular-nums">{pages.length}</b> 页 ·{' '}
+          <b className="tabular-nums">{totalChars}</b> 字
+        </div>
+        <div className="text-[13px] text-[#1D1D1F]">
+          {gen?.layoutLabel ? <span className="text-[#86868B]">按{gen.layoutLabel}抽取 · </span> : null}
+          谱系 <b className="tabular-nums">{st?.names ?? 0}</b> 人 ·{' '}
+          <b className="tabular-nums">{st?.linked ?? 0}</b> 条父子线
+          {st?.minGen != null && st?.maxGen != null ? (
+            <span className="text-[#86868B]">
+              {' '}
+              · 第 {st.minGen}—{st.maxGen} 世
             </span>
           ) : null}
         </div>
         <div className="ml-auto flex items-center gap-2">
-          <div className="flex items-center p-0.5 bg-[#E5E5EA]/70 rounded-full">
-            {(
-              [
-                { k: 'flow', t: '连续通读' },
-                { k: 'columns', t: '按列分行' },
-                { k: 'vertical', t: '竖排' },
-              ] as const
-            ).map((o) => (
-              <button
-                key={o.k}
-                onClick={() => setStyle(o.k)}
-                className={`px-3 py-1 text-xs rounded-full transition-all cursor-pointer ${
-                  style === o.k ? 'bg-white text-[#1D1D1F] shadow-xs font-semibold' : 'text-[#6E6E73] hover:text-[#1D1D1F] font-medium'
-                }`}
-              >
-                {o.t}
-              </button>
-            ))}
-          </div>
-          <button onClick={load} className="h-8 px-3 text-xs font-semibold rounded-lg bg-white border border-black/[0.08] hover:bg-[#F5F5F7] cursor-pointer">
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="搜文字 / 页号"
+            className="h-8 w-44 px-3 rounded-lg bg-white border border-black/[0.08] text-[12px] focus:outline-none focus:border-[#0071E3]"
+          />
+          <button
+            onClick={load}
+            className="h-8 px-3 text-xs font-semibold rounded-lg bg-white border border-black/[0.08] hover:bg-[#F5F5F7] cursor-pointer"
+          >
             刷新
           </button>
-          <button onClick={() => void copy()} className="h-8 px-3 text-xs font-semibold rounded-lg bg-white border border-black/[0.08] hover:bg-[#F5F5F7] cursor-pointer flex items-center gap-1.5">
+          <button
+            onClick={() => void doCopy()}
+            className="h-8 px-3 text-xs font-semibold rounded-lg bg-white border border-black/[0.08] hover:bg-[#F5F5F7] cursor-pointer flex items-center gap-1.5"
+          >
             {copied ? <Check className="w-3.5 h-3.5 text-[#34C759]" /> : <Copy className="w-3.5 h-3.5" />}
-            {copied ? '已复制' : '复制全文'}
+            {copied ? '已复制' : '复制全书'}
           </button>
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto select-text">
-        <div className="max-w-[900px] mx-auto px-6 py-6 space-y-4">
-          {error ? <div className="text-sm text-[#C62828]">{error}</div> : null}
-          {!pages && !error ? <div className="text-sm text-[#86868B]">加载中…</div> : null}
-          {pages?.map((p) => (
-            <section key={p.pageId} className="bg-white rounded-2xl border border-black/[0.06] shadow-[0_1px_2px_rgba(0,0,0,0.03)] overflow-hidden">
-              <header className="flex items-center justify-between px-5 py-2.5 border-b border-black/[0.05] bg-[#FAFAFB]">
-                <div className="flex items-center gap-2 min-w-0">
-                  <span className="text-[13px] font-semibold tabular-nums">第 {p.pageNo} 页</span>
-                  <span className="text-[11px] text-[#86868B] truncate">{p.fileName}</span>
-                  {p.status === 'confirmed' ? (
-                    <span className="text-[10px] font-semibold text-[#248A3D] bg-[#34C759]/12 px-1.5 py-0.5 rounded-full">已完成</span>
-                  ) : p.columns.length ? (
-                    <span className="text-[10px] font-semibold text-[#0071E3] bg-[#0071E3]/10 px-1.5 py-0.5 rounded-full">待核对</span>
-                  ) : (
-                    <span className="text-[10px] font-semibold text-[#86868B] bg-black/[0.05] px-1.5 py-0.5 rounded-full">未识别</span>
-                  )}
-                  {p.uncertainCount > 0 ? <span className="text-[11px] text-[#C93400] font-semibold">{p.uncertainCount} 处待核对</span> : null}
-                </div>
-                <button onClick={() => onJump(p.pageId)} className="text-xs font-semibold text-[#0071E3] hover:text-[#0077ED] cursor-pointer">
-                  对照原图修改
-                </button>
-              </header>
-              <div className="px-5 py-4">
-                {!p.columns.length ? (
-                  <p className="text-sm text-[#86868B]">（本页没有识别结果）</p>
-                ) : style === 'flow' ? (
-                  <p className="text-[17px] leading-[2] text-[#1D1D1F] break-all" style={{ fontFamily: FONT }}>
-                    {renderText(p.columns.join(''))}
-                  </p>
-                ) : style === 'columns' ? (
-                  <div className="space-y-0.5" style={{ fontFamily: FONT }}>
-                    {p.columns.map((c, i) => (
-                      <p key={i} className="text-[16px] leading-8 text-[#1D1D1F] flex gap-3">
-                        <span className="text-[10px] text-[#B0B0B6] tabular-nums w-5 text-right pt-1.5 shrink-0 select-none" style={{ fontFamily: 'inherit' }}>
-                          {i + 1}
-                        </span>
-                        <span className="break-all">{renderText(c)}</span>
-                      </p>
+      {error ? <div className="px-5 py-2 text-[12px] text-[#C62828] bg-[#FFF5F5]">{error}</div> : null}
+
+      <div className="flex-1 flex min-h-0">
+        {/* 左：全书文字合集 */}
+        <section className="w-[46%] min-w-[360px] flex flex-col border-r border-black/[0.06] bg-white">
+          <header className="h-8 px-4 border-b border-black/[0.05] flex items-center shrink-0">
+            <span className="text-[12px] font-semibold text-[#1D1D1F]">全书文字</span>
+            <span className="ml-2 text-[11px] text-[#86868B] tabular-nums">
+              {kw ? `${shownPages.length} / ${pages.length} 页命中` : `${pages.length} 页`}
+            </span>
+            <span className="ml-auto text-[11px] text-[#B0B0B6]">{spans?.length ? '按世代接到下一页' : '按页连续通读'}</span>
+          </header>
+          <div className="flex-1 overflow-y-auto px-4 py-3 select-text">
+            {loading && !texts ? (
+              <div className="text-[13px] text-[#86868B]">加载中…</div>
+            ) : null}
+            {shownSpans.length
+              ? tocBlocks.map((span) => (
+                  <article key={span.key} className="mb-4">
+                    <div className="text-[12px] font-semibold text-[#1D1D1F] mb-1">{span.label}</div>
+                    {span.parts.map((row) => (
+                      <div key={`${span.label}-${row.part.pageId}`} className="mb-2">
+                        <div className="flex items-center gap-2 mb-0.5">
+                          <button
+                            onClick={() => onJump(row.part.pageId)}
+                            className="text-[11px] font-semibold text-[#0071E3] hover:text-[#0077ED] cursor-pointer"
+                          >
+                            第 {row.part.pageNo} 页
+                          </button>
+                          <button
+                            onClick={() => void orderOne(row.part.pageId)}
+                            disabled={busyPage === row.part.pageId}
+                            className="text-[11px] font-semibold text-[#6E6E73] hover:text-[#0071E3] cursor-pointer flex items-center gap-0.5 disabled:opacity-40"
+                            title="把这一页的图和文字发给大模型，按书上的读法重新排一遍"
+                          >
+                            <Sparkles className={`w-3 h-3 ${busyPage === row.part.pageId ? 'animate-spin' : ''}`} />
+                            {row.hasReading ? '重排' : 'AI 整理'}
+                          </button>
+                        </div>
+                        {row.hasReading ? (
+                          <PersonReading people={row.people} />
+                        ) : (
+                          <p className="text-[15px] leading-[1.95] text-[#1D1D1F] break-all" style={{ fontFamily: FONT }}>
+                            {mark(row.part.lines.join(''))}
+                          </p>
+                        )}
+                      </div>
                     ))}
-                  </div>
+                  </article>
+                ))
+              : null}
+            {!shownSpans.length ? shownPages.map((p) => (
+              <article key={p.pageId} className="mb-4">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-[11px] font-semibold tabular-nums text-[#86868B]">第 {p.pageNo} 页</span>
+                  {statusBadge(p.status)}
+                  <button
+                    onClick={() => void orderOne(p.pageId)}
+                    disabled={busyPage === p.pageId}
+                    className="ml-auto text-[11px] font-semibold text-[#6E6E73] hover:text-[#0071E3] cursor-pointer flex items-center gap-0.5 disabled:opacity-40"
+                    title="把这一页的图和文字发给大模型，按书上的读法重新排一遍"
+                  >
+                    <Sparkles className={`w-3 h-3 ${busyPage === p.pageId ? 'animate-spin' : ''}`} />
+                    {readings[p.pageId]?.length ? '重排' : 'AI 整理'}
+                  </button>
+                  <button
+                    onClick={() => onJump(p.pageId)}
+                    className="text-[11px] font-semibold text-[#0071E3] hover:text-[#0077ED] cursor-pointer"
+                  >
+                    去校对
+                  </button>
+                </div>
+                {readings[p.pageId]?.length ? (
+                  <PersonReading people={readings[p.pageId]} />
+                ) : p.columns.length ? (
+                  <p className="text-[15px] leading-[1.95] text-[#1D1D1F] break-all" style={{ fontFamily: FONT }}>
+                    {mark(p.columns.join(''))}
+                  </p>
                 ) : (
-                  <div className="overflow-x-auto">
-                    <div
-                      className="text-[17px] leading-[1.9] text-[#1D1D1F] mx-auto"
-                      style={{ writingMode: 'vertical-rl', fontFamily: FONT, minHeight: 120, width: 'max-content', maxWidth: '100%' }}
-                    >
-                      {p.columns.map((c, i) => (
-                        <p key={i} className="m-0 ml-3 tracking-[0.15em]">
-                          {renderText(c)}
-                        </p>
-                      ))}
-                    </div>
-                  </div>
+                  <p className="text-[13px] text-[#C7C7CC]">（这一页还没有识别结果）</p>
                 )}
+              </article>
+            )) : null}
+            {!loading && texts && !shownSpans.length && !shownPages.length ? (
+              <div className="py-10 text-center text-[13px] text-[#86868B]">没有匹配的文字</div>
+            ) : null}
+          </div>
+        </section>
+
+        {/* 右：谱系 */}
+        <section className="flex-1 min-w-0 flex flex-col bg-[#FAFAFB]">
+          <header className="h-8 px-4 border-b border-black/[0.05] flex items-center shrink-0 bg-white/60">
+            <span className="text-[12px] font-semibold text-[#1D1D1F]">谱系</span>
+            <span className="ml-2 text-[11px] text-[#86868B]">大字人名 + 世次 + 「某公長子」自动抽的</span>
+            {gen?.warnings.length ? (
+              <span className="ml-2 text-[11px] text-[#C93400] flex items-center gap-1">
+                <AlertTriangle className="w-3 h-3" />
+                {gen.warnings[0]}
+              </span>
+            ) : null}
+          </header>
+
+          <GenChart persons={gen?.persons || []} selected={sel} onSelect={setSel} />
+
+          {selected ? (
+            <div className="border-t border-black/[0.08] bg-white px-4 py-3 shrink-0 max-h-[38%] overflow-y-auto">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[16px] font-semibold text-[#1D1D1F]" style={{ fontFamily: FONT }}>
+                  {selected.name}
+                </span>
+                {selected.gen != null ? (
+                  <span className="text-[11px] font-semibold px-1.5 py-0.5 rounded-full bg-[#0071E3]/10 text-[#0071E3]">
+                    第 {selected.gen} 世
+                  </span>
+                ) : null}
+                {selected.fatherName ? (
+                  <span className="text-[11px] text-[#6E6E73]">
+                    父 {selected.fatherName}
+                    {selected.birthOrder ? ` · 第 ${selected.birthOrder} 子` : ''}
+                  </span>
+                ) : null}
+                <div className="ml-auto flex items-center gap-1.5">
+                  {selected.refs.map((r) => (
+                    <button
+                      key={r.pageId}
+                      onClick={() => onJump(r.pageId)}
+                      className="h-7 px-2 text-[11px] font-semibold rounded-lg bg-[#0071E3]/8 text-[#0071E3] hover:bg-[#0071E3]/14 cursor-pointer"
+                    >
+                      第 {r.pageNo} 页原图
+                    </button>
+                  ))}
+                  <button
+                    onClick={() => setSel(null)}
+                    className="h-7 px-2 text-[11px] font-semibold rounded-lg text-[#6E6E73] hover:bg-black/[0.05] cursor-pointer"
+                  >
+                    关闭
+                  </button>
+                </div>
+              </div>
+              {selected.note ? (
+                <p className="mt-2 text-[13px] leading-6 text-[#3A3A3C] select-text" style={{ fontFamily: FONT }}>
+                  {selected.note}
+                </p>
+              ) : (
+                <p className="mt-2 text-[12px] text-[#C7C7CC]">（注文没抽到，可能被切到了别的列）</p>
+              )}
+              {selected.childKeys.length ? (
+                <div className="mt-2 flex items-center gap-1.5 flex-wrap text-[11px] text-[#6E6E73]">
+                  <span>子：</span>
+                  {selected.childKeys.map((k) => {
+                    const c = (gen?.persons || []).find((x) => x.key === k);
+                    return c ? (
+                      <button
+                        key={k}
+                        onClick={() => setSel(k)}
+                        className="px-1.5 py-0.5 rounded-md bg-black/[0.04] hover:bg-black/[0.08] cursor-pointer"
+                        style={{ fontFamily: FONT }}
+                      >
+                        {c.name}
+                      </button>
+                    ) : null;
+                  })}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
+      </div>
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// 完成：交付前总检 + 结束整本任务
+// ---------------------------------------------------------------------------
+
+const OcrFinish: React.FC<{
+  task: OcrTask;
+  pages: OcrPage[];
+  onJump: (pageId: string) => void;
+  onFinish: () => void;
+}> = ({ task, pages, onJump, onFinish }) => {
+  const confirmed = pages.filter((p) => p.status === 'confirmed').length;
+  const failed = pages.filter((p) => p.status === 'failed').length;
+  const untouched = pages.filter((p) => p.status === 'pending').length;
+  const pendingChars = pages.reduce((a, p) => a + (p.uncertainCount || 0), 0);
+  const totalChars = pages.reduce((a, p) => a + (p.charCount || 0), 0);
+  const todo = pages.filter((p) => p.status !== 'confirmed');
+  const allConfirmed = pages.length > 0 && todo.length === 0;
+
+  const checks = [
+    { ok: failed === 0, label: '没有识别失败的页', detail: failed ? `${failed} 页失败，要重新识别` : '全部成功' },
+    { ok: untouched === 0, label: '全部页面都已识别', detail: untouched ? `${untouched} 页还没有识别结果` : '已全部识别' },
+    { ok: allConfirmed, label: '全部页面都已确认', detail: `${confirmed} / ${pages.length} 页` },
+    { ok: pendingChars === 0, label: '没有待核对字', detail: pendingChars ? `还有 ${pendingChars} 处待核对或占位符` : '都核对过了' },
+  ];
+
+  const stat = (label: string, value: string, unit: string, tone: 'ok' | 'warn' | 'plain') => (
+    <div className="bg-white rounded-2xl border border-black/[0.06] px-4 py-3">
+      <div className="text-[11px] text-[#86868B]">{label}</div>
+      <div
+        className={`mt-1 text-[22px] font-semibold tabular-nums leading-none ${
+          tone === 'warn' ? 'text-[#C93400]' : tone === 'ok' ? 'text-[#248A3D]' : 'text-[#1D1D1F]'
+        }`}
+      >
+        {value}
+        <span className="ml-1 text-[11px] font-normal text-[#86868B]">{unit}</span>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0">
+      <div className="flex-1 overflow-y-auto">
+        <div className="max-w-[920px] mx-auto px-6 py-5 space-y-4">
+          <div>
+            <h2 className="text-[17px] font-semibold text-[#1D1D1F]">{task.name}</h2>
+            <p className="text-[12px] text-[#86868B] mt-0.5">
+              {task.projectName ? `${task.projectName} · ` : ''}
+              {task.status === 'completed' ? '这一卷已经完成' : '检查完下面几项就可以结束这一卷'}
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            {stat('总页数', String(pages.length), '页', 'plain')}
+            {stat('已确认', String(confirmed), '页', allConfirmed ? 'ok' : 'plain')}
+            {stat('待核对字', String(pendingChars), '处', pendingChars ? 'warn' : 'ok')}
+            {stat('总字数', String(totalChars), '字', 'plain')}
+          </div>
+
+          <section className="bg-white rounded-2xl border border-black/[0.06] overflow-hidden">
+            <header className="px-4 py-2.5 border-b border-black/[0.05] bg-[#FAFAFB]">
+              <span className="text-[13px] font-semibold text-[#1D1D1F]">交付检查</span>
+            </header>
+            <div className="divide-y divide-black/[0.04]">
+              {checks.map((c) => (
+                <div key={c.label} className="px-4 py-2.5 flex items-center gap-2.5">
+                  <span
+                    className={`w-4 h-4 rounded-full flex items-center justify-center shrink-0 ${
+                      c.ok ? 'bg-[#34C759]/15 text-[#248A3D]' : 'bg-[#FF9500]/15 text-[#C93400]'
+                    }`}
+                  >
+                    {c.ok ? <Check className="w-3 h-3" /> : <AlertTriangle className="w-3 h-3" />}
+                  </span>
+                  <span className="text-[13px] text-[#1D1D1F]">{c.label}</span>
+                  <span className={`ml-auto text-[12px] ${c.ok ? 'text-[#86868B]' : 'text-[#C93400] font-semibold'}`}>
+                    {c.detail}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {todo.length ? (
+            <section className="bg-white rounded-2xl border border-black/[0.06] overflow-hidden">
+              <header className="px-4 py-2.5 border-b border-black/[0.05] bg-[#FAFAFB] flex items-center">
+                <span className="text-[13px] font-semibold text-[#1D1D1F]">还没确认的页</span>
+                <span className="ml-2 text-[11px] text-[#86868B] tabular-nums">{todo.length}</span>
+                <span className="ml-auto text-[11px] text-[#86868B]">点一行去校对</span>
+              </header>
+              <div className="divide-y divide-black/[0.04] max-h-[260px] overflow-y-auto">
+                {todo.slice(0, 40).map((p) => (
+                  <button
+                    key={p.id}
+                    onClick={() => onJump(p.id)}
+                    className="w-full px-4 py-2 flex items-center gap-2 hover:bg-[#F5F5F7] cursor-pointer text-left"
+                  >
+                    <span className="text-[12px] font-semibold tabular-nums w-10 shrink-0">{p.pageNumber}</span>
+                    <span className="text-[12px] text-[#86868B] truncate flex-1">{p.fileName}</span>
+                    {p.uncertainCount ? (
+                      <span className="text-[11px] text-[#C93400] font-semibold tabular-nums shrink-0">
+                        {p.uncertainCount} 待核对
+                      </span>
+                    ) : null}
+                    <span className="shrink-0">{statusBadge(p.status)}</span>
+                  </button>
+                ))}
               </div>
             </section>
-          ))}
+          ) : null}
+        </div>
+      </div>
+
+      <div className="px-6 py-3 border-t border-black/[0.06] bg-white/60 flex flex-wrap items-center gap-2 shrink-0">
+        <button
+          onClick={() => window.open(ocrExportUrl(task.id, 'columns'), '_blank')}
+          className="h-9 px-4 text-[13px] font-semibold rounded-xl bg-white border border-black/[0.1] hover:bg-[#F5F5F7] cursor-pointer flex items-center gap-1.5"
+        >
+          <Download className="w-3.5 h-3.5" />
+          导出文字
+        </button>
+        <button
+          onClick={() => window.open(ocrExportUrl(task.id, 'flow'), '_blank')}
+          className="h-9 px-4 text-[13px] font-semibold rounded-xl text-[#6E6E73] hover:bg-black/[0.04] cursor-pointer"
+        >
+          导出（连读）
+        </button>
+        <div className="ml-auto flex items-center gap-2">
+          {!allConfirmed ? (
+            <span className="text-[12px] text-[#86868B]">还有 {todo.length} 页没确认</span>
+          ) : null}
+          <button
+            disabled={!allConfirmed || task.status === 'completed'}
+            onClick={onFinish}
+            className="h-9 px-5 text-[13px] font-semibold rounded-xl bg-[#34C759] hover:bg-[#2EB84E] text-white shadow-[0_2px_8px_rgba(52,199,89,0.25)] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none flex items-center gap-1.5"
+          >
+            <CheckCircle2 className="w-4 h-4" />
+            {task.status === 'completed' ? '这一卷已完成' : '完成整本任务'}
+          </button>
         </div>
       </div>
     </div>

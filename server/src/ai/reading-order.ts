@@ -1,11 +1,11 @@
 /**
  * 竖排古籍的阅读顺序。
  *
- * 整页都是竖排时，顺序就是「从右到左」；但很多页面是分段的（世系图、表格、上下几段各自竖排），
- * 这时全页一刀切「从右到左」会把上下两段的列穿插在一起。这里用递归 XY-cut：
+ * 这两种族谱都从左往右读。页面常分段（世系、表格、上下几段各自竖排），
+ * 全页只按横坐标排序会把上下两段穿插在一起。这里用递归 XY-cut：
  *   1) 有一条横向空白带贯穿整个区域 → 上、下分段，先上后下；
- *   2) 否则有一条纵向空白带 → 左、右分块，先右后左；
- *   3) 都切不开 → 这一块内部就是普通竖排：从右到左，同一横向位置的从上到下。
+ *   2) 否则有一条纵向空白带 → 左、右分块，先左后右；
+ *   3) 都切不开 → 这一块内部从左到右，同一横向位置的从上到下。
  */
 export interface Box {
   x1: number;
@@ -47,21 +47,21 @@ export function readingOrder<T extends Box>(items: T[], pageW: number, pageH: nu
       const bottom = items.filter((x) => (x.y1 + x.y2) / 2 >= mid);
       if (top.length && bottom.length) return [...readingOrder(top, pageW, pageH, depth + 1), ...readingOrder(bottom, pageW, pageH, depth + 1)];
     }
-    // 2) 纵向分块：空白带至少 3 个字宽（比列间距宽得多），先右后左
+    // 2) 纵向分块：空白带至少 3 个字宽（比列间距宽得多），先左后右
     const vg = gaps(items, 'x1', 'x2', Math.max(medW * 3, pageW * 0.04));
     if (vg.length) {
       const [a, b] = vg.reduce((m, g) => (g[1] - g[0] > m[1] - m[0] ? g : m));
       const mid = (a + b) / 2;
-      const right = items.filter((x) => (x.x1 + x.x2) / 2 >= mid);
       const left = items.filter((x) => (x.x1 + x.x2) / 2 < mid);
-      if (right.length && left.length) return [...readingOrder(right, pageW, pageH, depth + 1), ...readingOrder(left, pageW, pageH, depth + 1)];
+      const right = items.filter((x) => (x.x1 + x.x2) / 2 >= mid);
+      if (left.length && right.length) return [...readingOrder(left, pageW, pageH, depth + 1), ...readingOrder(right, pageW, pageH, depth + 1)];
     }
   }
-  // 3) 一块之内：从右到左；同一横向位置的从上到下
+  // 3) 一块之内：从左到右；同一横向位置的从上到下
   return [...items].sort((a, b) => {
     const ca = (a.x1 + a.x2) / 2;
     const cb = (b.x1 + b.x2) / 2;
     const tol = Math.min(a.x2 - a.x1, b.x2 - b.x1) * 0.5;
-    return Math.abs(ca - cb) <= tol ? a.y1 - b.y1 : cb - ca;
+    return Math.abs(ca - cb) <= tol ? a.y1 - b.y1 : ca - cb;
   });
 }

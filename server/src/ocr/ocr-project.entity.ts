@@ -22,6 +22,10 @@ export class OcrProject {
   @Column({ name: 'root_path', length: 1024, nullable: true })
   rootPath: string | null;
 
+  /** 整本项目只用一种版式：table 横表 / lineage 世系 */
+  @Column({ name: 'layout_style', length: 32, default: 'bio' })
+  layoutStyle: string;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

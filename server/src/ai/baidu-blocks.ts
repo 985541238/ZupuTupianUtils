@@ -208,13 +208,8 @@ export async function baiduBlocksOcr(imagePath: string, apiKey: string, secretKe
     }
 
     for (const g of groups) {
-      // 古籍竖排：同代内右→左；横排标题按左→右
-      const ordered = [...g.lines].sort((a, b) => {
-        const ah = a.box[2] - a.box[0] > (a.box[3] - a.box[1]) * 1.8;
-        const bh = b.box[2] - b.box[0] > (b.box[3] - b.box[1]) * 1.8;
-        if (ah && bh) return a.box[0] - b.box[0];
-        return b.box[2] - a.box[2];
-      });
+      // 同代内、横排标题都从左往右
+      const ordered = [...g.lines].sort((a, b) => a.box[0] - b.box[0]);
       for (const l of ordered) {
         const key = `${l.text}|${Math.round(l.box[0])}|${Math.round(l.box[1])}`;
         if (seen.has(key)) continue;
@@ -233,7 +228,7 @@ export async function baiduBlocksOcr(imagePath: string, apiKey: string, secretKe
 }
 
 /**
- * 最后统一按「行（世代）」排序：纵向范围重叠的列算同一行，行从上到下、行内从右到左。
+ * 最后统一按「行（世代）」排序：纵向范围重叠的列算同一行，行从上到下、行内从左到右。
  * 这样即使表格行带切得比较粗（一个行带跨两代），也能按列框的真实位置排对。
  */
 function orderByRows(cols: BaiduColumn[]): BaiduColumn[] {
@@ -255,12 +250,7 @@ function orderByRows(cols: BaiduColumn[]): BaiduColumn[] {
   rows.sort((a, b) => a.top - b.top);
   const out: BaiduColumn[] = [];
   for (const row of rows) {
-    const ordered = row.cols.sort((a, b) => {
-      const ah = a.box[2] - a.box[0] > (a.box[3] - a.box[1]) * 1.8;
-      const bh = b.box[2] - b.box[0] > (b.box[3] - b.box[1]) * 1.8;
-      if (ah && bh) return a.box[0] - b.box[0];
-      return b.box[2] - a.box[2];
-    });
+    const ordered = row.cols.sort((a, b) => a.box[0] - b.box[0]);
     out.push(...ordered);
   }
   return out;

@@ -122,6 +122,12 @@ export class OcrController {
     return this.ocr.reopenPage(req.user.id, id, pageId);
   }
 
+  /** 把这一页的图和识别文字交给能看图的模型，按书的读法只整理这一页 */
+  @Post(':id/pages/:pageId/reading')
+  reading(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Param('pageId', ParseIntPipe) pageId: number) {
+    return this.ocr.orderPageReading(req.user.id, id, pageId);
+  }
+
   /** 单页重新识别（会再次产生费用，覆盖人工修改） */
   @Post(':id/pages/:pageId/recognize')
   recognize(
@@ -142,6 +148,12 @@ export class OcrController {
   @Get(':id/text')
   text(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
     return this.ocr.text(req.user.id, id);
+  }
+
+  /** 从识别结果里抽族谱世系（人名 / 世次 / 父子线） */
+  @Get(':id/genealogy')
+  genealogy(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
+    return this.ocr.genealogy(req.user.id, id);
   }
 
   @Get(':id/export')

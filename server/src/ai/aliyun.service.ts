@@ -231,6 +231,35 @@ export class AliyunService {
     return { result, usage: u, raw: content };
   }
 
+  /** 把一页图片和说明交给能看图的对话模型，要回它写的文字（不按识别列解析）。 */
+  async visionText(model: AiModel, imagePath: string, prompt: string): Promise<{ content: string; usage: Usage; finish: string | null }> {
+    if (this.mock) return { content: '{"people":[]}', usage: { tokensIn: 0, tokensOut: 0, images: 1 }, finish: 'stop' };
+    if (isBaiduOcrModel(model)) throw new AiConfigError('百度文字识别不能整理阅读顺序', 'model', 'baidu');
+    const cfg = await this.assertReady(model);
+    const dataUri = await this.toDataUri(imagePath, 1600);
+    const body: any = {
+      model: model.model,
+      // 整理阅读顺序要求复现原文，不能发挥：温度压到 0，同一个模型多半会给同一份结果
+      temperature: 0,
+      // 一页十来个人的注文加起来不短，默认上限容易把 JSON 截断（截断后整页就废了）
+      max_tokens: 8192,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: { url: dataUri } },
+            { type: 'text', text: prompt },
+          ],
+        },
+      ],
+      stream: true,
+      stream_options: { include_usage: true },
+    };
+    if (!cfg.platform || cfg.platform === 'aliyun') body.enable_thinking = false;
+    const { content, usage, finish } = await this.streamChat(cfg, body, { idleMs: 120_000 });
+    return { content, usage: { ...usage, images: 1 }, finish };
+  }
+
   /** 百度文字识别（高精度含位置版）：按行返回，带每个字的位置，不需要提示词 */
   private async baiduOcr(imagePath: string, model: AiModel, opts: { blocks?: boolean } = {}): Promise<{ result: OcrResult; usage: Usage; raw: string }> {
     await this.assertReady(model);
@@ -326,7 +355,7 @@ export class AliyunService {
     cfg: AliyunConfig & { platform?: string | null },
     body: any,
     opts: { idleMs?: number } = {},
-  ): Promise<{ content: string; usage: Usage }> {
+  ): Promise<{ content: string; usage: Usage; finish: string | null }> {
     const url = cfg.baseUrl + '/chat/completions';
     const res = await this.fetchWithTimeout(
       url,
@@ -339,6 +368,7 @@ export class AliyunService {
     );
     if (!res.ok) throw await this.httpError(res, cfg.platform || null);
     let content = '';
+    let finish: string | null = null;
     const usage: Usage = { tokensIn: 0, tokensOut: 0, images: 0 };
     const reader = (res.body as any).getReader();
     const decoder = new TextDecoder();
@@ -392,13 +422,15 @@ export class AliyunService {
         if (chunk.error) throw new Error(chunk.error.message || JSON.stringify(chunk.error));
         const delta = chunk.choices?.[0]?.delta;
         if (delta?.content) content += delta.content;
+        const fr = chunk.choices?.[0]?.finish_reason;
+        if (fr) finish = String(fr);
         if (chunk.usage) {
           usage.tokensIn = chunk.usage.prompt_tokens || 0;
           usage.tokensOut = chunk.usage.completion_tokens || 0;
         }
       }
     }
-    return { content, usage };
+    return { content, usage, finish };
   }
 
   // ---------------- 图片处理（图生图） ----------------

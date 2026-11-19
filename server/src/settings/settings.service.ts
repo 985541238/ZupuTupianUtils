@@ -521,6 +521,12 @@ export class SettingsService implements OnModuleInit {
     );
   }
 
+  /** 能看图对话的识别模型。百度文字识别只出字，不能整理阅读顺序。 */
+  async visionOcrModel(): Promise<AiModel | null> {
+    const rows = await this.models.find({ where: { purpose: 'ocr', enabled: 1 }, order: { isDefault: 'DESC', id: 'ASC' } });
+    return rows.find((m) => m.platform !== 'baidu' && !/baidu/i.test(m.model || '')) || null;
+  }
+
   async saveModel(id: number | null, body: Partial<AiModel>) {
     const existing = id ? await this.models.findOne({ where: { id } }) : null;
     if (id && !existing) throw new NotFoundException('模型不存在');

@@ -214,7 +214,7 @@ export async function baiduAccurateOcr(
     }
     merged.push(cur);
   }
-  // 阅读顺序：整页竖排 = 从右到左；分段竖排（世系图/表格）= 先分段（上→下、右→左）再段内从右到左
+  // 阅读顺序：分段先上后下，同一段里从左往右
   const ordered = readingOrder(merged, W, H);
 
   const nx = (v: number) => Math.max(0, Math.min(1000, (v / W) * 1000));

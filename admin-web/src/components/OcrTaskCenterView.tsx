@@ -350,6 +350,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({ onOpenReview, onOpenSetup, 
         name,
         surname: projectSurname.trim() || undefined,
         rootPath,
+        layoutStyle: 'table',
       });
       const list = await loadProjects(true);
       const createdId = raw?.id != null ? String(raw.id) : list.find((project) => project.name === name)?.id || null;
@@ -599,6 +600,11 @@ export const OcrTaskCenterView: React.FC<Props> = ({ onOpenReview, onOpenSetup, 
               <div className="text-lg font-bold text-[#1D1D1F] tracking-tight truncate" title={project.name}>
                 {project.name}
               </div>
+              {project.layoutLabel ? (
+                <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#1D1D1F]/8 text-[#1D1D1F]">
+                  {project.layoutLabel}
+                </span>
+              ) : null}
               {project.surname ? (
                 <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#0071E3]/10 text-[#0071E3]">
                   {project.surname}
@@ -971,6 +977,11 @@ export const OcrTaskCenterView: React.FC<Props> = ({ onOpenReview, onOpenSetup, 
             <div className="min-w-0">
               <div className="flex items-center gap-2.5 flex-wrap">
                 <h1 className="text-2xl font-bold text-[#1D1D1F] tracking-tight truncate">{title}</h1>
+                {currentProject?.layoutLabel ? (
+                  <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#1D1D1F]/8 text-[#1D1D1F]">
+                    {currentProject.layoutLabel}
+                  </span>
+                ) : null}
                 {currentProject?.surname ? (
                   <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#0071E3]/10 text-[#0071E3]">
                     {currentProject.surname}
@@ -1096,7 +1107,7 @@ export const OcrTaskCenterView: React.FC<Props> = ({ onOpenReview, onOpenSetup, 
           }}
         >
           <div
-            className="bg-white rounded-3xl border border-black/[0.08] shadow-[0_24px_64px_rgba(0,0,0,0.18)] max-w-[440px] w-full p-6 animate-apple-in"
+            className="bg-white rounded-3xl border border-black/[0.08] shadow-[0_24px_64px_rgba(0,0,0,0.18)] max-w-[560px] w-full p-6 animate-apple-in"
             onClick={(event) => event.stopPropagation()}
           >
             <h3 className="text-base font-bold text-[#1D1D1F]">新建项目</h3>
@@ -1132,6 +1143,9 @@ export const OcrTaskCenterView: React.FC<Props> = ({ onOpenReview, onOpenSetup, 
                 />
               </div>
             </div>
+            <p className="mt-3 text-[12px] leading-5 text-[#6E6E73]">
+              按崔氏支谱卷四的横表抽取：每一世一块，下一世顶部是上一世的人名和儿子，每个儿子下面那一列是本人介绍，一共十六世。
+            </p>
             <div className="mt-4">
               <label className="block text-[13px] font-semibold text-[#1D1D1F] mb-1.5">族谱根目录（可选）</label>
               <div className="flex gap-2">

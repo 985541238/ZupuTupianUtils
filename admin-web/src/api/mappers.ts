@@ -230,6 +230,8 @@ export function mapOcrProject(raw: any): OcrProject {
     surname: raw.surname || undefined,
     description: raw.description || null,
     rootPath: raw.rootPath || null,
+    layoutStyle: raw.layoutStyle || undefined,
+    layoutLabel: raw.layoutLabel || undefined,
     volumeCount: Number(raw.volumeCount) || 0,
     totalCount: Number(raw.totalCount) || 0,
     doneCount: Number(raw.doneCount) || 0,

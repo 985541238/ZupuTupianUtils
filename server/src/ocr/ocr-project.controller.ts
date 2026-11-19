@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, Get, Param, ParseIntPipe, Post, Put, Req, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { OcrService } from './ocr.service';
+import { LAYOUT_STYLES } from './layout-styles';
 
 /** OCR 项目：独立功能，与图片处理无关。 */
 @Controller('ocr-projects')
@@ -11,6 +12,12 @@ export class OcrProjectController {
   @Get()
   list(@Req() req: any) {
     return this.ocr.listProjects(req.user.id);
+  }
+
+  /** 建项目时可选的版式。必须写在 :id 前面，避免被当成项目 id。 */
+  @Get('layout-styles')
+  layoutStyles() {
+    return LAYOUT_STYLES;
   }
 
   @Post()

@@ -10,6 +10,7 @@ export const OCR_SCHEMA_SQL: string[] = [
   \`surname\` VARCHAR(32) NOT NULL DEFAULT '',
   \`description\` TEXT NULL,
   \`root_path\` VARCHAR(1024) NULL COMMENT '项目根目录，一级子目录自动建卷',
+  \`layout_style\` VARCHAR(32) NOT NULL DEFAULT 'lineage' COMMENT 'table横表|lineage世系',
   \`created_at\` DATETIME NOT NULL,
   \`updated_at\` DATETIME NOT NULL,
   PRIMARY KEY (\`id\`),
@@ -79,6 +80,7 @@ export const OCR_SCHEMA_SQL: string[] = [
 
 /** 老库升级：补列/放宽约束（已存在会报错，忽略即可） */
 export const OCR_ALTER_SQL: string[] = [
+  "ALTER TABLE `ocr_projects` ADD COLUMN `layout_style` VARCHAR(32) NOT NULL DEFAULT 'lineage' COMMENT 'table横表|lineage世系'",
   "ALTER TABLE `ocr_tasks` ADD COLUMN `source_folder` VARCHAR(1024) NULL COMMENT '卷图片目录'",
   "ALTER TABLE `ocr_tasks` ADD COLUMN `output_folder` VARCHAR(1024) NULL COMMENT 'OCR 输出目录'",
   "ALTER TABLE `ocr_tasks` ADD COLUMN `client_type` VARCHAR(16) NOT NULL DEFAULT 'web'",

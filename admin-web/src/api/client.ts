@@ -338,7 +338,7 @@ export const api = {
   // ---- OCR 识别（独立功能：OCR 项目 → OCR 卷 → 页）----
   /** OCR 项目列表（含卷数/页数/进度聚合） */
   getOcrProjects: () => request<any[]>('/ocr-projects'),
-  createOcrProject: (data: { name: string; surname?: string; description?: string; rootPath?: string; autoStart?: boolean }) =>
+  createOcrProject: (data: { name: string; surname?: string; description?: string; rootPath?: string; autoStart?: boolean; layoutStyle: string }) =>
     request<any>('/ocr-projects', { method: 'POST', body: JSON.stringify(data) }),
   renameOcrProject: (id: string | number, data: { name?: string; surname?: string; description?: string }) =>
     request<any>('/ocr-projects/' + id, { method: 'PUT', body: JSON.stringify(data) }),
@@ -375,6 +375,14 @@ export const api = {
     request<{ ok: boolean; order: number[] }>(`/ocr-tasks/${id}/pages/order`, { method: 'PUT', body: JSON.stringify({ pageIds }) }),
   getOcrPages: (id: string | number) => request<any[]>('/ocr-tasks/' + id + '/pages'),
   getOcrPage: (id: string | number, pageId: string | number) => request<any>(`/ocr-tasks/${id}/pages/${pageId}`),
+  orderOcrPage: (id: string | number, pageId: string | number) =>
+    request<{
+      pageId: string;
+      model: string;
+      note?: string;
+      suspect?: boolean;
+      people: Array<{ gen: string; order: string; name: string; text: string }>;
+    }>(`/ocr-tasks/${id}/pages/${pageId}/reading`, { method: 'POST', body: '{}' }),
   saveOcrPage: (id: string | number, pageId: string | number, columns: any[]) =>
     request<any>(`/ocr-tasks/${id}/pages/${pageId}`, { method: 'PUT', body: JSON.stringify({ columns }) }),
   confirmOcrPage: (id: string | number, pageId: string | number, columns?: any[]) =>
@@ -394,6 +402,8 @@ export const api = {
     request<any>(`/ocr-tasks/${id}/pages/${pageId}/restore`, { method: 'POST', body: '{}' }),
   confirmOcrTask: (id: string | number) => request<any>('/ocr-tasks/' + id + '/confirm', { method: 'POST', body: '{}' }),
   getOcrText: (id: string | number) => request<any>('/ocr-tasks/' + id + '/text'),
+  /** 从识别结果里抽族谱世系（人名 / 世次 / 父子线），不重新识别 */
+  getOcrGenealogy: (id: string | number) => request<any>('/ocr-tasks/' + id + '/genealogy'),
 
   getSettings: () => request<any>('/settings'),
   saveAliyun: (body: any) => request<any>('/settings/aliyun', { method: 'PUT', body: JSON.stringify(body) }),
