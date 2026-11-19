@@ -1754,7 +1754,7 @@ export const ReviewWorkbench: React.FC<ReviewWorkbenchProps> = ({
 
   return (
     <div
-      className="flex-1 flex flex-col h-[calc(100vh-3.5rem)] overflow-hidden bg-[#F5F5F7] select-none text-[#1D1D1F]"
+      className="flex-1 flex flex-col h-full overflow-hidden bg-[#F5F5F7] select-none text-[#1D1D1F]"
       onMouseDown={(e) => {
         // 审阅页所有按钮永远不接收焦点，避免空格/回车误触发按钮
         if ((e.target as HTMLElement)?.closest?.('button')) e.preventDefault();

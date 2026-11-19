@@ -45,6 +45,35 @@ export interface PageLayout {
 const MAX_SIDE = 1400;
 
 /**
+ * 按「古籍竖排、从右往左」的阅读顺序重排列：整体按列的右边界从右到左；
+ * 同一竖带里上下叠着的列（如"一世/二世/三世"这种标签列）按上边界从上到下。
+ * 只依赖列框，不依赖模型返回顺序，避免族谱/表格版面把语序排乱。
+ */
+export function sortReadingOrder<T extends { box: [number, number, number, number] }>(cols: T[]): T[] {
+  const overlapX = (a: T, b: T) => {
+    const wa = a.box[2] - a.box[0];
+    const wb = b.box[2] - b.box[0];
+    const w = Math.min(wa, wb);
+    if (w <= 0) return 0;
+    const o = Math.min(a.box[2], b.box[2]) - Math.max(a.box[0], b.box[0]);
+    return o / w;
+  };
+  const byX = [...cols].sort((a, b) => b.box[2] - a.box[2]);
+  const bands: T[][] = [];
+  for (const c of byX) {
+    const band = bands.find((members) => members.some((m) => overlapX(c, m) > 0.5));
+    if (band) band.push(c);
+    else bands.push([c]);
+  }
+  const out: T[] = [];
+  for (const band of bands) {
+    band.sort((a, b) => a.box[1] - b.box[1]);
+    out.push(...band);
+  }
+  return out;
+}
+
+/**
  * 把「每列的文字」摆到图片上：以处理后的白底黑字图为准，找到每列真实的墨迹范围，
  * 再按字数把这一列切成一格一格，使每个字对应图上的位置。模型给的框只作为提示。
  */

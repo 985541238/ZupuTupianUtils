@@ -200,6 +200,16 @@ export class SettingsController {
     return this.settings.saveBaiduOcrConfig(body || {});
   }
 
+  @Get('layout-model')
+  layoutModelConfig() {
+    return this.settings.getLayoutModelConfig();
+  }
+
+  @Put('layout-model')
+  saveLayoutModel(@Body() body: { platform?: string; model?: string; displayName?: string }) {
+    return this.settings.saveLayoutModelConfig(body || {});
+  }
+
   @Post('baidu-ocr/test')
   async testBaiduOcr(@Body() body: { apiKey?: string; secretKey?: string }) {
     if (process.env.AI_MOCK === '1') return { ok: false, mock: true, error: '当前为 AI_MOCK，未真实连通' };

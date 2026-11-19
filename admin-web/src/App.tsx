@@ -58,18 +58,14 @@ export default function App() {
   const [tasksLoading, setTasksLoading] = useState(false);
 
   const [processingTaskId, setProcessingTaskId] = useState<string | null>(null);
-  // OCR 识别任务
-  const [ocrTasks, setOcrTasks] = useState<OcrTask[]>([]);
-  const [ocrLoading, setOcrLoading] = useState(false);
-  const [activeOcrId, setActiveOcrId] = useState<string | null>(null);
-  /** 从项目里某一卷进入审阅时，只审阅这一卷的页 */
-  const [activeOcrVolumeId, setActiveOcrVolumeId] = useState<number | null>(null);
-  const ocrStatusRef = useRef<Map<string, string>>(new Map());
-  const [ocrDoneNotice, setOcrDoneNotice] = useState<{ taskId: string; name: string; pages: number; cost?: number } | null>(null);
+  // OCR 卷（独立功能，与图片处理互不影响）
+  const [ocrActiveTask, setOcrActiveTask] = useState<OcrTask | null>(null);
+  /** 从 OCR 审阅返回时直接打开的 OCR 项目 */
+  const [ocrReturnProjectId, setOcrReturnProjectId] = useState<string | null>(null);
   // 大模型出错时的说明弹窗 / 引导配置弹窗
   const [aiProblem, setAiProblem] = useState<AiProblem | null>(null);
   const [setup, setSetup] = useState<{ platform: string | null; step?: 1 | 2 | 3; onDone?: () => void } | null>(null);
-  const [settingsTab, setSettingsTab] = useState<'ocr' | 'clean' | 'platform' | undefined>(undefined);
+  const [settingsTab, setSettingsTab] = useState<'ocr' | 'layout' | 'clean' | 'platform' | undefined>(undefined);
   /** OCR 只用百度文字识别：需要配置时直接跳到设置里的「OCR 文字识别」页 */
   const openOcrSetup = useCallback(() => {
     setAiProblem(null);
@@ -127,17 +123,8 @@ export default function App() {
     }
   }, [mergeTasksPreserveItems]);
 
-  const loadOcrTasks = useCallback(async () => {
-    setOcrLoading(true);
-    try {
-      const list = await api.getOcrTasks();
-      setOcrTasks((list || []).map(mapOcrTask));
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setOcrLoading(false);
-    }
-  }, []);
+  /** 取单个 OCR 卷详情（进入审阅用） */
+  const loadOcrTask = useCallback(async (taskId: string) => mapOcrTask(await api.getOcrTask(taskId)), []);
 
   const loadTaskDetail = useCallback(async (taskId: string) => {
     const [task, images] = await Promise.all([
@@ -189,6 +176,57 @@ export default function App() {
     [loadTaskDetail, goToTasks]
   );
 
+  // ===== OCR（独立功能）=====
+  const goToOcr = useCallback(() => {
+    setOcrReturnProjectId(null);
+    setCurrentTab('ocr');
+    pushOcrUrl();
+  }, []);
+
+  /** 打开某一 OCR 卷的审阅：先取卷详情，再切视图。 */
+  const openOcrReview = useCallback(
+    async (taskId: string, syncUrl = true) => {
+      try {
+        const task = await loadOcrTask(taskId);
+        setOcrActiveTask(task);
+        setCurrentTab('ocrReview');
+        if (syncUrl) pushOcrUrl(taskId);
+      } catch (e: any) {
+        void appAlert(e?.message || '加载 OCR 卷失败');
+        setOcrActiveTask(null);
+        setCurrentTab('ocr');
+        pushOcrUrl();
+      }
+    },
+    [loadOcrTask]
+  );
+
+  /** 审阅页里改了页状态后刷新卷计数 */
+  const refreshOcrActive = useCallback(async () => {
+    if (!ocrActiveTask) return;
+    try {
+      setOcrActiveTask(await loadOcrTask(ocrActiveTask.id));
+    } catch {
+      /* 刷新失败不影响审阅 */
+    }
+  }, [ocrActiveTask, loadOcrTask]);
+
+  const handleFinishOcr = async (taskId: string) => {
+    try {
+      await api.confirmOcrTask(taskId);
+      setOcrActiveTask(null);
+      goToOcr();
+    } catch (e: any) {
+      void appAlert(e?.message || '完成本卷失败');
+    }
+  };
+
+  const backToOcrProject = useCallback(() => {
+    setOcrReturnProjectId(ocrActiveTask?.projectId != null ? String(ocrActiveTask.projectId) : null);
+    setCurrentTab('ocr');
+    pushOcrUrl();
+  }, [ocrActiveTask]);
+
   /** 上一次轮询看到的任务状态，用来发现「处理完成 / 被暂停」 */
   const statusRef = useRef<Map<string, string>>(new Map());
   /** 处理完成的提示（右下角） */
@@ -200,32 +238,8 @@ export default function App() {
   useEffect(() => {
     if (!currentUser) return;
     loadTasks();
-    void loadOcrTasks();
     // 轮询降负载：页面在后台标签时不请求；没有进行中的任务时放慢到每 4 次才请求 1 次
-    let ocrTick = 0;
     let taskTick = 0;
-    const ocrTimer = window.setInterval(() => {
-      if (document.hidden) return;
-      ocrTick++;
-      const ocrBusy = Array.from(ocrStatusRef.current.values()).some((s) => s === 'processing');
-      if (!ocrBusy && ocrTick % 4 !== 0) return;
-      api.getOcrTasks()
-        .then((list) => {
-          const mapped = (list || []).map(mapOcrTask);
-          setOcrTasks(mapped);
-          for (const t of mapped) {
-            const prev = ocrStatusRef.current.get(t.id);
-            if (prev === 'processing' && t.status !== 'processing') {
-              if (t.status === 'failed' && t.errorMessage) showOcrProblemRef.current?.(t);
-              else if (t.status === 'reviewing') {
-                setOcrDoneNotice({ taskId: t.id, name: t.name, pages: t.totalCount, cost: t.actualCost });
-              }
-            }
-            ocrStatusRef.current.set(t.id, t.status);
-          }
-        })
-        .catch(() => {});
-    }, 3000);
     const timer = window.setInterval(() => {
       if (document.hidden) return;
       taskTick++;
@@ -264,9 +278,8 @@ export default function App() {
     }, 2500);
     return () => {
       window.clearInterval(timer);
-      window.clearInterval(ocrTimer);
     };
-  }, [currentUser, loadTasks, loadOcrTasks, mergeTasksPreserveItems]);
+  }, [currentUser, loadTasks, mergeTasksPreserveItems]);
 
   // Deep link: /tasks/:id/review after login
   useEffect(() => {
@@ -275,11 +288,9 @@ export default function App() {
     const ocrId = parseOcrReviewPath(window.location.pathname);
     deepLinkHandled.current = true;
     if (id) void openReview(id, false);
-    else if (ocrId) {
-      setActiveOcrId(ocrId);
-      setCurrentTab('ocrReview');
-    } else if (window.location.pathname === '/ocr') setCurrentTab('ocr');
-  }, [currentUser, openReview]);
+    else if (ocrId) void openOcrReview(ocrId, false);
+    else if (window.location.pathname === '/ocr') setCurrentTab('ocr');
+  }, [currentUser, openReview, openOcrReview]);
 
   // Browser back/forward
   useEffect(() => {
@@ -289,8 +300,7 @@ export default function App() {
       if (id) {
         void openReview(id, false);
       } else if (ocrId) {
-        setActiveOcrId(ocrId);
-        setCurrentTab('ocrReview');
+        void openOcrReview(ocrId, false);
       } else if (window.location.pathname === '/ocr') {
         setCurrentTab('ocr');
       } else {
@@ -299,7 +309,7 @@ export default function App() {
     };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
-  }, [openReview]);
+  }, [openReview, openOcrReview]);
 
   const handleLogin = (user: User) => {
     setCurrentUser(user);
@@ -320,8 +330,8 @@ export default function App() {
     stopPoll();
     setCurrentUser(null);
     setTasks([]);
-    setOcrTasks([]);
-    setActiveOcrId(null);
+    setOcrActiveTask(null);
+    setOcrReturnProjectId(null);
     setActiveTaskId(null);
     setCurrentTab('tasks');
     deepLinkHandled.current = false;
@@ -477,87 +487,11 @@ export default function App() {
     await openReview(taskId, true);
   };
 
-  /** 审阅页「返回」时回到刚才那个 OCR 项目的详情，而不是项目列表 */
-  const [ocrReturnId, setOcrReturnId] = useState<string | null>(null);
-  const goToOcr = useCallback(() => {
-    setOcrReturnId(null);
-    setCurrentTab('ocr');
-    pushOcrUrl();
-    void loadOcrTasks();
-  }, [loadOcrTasks]);
-
-  const openOcrReview = useCallback((id: string, volumeId?: number | null) => {
-    setActiveOcrId(id);
-    setActiveOcrVolumeId(volumeId ?? null);
-    setCurrentTab('ocrReview');
-    pushOcrUrl(id);
-  }, []);
-
-  const showOcrProblem = useCallback((t: OcrTask) => {
-    if (!t.errorMessage) return;
-    setAiProblem({
-      kind: 'ocr',
-      taskId: t.id,
-      taskName: t.name,
-      message: t.errorMessage,
-      errorCode: t.errorCode || inferErrorCode(t.errorMessage),
-      readyPages: t.doneCount || 0,
-    });
-  }, []);
-  const showOcrProblemRef = useRef<((t: OcrTask) => void) | null>(null);
-  showOcrProblemRef.current = showOcrProblem;
-
-  const handleStartOcr = async (taskId: string, modelId?: number | null, volumeId?: number | null) => {
-    try {
-      await api.startOcrTask(taskId, modelId, volumeId);
-      ocrStatusRef.current.set(taskId, 'processing');
-      await loadOcrTasks();
-    } catch (e: any) {
-      if (e?.errorCode) {
-        const t = ocrTasks.find((x) => x.id === taskId);
-        setAiProblem({ kind: 'ocr', taskId, taskName: t?.name, message: e.message, errorCode: e.errorCode });
-      } else {
-      void appAlert(e?.message || '开始识别失败');
-      }
-      await loadOcrTasks();
-    }
-  };
-
-  const handleCreateOcr = async (data: { name: string; projectId: string; ocrModelId: number | null }) => {
-    const created = await api.createOcrTask(data);
-    await loadOcrTasks();
-    return mapOcrTask(created);
-  };
-
-  const handleDeleteOcr = async (taskId: string) => {
-    await api.deleteOcrTask(taskId);
-    setOcrTasks((prev) => prev.filter((t) => t.id !== taskId));
-  };
-
-  const handleFinishOcr = async (taskId: string) => {
-    try {
-      await api.confirmOcrTask(taskId);
-      await loadOcrTasks();
-      goToOcr();
-    } catch (e: any) {
-      void appAlert(e?.message || '完成任务失败');
-    }
-  };
-
-  const activeOcr = ocrTasks.find((t) => t.id === activeOcrId) || null;
-
   const activeTask =
     tasks.find((t) => t.id === activeTaskId) ||
     (activeTaskId
       ? undefined
       : tasks.find((t) => t.status === 'reviewing') || tasks[0]);
-
-  const backToOcrProject = useCallback(() => {
-    setOcrReturnId(activeOcrId);
-    setCurrentTab('ocr');
-    pushOcrUrl();
-    void loadOcrTasks();
-  }, [activeOcrId, loadOcrTasks]);
 
   if (!currentUser) {
     return <LoginView onLogin={handleLogin} />;
@@ -576,11 +510,11 @@ export default function App() {
         user={currentUser}
         onLogout={handleLogout}
         onOpenAccount={() => setAccountOpen(true)}
-        activeTaskName={currentTab === 'ocrReview' ? activeOcr?.name : activeTask?.name}
+        activeTaskName={currentTab === 'ocrReview' ? ocrActiveTask?.name : activeTask?.name}
         activeTaskProgress={
           currentTab === 'ocrReview'
-            ? activeOcr
-              ? { reviewed: activeOcr.confirmedCount, total: activeOcr.totalCount }
+            ? ocrActiveTask
+              ? { reviewed: ocrActiveTask.confirmedCount, total: ocrActiveTask.totalCount }
               : undefined
             : activeTask
               ? { reviewed: activeTask.reviewedPages, total: activeTask.totalPages }
@@ -615,27 +549,18 @@ export default function App() {
 
         {currentTab === 'ocr' && (
           <OcrTaskCenterView
-            tasks={ocrTasks}
-            loading={ocrLoading}
-            onRefresh={loadOcrTasks}
-            onStart={handleStartOcr}
-            onOpenReview={openOcrReview}
-            onCreate={handleCreateOcr}
-            onDelete={handleDeleteOcr}
-            onShowProblem={showOcrProblem}
+            onOpenReview={(taskId) => void openOcrReview(taskId)}
             onOpenSetup={openOcrSetup}
-            onGoImageTasks={goToTasks}
-            initialOpenId={ocrReturnId}
+            initialProjectId={ocrReturnProjectId}
           />
         )}
 
-        {currentTab === 'ocrReview' && activeOcr && (
+        {currentTab === 'ocrReview' && ocrActiveTask && (
           <OcrReviewWorkbench
-            key={`${activeOcr.id}:${activeOcrVolumeId ?? 'all'}`}
-            task={activeOcr}
-            volumeId={activeOcrVolumeId}
+            key={ocrActiveTask.id}
+            task={ocrActiveTask}
             onFinishTask={handleFinishOcr}
-            onTaskChanged={() => void loadOcrTasks()}
+            onTaskChanged={() => void refreshOcrActive()}
             onOpenSetup={openOcrSetup}
           />
         )}
@@ -650,40 +575,6 @@ export default function App() {
           />
         )}
       </main>
-
-      {ocrDoneNotice ? (
-        <div className="fixed right-6 bottom-24 z-[80] w-[360px] bg-white rounded-2xl border border-black/[0.08] shadow-[0_16px_48px_rgba(0,0,0,0.16)] p-4 animate-apple-in">
-          <div className="flex items-start gap-3">
-            <div className="w-9 h-9 rounded-xl bg-[#34C759]/12 text-[#248A3D] flex items-center justify-center shrink-0 text-base">✓</div>
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-semibold text-[#1D1D1F] truncate">《{ocrDoneNotice.name}》识别完成</div>
-              <div className="text-xs text-[#6E6E73] mt-0.5">
-                共 {ocrDoneNotice.pages} 页{ocrDoneNotice.cost ? ` · 花费约 ¥${ocrDoneNotice.cost.toFixed(2)}` : ''}，可以开始核对文字了
-              </div>
-              <div className="flex gap-2 mt-3">
-                <button
-                  type="button"
-                  onClick={() => {
-                    const id = ocrDoneNotice.taskId;
-                    setOcrDoneNotice(null);
-                    openOcrReview(id);
-                  }}
-                  className="px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-[#0071E3] text-white cursor-pointer"
-                >
-                  进入审阅
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setOcrDoneNotice(null)}
-                  className="px-3 py-1.5 text-xs font-semibold rounded-lg text-[#6E6E73] hover:bg-[#F5F5F7] cursor-pointer"
-                >
-                  稍后
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : null}
 
       {doneNotice ? (
         <div className="fixed right-6 bottom-6 z-[80] w-[360px] bg-white rounded-2xl border border-black/[0.08] shadow-[0_16px_48px_rgba(0,0,0,0.16)] p-4 animate-apple-in">
@@ -722,18 +613,14 @@ export default function App() {
       <AiProblemDialog
         problem={aiProblem}
         onClose={() => setAiProblem(null)}
-        onOpenSetup={(platform, step) => (aiProblem?.kind === 'ocr' ? openOcrSetup() : openSetup(platform, step))}
+        onOpenSetup={(platform, step) => openSetup(platform, step)}
         onRetry={(taskId) => {
-          const kind = aiProblem?.kind;
           setAiProblem(null);
-          if (kind === 'ocr') void handleStartOcr(taskId);
-          else void handleStartProcessing(taskId);
+          void handleStartProcessing(taskId);
         }}
         onReviewAnyway={(taskId) => {
-          const kind = aiProblem?.kind;
           setAiProblem(null);
-          if (kind === 'ocr') openOcrReview(taskId);
-          else void openReview(taskId, true);
+          void openReview(taskId, true);
         }}
       />
       <AiSetupWizard

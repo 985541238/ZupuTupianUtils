@@ -9,11 +9,11 @@ export class OcrPage {
   @Column({ name: 'ocr_task_id', type: 'bigint', unsigned: true })
   ocrTaskId: number;
 
-  /** 对应图片处理任务里的 task_images.id */
-  @Column({ name: 'image_id', type: 'bigint', unsigned: true })
-  imageId: number;
+  /** 历史遗留：旧版对应图片处理 task_images.id，新数据不写。 */
+  @Column({ name: 'image_id', type: 'bigint', unsigned: true, nullable: true })
+  imageId: number | null;
 
-  /** 来自项目下哪一卷 */
+  /** 历史遗留：旧版对应图片处理卷 tasks.id，新数据不写。 */
   @Column({ name: 'volume_id', type: 'bigint', unsigned: true, nullable: true })
   volumeId: number | null;
 
@@ -23,11 +23,15 @@ export class OcrPage {
   @Column({ name: 'file_name', length: 255 })
   fileName: string;
 
-  /** 识别所用的处理后图片（白底黑字） */
+  /** OCR 自己导入的原图路径（识别与审阅都用它） */
+  @Column({ name: 'source_path', length: 1024, nullable: true })
+  sourcePath: string | null;
+
+  /** 识别/审阅所示图（当前等于原图，不做二值化/预处理） */
   @Column({ name: 'image_path', length: 1024 })
   imagePath: string;
 
-  /** 识别时所用图片的签名（文件大小+修改时间）。图片处理里重新调整后签名会变，据此提示“图已更新” */
+  /** 识别时所用图片的签名（文件大小+修改时间），换图后据此提示重识别 */
   @Column({ name: 'image_sig', type: 'varchar', length: 128, nullable: true })
   imageSig: string | null;
 
@@ -52,7 +56,7 @@ export class OcrPage {
   @Column({ name: 'model_name', type: 'varchar', length: 128, nullable: true })
   modelName: string | null;
 
-  /** 重新识别前的上一版（含人工修改）。只留一版，可「恢复上一版」，再点一次又换回来 */
+  /** 重新识别前的上一版（含人工修改）。只留一版，可「恢复上一版」 */
   @Column({ name: 'prev_data_json', type: 'mediumtext', nullable: true })
   prevDataJson: string | null;
 

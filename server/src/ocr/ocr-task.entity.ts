@@ -1,7 +1,7 @@
 import { Column, CreateDateColumn, Entity, OneToMany, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 import { OcrPage } from './ocr-page.entity';
 
-/** OCR 识别任务：对一个「已完成的图片处理任务」里通过审核的页面做文字识别 */
+/** OCR 卷：一卷一条识别任务，挂在 ocr_projects 下；图片由 OCR 自己导入（source_folder）。 */
 @Entity('ocr_tasks')
 export class OcrTask {
   @PrimaryGeneratedColumn({ type: 'bigint', unsigned: true })
@@ -10,22 +10,38 @@ export class OcrTask {
   @Column({ name: 'user_id', type: 'bigint', unsigned: true })
   userId: number;
 
-  @Column({ length: 128 })
-  name: string;
-
-  @Column({ name: 'source_task_id', type: 'bigint', unsigned: true })
-  sourceTaskId: number;
-
-  /** 创建时记下来，图片处理任务改名/删除后仍能显示 */
-  @Column({ name: 'source_task_name', length: 128, default: '' })
-  sourceTaskName: string;
-
-  /** 所属项目：OCR 任务按项目建，汇总项目下各卷通过的页 */
+  /** 所属 OCR 项目 ocr_projects.id */
   @Column({ name: 'project_id', type: 'bigint', unsigned: true, nullable: true })
   projectId: number | null;
 
-  @Column({ name: 'project_name', type: 'varchar', length: 128, nullable: true })
+  @Column({ name: 'project_name', length: 128, nullable: true })
   projectName: string | null;
+
+  /** 卷名（一本族谱的一册） */
+  @Column({ length: 128 })
+  name: string;
+
+  /** 历史遗留：老版 OCR 任务来自图片处理任务，仅保留以便回滚/追溯，新数据不写。 */
+  @Column({ name: 'source_task_id', type: 'bigint', unsigned: true, nullable: true })
+  sourceTaskId: number | null;
+
+  @Column({ name: 'source_task_name', length: 128, nullable: true })
+  sourceTaskName: string | null;
+
+  /** 卷图片目录（上传会话目录或桌面本机目录） */
+  @Column({ name: 'source_folder', length: 1024, nullable: true })
+  sourceFolder: string | null;
+
+  /** OCR 输出目录（导出/临时裁剪图） */
+  @Column({ name: 'output_folder', length: 1024, nullable: true })
+  outputFolder: string | null;
+
+  /** 创建入口：web = 浏览器，desktop = 本地桌面程序。 */
+  @Column({ name: 'client_type', length: 16, default: 'web' })
+  clientType: string;
+
+  @Column({ name: 'client_device_id', length: 128, nullable: true })
+  clientDeviceId: string | null;
 
   @Column({ name: 'ocr_model_id', type: 'bigint', unsigned: true, nullable: true })
   ocrModelId: number | null;
@@ -59,10 +75,6 @@ export class OcrTask {
 
   @Column({ name: 'processing_time_ms', type: 'int', nullable: true })
   processingTimeMs: number | null;
-
-  /** 手动移除了 OCR 内容的卷 id 列表（JSON 数组），自动并入时跳过这些卷 */
-  @Column({ name: 'excluded_volumes', type: 'text', nullable: true })
-  excludedVolumes: string | null;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

@@ -5,7 +5,8 @@ import { AiSetupWizard } from './AiSetupWizard';
 import { SecretInput } from './SecretInput';
 import { looksTextOnly } from './OcrModelPicker';
 import { BaiduOcrPanel } from './BaiduOcrPanel';
-import { Plus, Save, Trash2, RefreshCw, ScanText, Wand2, CheckCircle2, AlertCircle, X, KeyRound, ExternalLink } from 'lucide-react';
+import { LayoutModelPanel } from './LayoutModelPanel';
+import { Plus, Save, Trash2, RefreshCw, ScanText, Wand2, CheckCircle2, AlertCircle, X, KeyRound, ExternalLink, LayoutList } from 'lucide-react';
 import { appAlert, appConfirm } from './AppDialog';
 
 type AiModel = {
@@ -395,13 +396,13 @@ function PlatformListCard({ platforms, onEdit }: { platforms: Platform[]; onEdit
   );
 }
 
-export const SettingsView: React.FC<{ onBack?: () => void; initialTab?: 'ocr' | 'clean' | 'platform' }> = ({ initialTab }) => {
+export const SettingsView: React.FC<{ onBack?: () => void; initialTab?: 'ocr' | 'layout' | 'clean' | 'platform' }> = ({ initialTab }) => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [models, setModels] = useState<AiModel[]>([]);
   const [mock, setMock] = useState(false);
   const [err, setErr] = useState('');
-  const [modelTab, setModelTab] = useState<'ocr' | 'clean' | 'platform'>(initialTab || 'ocr');
+  const [modelTab, setModelTab] = useState<'ocr' | 'layout' | 'clean' | 'platform'>(initialTab || 'ocr');
   const [editing, setEditing] = useState<ModelDraft | null>(null);
   const [platforms, setPlatforms] = useState<Platform[]>([]);
   const [general, setGeneral] = useState<GeneralCfg>({ concurrency: 3, timeoutSec: 300, publicBaseUrl: '', usdRate: 7.2 });
@@ -838,6 +839,25 @@ export const SettingsView: React.FC<{ onBack?: () => void; initialTab?: 'ocr' | 
               </button>
               <button
                 type="button"
+                onClick={() => setModelTab('layout')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-3 text-sm font-semibold rounded-xl cursor-pointer transition-colors ${
+                  modelTab === 'layout'
+                    ? 'bg-white text-[#1D1D1F] shadow-sm'
+                    : 'text-[#86868B] hover:text-[#1D1D1F]'
+                }`}
+              >
+                <LayoutList className="w-3.5 h-3.5" />
+                版式识别
+                <span
+                  className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+                    modelTab === 'layout' ? 'bg-[#AF52DE]/12 text-[#8944AB]' : 'bg-black/[0.06] text-[#86868B]'
+                  }`}
+                >
+                  千问
+                </span>
+              </button>
+              <button
+                type="button"
                 onClick={() => setModelTab('clean')}
                 className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-3 text-sm font-semibold rounded-xl cursor-pointer transition-colors ${
                   modelTab === 'clean'
@@ -878,6 +898,8 @@ export const SettingsView: React.FC<{ onBack?: () => void; initialTab?: 'ocr' | 
 
             {modelTab === 'ocr' ? (
               <BaiduOcrPanel onChanged={() => void load()} />
+            ) : modelTab === 'layout' ? (
+              <LayoutModelPanel onChanged={() => void load()} />
             ) : modelTab === 'clean' ? (
               <ModelListCard
                 platformName={platformName}

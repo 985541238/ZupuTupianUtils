@@ -153,17 +153,34 @@ export interface OcrColumn {
 
 export type OcrStatus = 'pending' | 'processing' | 'reviewing' | 'completed' | 'failed';
 
+/** OCR 项目（独立于图片处理的项目容器） */
+export interface OcrProject {
+  id: string;
+  name: string;
+  surname?: string;
+  description?: string | null;
+  /** 项目根目录：浏览器上传会话目录 / 桌面本机目录 */
+  rootPath?: string | null;
+  volumeCount: number;
+  totalCount: number;
+  doneCount: number;
+  confirmedCount: number;
+  processingCount: number;
+  pendingCount: number;
+  failedCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** OCR 卷：一卷一条识别任务 */
 export interface OcrTask {
   id: string;
   name: string;
-  sourceTaskId: string;
-  sourceTaskName: string;
-  /** 所属项目（OCR 任务按项目建，汇总各卷通过的页） */
   projectId?: number | null;
   projectName?: string | null;
-  volumeCount?: number;
-  /** 项目里新通过、还没进任务的页数 */
-  newPageCount?: number;
+  /** 卷图片目录 */
+  sourceFolder?: string | null;
+  clientType?: string;
   status: OcrStatus;
   totalCount: number;
   doneCount: number;
@@ -179,9 +196,7 @@ export interface OcrTask {
   charCount: number;
   /** 识别失败、可重试的页数 */
   failedCount: number;
-  /** 识别之后图片处理里又调整过的页数 */
-  staleCount?: number;
-  /** 任务选用的识别模型是否还可用（被删/停用时开始前要先重新选） */
+  /** 识别模型是否还可用（被删/停用时开始前要先重新选） */
   modelUsable?: boolean;
   /** 正在识别的页（页序号 + 开始时间戳） */
   processingPages: { pageNo: number; startedAt: number }[];
@@ -198,55 +213,23 @@ export interface OcrPage {
   fileName: string;
   status: OcrPageStatus;
   imageUrl: string;
+  /** 导入的原图路径（识别与审阅都用它） */
+  sourcePath?: string | null;
   width: number;
   height: number;
   charCount: number;
   uncertainCount: number;
   errorMessage?: string | null;
-  /** 图片处理里重新调整过这一页，识别文字基于旧图 */
-  imageChanged?: boolean;
   /** 本页文字是哪个模型识别的 */
   modelName?: string | null;
   /** 有重新识别前的上一版可以恢复 */
   hasPrev?: boolean;
   prevModelName?: string | null;
-  /** 图片处理里这一页后来被标为未通过 */
-  imageRejected?: boolean;
-  /** 这一页来自项目下哪一卷 */
+  /** 这一页来自哪个 OCR 卷 */
   volumeName?: string | null;
   volumeId?: number | null;
   /** 只有单页详情接口才带 */
   columns?: OcrColumn[];
-}
-
-/** 新建 OCR 任务时可选的「项目」 */
-export interface OcrSourceTask {
-  id: string;
-  name: string;
-  surname?: string;
-  volumeCount: number;
-  totalCount: number;
-  /** 项目下各卷已通过的页数合计 */
-  usableCount: number;
-  volumes: {
-    id: number;
-    name: string;
-    usable: number;
-    passed: number;
-    total: number;
-    status: string;
-    completed: boolean;
-    /** 是否被手动移除了 OCR 内容（自动并入会跳过） */
-    excluded?: boolean;
-    inTask: number;
-    recognized: number;
-    confirmed: number;
-    failed: number;
-  }[];
-  /** 已经建过 OCR 任务则有值 */
-  ocrTaskId: string | null;
-  ocrTaskName: string | null;
-  updatedAt: string;
 }
 
 export interface OcrTextPage {

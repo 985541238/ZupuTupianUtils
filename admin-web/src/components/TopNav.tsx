@@ -40,11 +40,32 @@ export const TopNav: React.FC<TopNavProps> = ({
       active ? 'bg-[#0071E3]/10 text-[#0071E3]' : 'text-[#6E6E73] hover:text-[#1D1D1F] hover:bg-black/[0.04]'
     }`;
   const name = user.displayName || user.username || '管理员';
+  /** 审阅页：顶栏收窄，只保留返回按钮，不显示任务状态/账号，给审阅区让高度 */
+  const compact = currentTab === 'workbench' || currentTab === 'ocrReview';
   return (
-    <header className="h-16 apple-glass border-b border-black/[0.06] px-6 lg:px-10 flex items-center justify-between gap-4 select-none shrink-0 z-30">
+    <header
+      className={`apple-glass border-b border-black/[0.06] flex items-center justify-between gap-4 select-none shrink-0 z-30 ${
+        compact ? 'h-12 px-4' : 'h-16 px-6 lg:px-10'
+      }`}
+    >
       {/* 左：品牌 + 导航（审核页显示返回与当前任务） */}
       <div className="flex items-center gap-5 min-w-0">
-        {currentTab === 'workbench' || currentTab === 'ocrReview' ? (
+        {compact ? (
+          <div className="flex items-center gap-3 min-w-0">
+            {!(currentTab === 'workbench' && hideWorkbenchBack) && (
+              <button
+                onClick={currentTab === 'ocrReview' && onBackToOcr ? onBackToOcr : onBackToTasks}
+                className="flex items-center gap-1.5 h-8 px-3 rounded-lg bg-white hover:bg-[#F5F5F7] border border-black/[0.08] text-[13px] font-semibold text-[#1D1D1F] transition-all cursor-pointer shadow-2xs"
+                title={currentTab === 'ocrReview' ? '返回 OCR 任务列表' : '返回所属项目的卷列表'}
+              >
+                <ChevronLeft className="w-3.5 h-3.5 stroke-[2.2] text-[#0071E3]" />
+                <span>{currentTab === 'ocrReview' ? '返回 OCR 列表' : '返回卷列表'}</span>
+              </button>
+            )}
+            {/* 审阅页把自己的模式切换/面板开关挂到这里，节省一行高度 */}
+            <div id="review-nav-slot" className="flex items-center gap-2 min-w-0" />
+          </div>
+        ) : currentTab === 'workbench' || currentTab === 'ocrReview' ? (
           <div className="flex items-center gap-3 min-w-0">
             {!(currentTab === 'workbench' && hideWorkbenchBack) && (
               <>
@@ -107,27 +128,29 @@ export const TopNav: React.FC<TopNavProps> = ({
         )}
       </div>
 
-      {/* 右：用户（头像用姓名首字，不再依赖外网头像图片） */}
-      <div className="flex items-center gap-3 shrink-0">
-        <div
-          className={`flex items-center gap-2 ${onOpenAccount ? 'cursor-pointer rounded-xl px-1.5 py-1 -mx-1.5 hover:bg-black/[0.04]' : ''}`}
-          onClick={onOpenAccount}
-          title={onOpenAccount ? '修改账号 / 密码' : undefined}
-        >
-          <div className="w-8 h-8 rounded-full bg-[#0071E3]/12 text-[#0071E3] flex items-center justify-center text-sm font-semibold">
-            {name.slice(0, 1)}
+      {/* 右：用户（审阅页不显示，专注内容） */}
+      {!compact ? (
+        <div className="flex items-center gap-3 shrink-0">
+          <div
+            className={`flex items-center gap-2 ${onOpenAccount ? 'cursor-pointer rounded-xl px-1.5 py-1 -mx-1.5 hover:bg-black/[0.04]' : ''}`}
+            onClick={onOpenAccount}
+            title={onOpenAccount ? '修改账号 / 密码' : undefined}
+          >
+            <div className="w-8 h-8 rounded-full bg-[#0071E3]/12 text-[#0071E3] flex items-center justify-center text-sm font-semibold">
+              {name.slice(0, 1)}
+            </div>
+            <span className="hidden lg:block text-sm font-medium text-[#1D1D1F] truncate max-w-[140px]">{name}</span>
           </div>
-          <span className="hidden lg:block text-sm font-medium text-[#1D1D1F] truncate max-w-[140px]">{name}</span>
+          <button
+            onClick={onLogout}
+            title="退出登录"
+            className="h-9 px-3 text-sm text-[#6E6E73] hover:text-[#1D1D1F] hover:bg-black/[0.04] rounded-xl transition-colors cursor-pointer flex items-center gap-1.5"
+          >
+            <LogOut className="w-4 h-4" />
+            <span className="hidden md:inline">退出</span>
+          </button>
         </div>
-        <button
-          onClick={onLogout}
-          title="退出登录"
-          className="h-9 px-3 text-sm text-[#6E6E73] hover:text-[#1D1D1F] hover:bg-black/[0.04] rounded-xl transition-colors cursor-pointer flex items-center gap-1.5"
-        >
-          <LogOut className="w-4 h-4" />
-          <span className="hidden md:inline">退出</span>
-        </button>
-      </div>
+      ) : null}
     </header>
   );
 };

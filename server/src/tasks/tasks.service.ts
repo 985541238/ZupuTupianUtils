@@ -520,12 +520,7 @@ export class TasksService implements OnModuleInit {
         .filter(Boolean),
     );
     for (const v of vols) await this.deleteTask(userId, Number(v.id));
-    // 该项目的 OCR 项目一并清掉（页随外键级联删除），避免留下指向已删除卷的残留
-    try {
-      await this.tasks.query('DELETE FROM ocr_tasks WHERE project_id = ?', [projectId]);
-    } catch (e) {
-      this.logger.warn(`deleteProject: clear ocr tasks failed: ${e}`);
-    }
+    // OCR 已改为独立功能（独立的 ocr_projects/ocr_tasks），不再随图片处理项目删除。
     // 网页上传的项目根目录位于 UPLOAD_ROOT 下，删除项目时连同残留的 .part 和空目录一起清理。
     await this.safeRemoveSourceFolder(project.rootPath);
     // 所有卷都属于该项目，卷目录删除后项目级父目录只剩空目录时一并删除。

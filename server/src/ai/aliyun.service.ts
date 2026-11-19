@@ -9,6 +9,7 @@ import { PlatformCode, getPlatformDef, guessPlatform } from '../settings/platfor
 import { signPath } from '../common/secret';
 import { DEFAULT_CLEAN_PROMPT, DEFAULT_OCR_PROMPT } from '../settings/prompts';
 import { BaiduOcrError, baiduAccurateOcr, getBaiduToken, isBaiduOcrModel } from './baidu-ocr';
+import { baiduBlocksOcr } from './baidu-blocks';
 
 export interface OcrColumn {
   text: string;
@@ -192,9 +193,9 @@ export class AliyunService {
 
   // ---------------- 文字识别 ----------------
 
-  async ocr(imagePath: string, model: AiModel, opts: { prompt?: string; maxSide?: number } = {}): Promise<{ result: OcrResult; usage: Usage; raw: string }> {
+  async ocr(imagePath: string, model: AiModel, opts: { prompt?: string; maxSide?: number; blocks?: boolean } = {}): Promise<{ result: OcrResult; usage: Usage; raw: string }> {
     if (this.mock) return this.mockOcr(imagePath);
-    if (isBaiduOcrModel(model)) return this.baiduOcr(imagePath, model);
+    if (isBaiduOcrModel(model)) return this.baiduOcr(imagePath, model, opts);
     const cfg = await this.assertReady(model);
     const dataUri = await this.toDataUri(imagePath, opts.maxSide || 2048);
     const build = () => {
@@ -231,9 +232,31 @@ export class AliyunService {
   }
 
   /** 百度文字识别（高精度含位置版）：按行返回，带每个字的位置，不需要提示词 */
-  private async baiduOcr(imagePath: string, model: AiModel): Promise<{ result: OcrResult; usage: Usage; raw: string }> {
+  private async baiduOcr(imagePath: string, model: AiModel, opts: { blocks?: boolean } = {}): Promise<{ result: OcrResult; usage: Usage; raw: string }> {
     await this.assertReady(model);
     const k = await this.baiduOcrKeys();
+    const usage: Usage = { tokensIn: 0, tokensOut: 0, images: 1 };
+
+    // 族谱/表格页：先按「表格行带」切块识别，能拿到结果就不走整页（整页会把同 x 的跨代列合成一行）
+    if (opts.blocks !== false) {
+      try {
+        const blockColumns = await baiduBlocksOcr(imagePath, k.apiKey, k.secretKey);
+        if (blockColumns && blockColumns.length) {
+          const columns: OcrColumn[] = blockColumns.map((c) => ({ text: c.text, box: c.box, charBoxes: c.charBoxes }));
+          const uncertain: OcrUncertain[] = [];
+          blockColumns.forEach((c, ci) => {
+            if (c.prob != null && c.prob < 0.85) {
+              Array.from(c.text).forEach((ch, idx) => uncertain.push({ col: ci, index: idx, char: ch, candidates: [], reason: `这一列整体把握不大（置信度 ${Math.round(c.prob! * 100)}%）` }));
+            }
+          });
+          return { result: { columns, uncertain }, usage, raw: JSON.stringify({ mode: 'blocks', columns: columns.length }) };
+        }
+      } catch (e) {
+        // 表格/块识别失败（未开通表格接口、QPS 等）：回退整页识别，不让这一页直接失败
+        this.logger?.warn?.(`block OCR failed, fallback to whole page: ${(e as any)?.message || e}`);
+      }
+    }
+
     let out: Awaited<ReturnType<typeof baiduAccurateOcr>>;
     try {
       out = await baiduAccurateOcr(imagePath, k.apiKey, k.secretKey);
@@ -245,7 +268,6 @@ export class AliyunService {
       }
       throw e;
     }
-    const usage: Usage = { tokensIn: 0, tokensOut: 0, images: 1 };
     const columns: OcrColumn[] = out.columns.map((c) => ({ text: c.text, box: c.box, charBoxes: c.charBoxes }));
     // 百度给的是整行置信度：偏低的整行标成待核对
     const uncertain: OcrUncertain[] = [];

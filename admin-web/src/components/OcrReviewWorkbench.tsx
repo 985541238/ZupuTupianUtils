@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { OcrTask, OcrPage, OcrColumn, OcrChar, OcrTextPage } from '../types';
-import { api } from '../api/client';
+import { api, ocrExportUrl } from '../api/client';
 import { mapOcrPage, mapOcrTextPage } from '../api/mappers';
 import { OcrModelPicker } from './OcrModelPicker';
 import { appAlert, appConfirm } from './AppDialog';
@@ -28,6 +29,8 @@ import {
   Layers,
   PanelLeftClose,
   PanelLeftOpen,
+  Crosshair,
+  GripVertical,
 } from 'lucide-react';
 
 interface Props {
@@ -36,8 +39,6 @@ interface Props {
   /** 页面确认/修改后让列表和头部进度刷新 */
   onTaskChanged?: () => void;
   onOpenSetup?: (platform?: string | null, step?: 1 | 2 | 3, onDone?: () => void) => void;
-  /** 只审阅项目里的某一卷 */
-  volumeId?: number | null;
 }
 
 type Sel = { col: number; idx: number } | null;
@@ -46,13 +47,40 @@ type ViewMode = 'review' | 'overview';
 
 const FONT = "'Songti SC','Noto Serif SC','STSong','SimSun','Source Han Serif SC',serif";
 
+/** 图上单个字的裁切尺寸：按字框宽高比换算成固定高度的缩略图 */
+function charTileMetrics(b: [number, number, number, number], tileH = 20) {
+  const h = Math.max(1, b[3] - b[1]);
+  const w = Math.max(1, b[2] - b[0]);
+  const scale = tileH / h;
+  return { width: Math.max(12, Math.min(40, Math.round(w * scale))), height: tileH, scale };
+}
+
+/** 用原图 + 字框像素坐标做背景裁切，直接显示“图上的这个字” */
+function charCropStyle(
+  imageUrl: string,
+  pageW: number,
+  pageH: number,
+  b: [number, number, number, number],
+  tileH = 20,
+): React.CSSProperties {
+  const m = charTileMetrics(b, tileH);
+  return {
+    width: m.width,
+    height: m.height,
+    flex: '0 0 auto',
+    backgroundImage: `url(${imageUrl})`,
+    backgroundSize: `${Math.max(1, Math.round((pageW || 1) * m.scale))}px ${Math.max(1, Math.round((pageH || 1) * m.scale))}px`,
+    backgroundPosition: `${-Math.round(b[0] * m.scale)}px ${-Math.round(b[1] * m.scale)}px`,
+    backgroundRepeat: 'no-repeat',
+  };
+}
+
 const isPending = (c: OcrChar) => (c.u === 1 && c.e !== 1) || c.t === '□';
 const countPending = (cols?: OcrColumn[]) => (cols || []).reduce((a, c) => a + c.chars.filter(isPending).length, 0);
 const countPlaceholder = (cols?: OcrColumn[]) => (cols || []).reduce((a, c) => a + c.chars.filter((x) => x.t === '□').length, 0);
 const countChars = (cols?: OcrColumn[]) => (cols || []).reduce((a, c) => a + c.chars.length, 0);
 
-export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTaskChanged, onOpenSetup, volumeId }) => {
-  const inVolume = (r: any) => !volumeId || Number(r?.volumeId) === Number(volumeId);
+export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTaskChanged, onOpenSetup }) => {
   const [mode, setMode] = useState<ViewMode>('review');
   const [pages, setPages] = useState<OcrPage[]>([]);
   const [loadingList, setLoadingList] = useState(true);
@@ -62,6 +90,9 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
   const [sel, setSel] = useState<Sel>(null);
   const [showText, setShowText] = useState(true);
   const [onlyPending, setOnlyPending] = useState(false);
+  /** 拖拽调整列顺序 */
+  const dragColRef = useRef<number | null>(null);
+  const [dragOverCol, setDragOverCol] = useState<number | null>(null);
   /** overlay = 文字叠在图上；compare = 左图右文对照，鼠标移到文字上图上对应区域高亮 */
   const [layoutMode, setLayoutModeRaw] = useState<LayoutMode>(() => {
     try {
@@ -90,6 +121,11 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
   const [colDlg, setColDlg] = useState<number | null>(null);
   const [colBusy, setColBusy] = useState<number | null>(null);
   const [finishDlg, setFinishDlg] = useState(false);
+  /** 顶栏插槽：把「逐页核对/全文总览」等移到返回按钮右侧，省一行高度 */
+  const [navSlot, setNavSlot] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    setNavSlot(document.getElementById('review-nav-slot'));
+  }, []);
 
   const cur = pages.find((p) => p.id === curId) || null;
   const curIdx = cur ? pages.indexOf(cur) : -1;
@@ -102,16 +138,86 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
     toastTimer.current = window.setTimeout(() => setToast(''), 2600);
   }, []);
 
+  /** 复制本页全部文字（按列换行） */
+  const copyAllText = useCallback(async () => {
+    if (!columns) return;
+    const text = columns.map((c) => c.chars.map((x) => x.t).join('')).join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast('本页文字已复制');
+    } catch {
+      void appAlert('复制失败，请手动选择文字');
+    }
+  }, [columns, showToast]);
+
   // ---------- 加载页面列表 ----------
   const loadList = useCallback(
     async (keepCur = true) => {
       const raw = await api.getOcrPages(task.id);
-      const list = (raw || []).filter(inVolume).map((r, i) => mapOcrPage(r, task.id, i + 1));
+      const list = (raw || []).map((r, i) => mapOcrPage(r, task.id, i + 1));
       setPages(list);
       return list;
     },
     [task.id],
   );
+
+  // ---------- 加图片 / 拖拽调整页顺序 ----------
+  const [addPos, setAddPos] = useState<'start' | 'after' | 'end'>('end');
+  const [adding, setAdding] = useState(false);
+  const addInputRef = useRef<HTMLInputElement>(null);
+  const dragPageRef = useRef<number | null>(null);
+  const [dragOverPage, setDragOverPage] = useState<number | null>(null);
+
+  const onAddImages = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const files = Array.from(input.files || []).filter((f) => /\.(jpe?g|png|bmp|webp|tiff?)$/i.test(f.name));
+    input.value = '';
+    if (!files.length) {
+      void appAlert('请选择图片文件（jpg / png / bmp / webp / tif）');
+      return;
+    }
+    await flushSave();
+    setAdding(true);
+    try {
+      const session = await api.createUploadSession(
+        `加页-${task.id}`,
+        files.map((file) => ({ path: file.name, size: file.size, lastModified: file.lastModified })),
+      );
+      let insertAt = addPos === 'start' ? 0 : addPos === 'end' ? pages.length : Math.min(pages.length, curIdx >= 0 ? curIdx + 1 : pages.length);
+      let firstId: string | null = null;
+      for (const file of files) {
+        await api.uploadImage(session.id, file);
+        const res = await api.appendOcrPage(task.id, { uploadSessionId: session.id, fileName: file.name, insertAt });
+        if (!firstId && res?.page?.id != null) firstId = String(res.page.id);
+        insertAt += 1;
+      }
+      await loadList();
+      onTaskChanged?.();
+      showToast(`已加入 ${files.length} 张图片`);
+      if (firstId) setCurId(firstId);
+    } catch (e: any) {
+      void appAlert(e?.message || '加图片失败，请重试');
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const reorderPagesByDrag = async (from: number, to: number) => {
+    if (from === to || from < 0 || to < 0 || from >= pages.length || to >= pages.length) return;
+    const next = [...pages];
+    const [moved] = next.splice(from, 1);
+    if (!moved) return;
+    next.splice(to, 0, moved);
+    setPages(next.map((p, i) => ({ ...p, pageNumber: i + 1 })));
+    try {
+      await api.reorderOcrPages(task.id, next.map((p) => p.id));
+      showToast('页顺序已保存');
+      onTaskChanged?.();
+    } catch (e: any) {
+      void appAlert(e?.message || '保存页顺序失败');
+      await loadList();
+    }
+  };
 
   useEffect(() => {
     let off = false;
@@ -130,8 +236,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
     };
   }, [loadList]);
 
-  // 定时刷新页面列表：识别中每 3 秒（识别好的页马上能点开）；平时每 8 秒，切回本窗口时立刻刷新一次。
-  // 这样用户在「图片处理」里重新调整并保存后，回到这里能马上看到最新的处理图和「图已更新」提示。
+  // 定时刷新页面列表：识别中每 3 秒刷新，平时每 8 秒刷新，切回本窗口时立刻刷新一次。
   const taskLive = task.status === 'processing' || pages.some((p) => p.status === 'processing');
   useEffect(() => {
     const refresh = () => {
@@ -139,7 +244,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
       api
         .getOcrPages(task.id)
         .then((raw) => {
-          const fresh = (raw || []).filter(inVolume).map((r, i) => mapOcrPage(r, task.id, i + 1));
+          const fresh = (raw || []).map((r, i) => mapOcrPage(r, task.id, i + 1));
           setPages((prev) =>
             fresh.map((f) => {
               const old = prev.find((p) => p.id === f.id);
@@ -199,6 +304,22 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
   );
 
   useEffect(() => () => void flushSave(), [flushSave]);
+
+  /** 拖拽调整列顺序（右侧文字和图上框一起变），自动保存 */
+  const reorderColumns = useCallback(
+    (from: number, to: number) => {
+      if (from === to || !columns || !curId) return;
+      const next = [...columns];
+      const [moved] = next.splice(from, 1);
+      if (!moved) return;
+      next.splice(to, 0, moved);
+      const renum = next.map((c, i) => ({ ...c, id: i }));
+      setColumns(renum);
+      setSel(null);
+      scheduleSave(curId, renum);
+    },
+    [columns, curId, scheduleSave],
+  );
 
   const curStatus = cur?.status;
   useEffect(() => {
@@ -415,7 +536,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
     }
   };
 
-  /** 图片处理里重新调整过：文字不变，按新图重新算每个字的位置（不调模型、不花钱） */
+  /** 按当前图片重新计算每个字的位置（不调模型、不花钱） */
   const realign = async () => {
     if (!cur) return;
     setBusy(true);
@@ -429,7 +550,6 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
         setColumns(cols);
       }
       patchPage(cur.id, {
-        imageChanged: false,
         imageUrl: mapOcrPage(raw, task.id, cur.pageNumber).imageUrl,
         width: Number(raw.width) || cur.width,
         height: Number(raw.height) || cur.height,
@@ -437,7 +557,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
         uncertainCount: Number(raw.uncertainCount) || 0,
       });
       setSel(null);
-      showToast('已按新图重新对位，文字没有变，请看一眼位置是否对得上');
+      showToast('已按当前图片重新计算文字位置，文字没有变，请看一眼是否对得上');
     } catch (e: any) {
       showToast(e?.message || '重新对位失败');
     } finally {
@@ -556,8 +676,42 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
   };
 
   // ---------- 渲染 ----------
+  const navBar = (
+    <div className="flex items-center gap-2 min-w-0">
+      <button
+        onClick={() => setShowList((v) => !v)}
+        className="w-7 h-7 rounded-md flex items-center justify-center text-[#6E6E73] hover:text-[#1D1D1F] hover:bg-black/[0.05] cursor-pointer"
+        title={showList ? '收起页面列表，给图片留出更多空间' : '展开页面列表'}
+      >
+        {showList ? <PanelLeftClose className="w-3.5 h-3.5" /> : <PanelLeftOpen className="w-3.5 h-3.5" />}
+      </button>
+      <div className="flex items-center p-0.5 bg-[#E5E5EA]/70 rounded-full">
+        <button
+          onClick={() => void switchMode('review')}
+          className={`h-7 px-3 text-[12px] rounded-full transition-all cursor-pointer flex items-center gap-1 ${
+            mode === 'review' ? 'bg-white text-[#1D1D1F] shadow-xs font-semibold' : 'text-[#6E6E73] hover:text-[#1D1D1F] font-medium'
+          }`}
+        >
+          <ScanText className="w-3 h-3 text-[#0071E3]" />
+          逐页核对
+        </button>
+        <button
+          onClick={() => void switchMode('overview')}
+          className={`h-7 px-3 text-[12px] rounded-full transition-all cursor-pointer flex items-center gap-1 ${
+            mode === 'overview' ? 'bg-white text-[#1D1D1F] shadow-xs font-semibold' : 'text-[#6E6E73] hover:text-[#1D1D1F] font-medium'
+          }`}
+        >
+          <BookOpen className="w-3 h-3 text-[#0071E3]" />
+          全文总览
+        </button>
+      </div>
+      <span className="hidden md:inline text-[11px] text-[#86868B] tabular-nums ml-1">
+        {saveState === 'saving' ? '保存中…' : saveState === 'saved' ? '已保存' : saveState === 'error' ? '保存失败' : ''}
+      </span>
+    </div>
+  );
   return (
-    <div className="flex-1 flex flex-col h-[calc(100vh-4rem)] overflow-hidden bg-[#F5F5F7] select-none text-[#1D1D1F]">
+    <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#F5F5F7] select-none text-[#1D1D1F]">
       {toast && (
         <div className="fixed top-20 left-1/2 -translate-x-1/2 z-[90] apple-glass-heavy px-4 py-2 rounded-full shadow-lg border border-black/[0.08] flex items-center gap-2 animate-apple-in">
           <CheckCircle2 className="w-4 h-4 text-[#34C759]" />
@@ -567,7 +721,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
 
       <div className="flex-1 flex overflow-hidden relative">
         {/* 左：页面列表 */}
-        <aside className={`apple-glass border-r border-black/[0.06] flex flex-col shrink-0 z-20 transition-all duration-300 overflow-hidden ${showList ? 'w-60' : 'w-0 border-r-0'}`}>
+        <aside className={`apple-glass border-r border-black/[0.06] flex flex-col shrink-0 z-20 transition-all duration-300 overflow-hidden ${showList ? 'w-36' : 'w-0 border-r-0'}`}>
           <div className="p-3 border-b border-black/[0.06] space-y-2">
             <div>
               <div className="text-xs font-bold text-[#1D1D1F] truncate" title={task.name}>
@@ -584,77 +738,132 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                 style={{ width: `${pages.length ? Math.round((confirmedCount / pages.length) * 100) : 0}%` }}
               />
             </div>
+            <div className="flex items-center gap-1">
+              <select
+                value={addPos}
+                onChange={(event) => setAddPos(event.target.value as 'start' | 'after' | 'end')}
+                className="h-6 flex-1 min-w-0 rounded-md bg-white/80 border border-black/[0.08] text-[10px] text-[#1D1D1F] px-1 cursor-pointer focus:outline-none"
+                title="新图片插入到哪"
+              >
+                <option value="end">加到最后</option>
+                <option value="after">当前页后</option>
+                <option value="start">加到最前</option>
+              </select>
+              <button
+                type="button"
+                onClick={() => addInputRef.current?.click()}
+                disabled={adding}
+                className="h-6 px-1.5 rounded-md bg-[#0071E3] hover:bg-[#0077ED] text-white text-[10px] font-semibold cursor-pointer disabled:opacity-50 flex items-center gap-0.5 shrink-0"
+                title="从本机选择图片加入这一卷"
+              >
+                <Plus className="w-3 h-3" />
+                {adding ? '加入中' : '加图片'}
+              </button>
+              <input
+                ref={addInputRef}
+                type="file"
+                multiple
+                accept=".jpg,.jpeg,.png,.bmp,.webp,.tif,.tiff"
+                className="hidden"
+                onChange={(event) => void onAddImages(event)}
+              />
+            </div>
           </div>
 
           <div className="flex-1 overflow-y-auto p-2.5 space-y-1.5">
             {loadingList ? (
               <div className="text-xs text-[#86868B] p-3">加载中…</div>
             ) : (
-              pages.map((p) => {
+              pages.map((p, idx) => {
                 const active = p.id === curId && mode === 'review';
                 return (
                   <button
                     key={p.id}
+                    draggable
+                    onDragStart={(event) => {
+                      dragPageRef.current = idx;
+                      event.dataTransfer.effectAllowed = 'move';
+                      event.dataTransfer.setData('text/plain', p.id);
+                    }}
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = 'move';
+                      if (dragOverPage !== idx) setDragOverPage(idx);
+                    }}
+                    onDragLeave={() => setDragOverPage((v) => (v === idx ? null : v))}
+                    onDragEnd={() => {
+                      dragPageRef.current = null;
+                      setDragOverPage(null);
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      const from = dragPageRef.current ?? Number(event.dataTransfer.getData('text/plain'));
+                      dragPageRef.current = null;
+                      setDragOverPage(null);
+                      if (Number.isFinite(from)) void reorderPagesByDrag(from, idx);
+                    }}
                     onClick={() => {
                       setMode('review');
                       void gotoPage(p.id);
                     }}
-                    className={`w-full text-left rounded-xl border px-3 py-2 transition-all cursor-pointer ${
-                      active ? 'bg-white border-[#0071E3]/40 shadow-[0_2px_10px_rgba(0,113,227,0.12)]' : 'bg-white/60 border-transparent hover:bg-white hover:border-black/[0.06]'
-                    }`}
+                    className={`relative w-full text-left rounded-md border overflow-hidden transition-all cursor-grab ${
+                      active ? 'border-[#0071E3] shadow-[0_2px_10px_rgba(0,113,227,0.18)]' : 'border-black/[0.08] hover:border-black/[0.18]'
+                    } ${dragOverPage === idx ? 'ring-2 ring-[#0071E3]/60' : ''}`}
+                    title={`${p.fileName}（拖动可调整页顺序）`}
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[13px] font-semibold tabular-nums">
-                        第 {p.pageNumber} 页
-                        {p.imageChanged ? (
-                          <span className="ml-1.5 text-[10px] font-semibold text-[#C93400] bg-[#FF9500]/15 px-1.5 py-0.5 rounded-full" title="图片处理里重新调整过这一页">
-                            图已更新
-                          </span>
-                        ) : null}
-                      </span>
-                      {p.status === 'confirmed' ? (
-                        <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-[#248A3D] bg-[#34C759]/12 px-1.5 py-0.5 rounded-full">
-                          <Check className="w-2.5 h-2.5" />
-                          已完成
-                        </span>
-                      ) : p.status === 'ready' ? (
-                        <span className="text-[10px] font-semibold text-[#0071E3] bg-[#0071E3]/10 px-1.5 py-0.5 rounded-full">待核对</span>
-                      ) : p.status === 'processing' ? (
-                        <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-[#0071E3] bg-[#0071E3]/10 px-1.5 py-0.5 rounded-full">
-                          <Sparkles className="w-2.5 h-2.5 animate-spin" />
-                          识别中
-                        </span>
-                      ) : p.status === 'failed' ? (
-                        <span className="text-[10px] font-semibold text-[#C62828] bg-[#FF3B30]/10 px-1.5 py-0.5 rounded-full">识别失败</span>
-                      ) : (
-                        <span className="text-[10px] font-semibold text-[#86868B] bg-black/[0.05] px-1.5 py-0.5 rounded-full">未识别</span>
-                      )}
-                    </div>
-                    <div className="text-[11px] text-[#86868B] truncate mt-0.5" title={(p.volumeName ? p.volumeName + ' · ' : '') + p.fileName}>
-                      {p.volumeName ? <b className="font-semibold text-[#6E6E73]">{p.volumeName} · </b> : null}
-                      {p.fileName}
-                    </div>
-                    {p.charCount > 0 ? (
-                      <div className="flex items-center gap-2 text-[10px] text-[#86868B] mt-0.5 tabular-nums">
-                        <span>{p.charCount} 字</span>
-                        {p.uncertainCount > 0 ? (
-                          <span className="inline-flex items-center gap-0.5 text-[#C93400] font-semibold">
-                            <AlertTriangle className="w-2.5 h-2.5" />
-                            {p.uncertainCount}
-                          </span>
-                        ) : null}
-                      </div>
-                    ) : null}
+                    <img
+                      src={p.imageUrl}
+                      alt={`第 ${p.pageNumber} 页`}
+                      draggable={false}
+                      className="w-full h-20 object-cover bg-white"
+                    />
+                    <span className="absolute top-1 left-1 min-w-[16px] h-4 px-1 rounded bg-black/55 text-white text-[10px] font-semibold leading-4 text-center tabular-nums">
+                      {p.pageNumber}
+                    </span>
+                    <span
+                      className={`absolute top-1 right-1 w-2 h-2 rounded-full ${
+                        p.status === 'confirmed'
+                          ? 'bg-[#34C759]'
+                          : p.status === 'ready'
+                            ? 'bg-[#0071E3]'
+                            : p.status === 'processing'
+                              ? 'bg-[#FF9500]'
+                              : p.status === 'failed'
+                                ? 'bg-[#FF3B30]'
+                                : 'bg-[#C7C7CC]'
+                      }`}
+                      title={
+                        p.status === 'confirmed' ? '已完成' : p.status === 'ready' ? '待核对' : p.status === 'processing' ? '识别中' : p.status === 'failed' ? '识别失败' : '未识别'
+                      }
+                    />
                   </button>
                 );
               })
             )}
           </div>
 
-          {volumeId ? (
-            <div className="p-3 border-t border-black/[0.06] text-[12px] text-[#86868B] text-center">只审阅这一卷 · 返回项目可看其他卷</div>
-          ) : (
-          <div className="p-3 border-t border-black/[0.06]">
+          <div className="p-3 border-t border-black/[0.06] space-y-2">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  window.open(ocrExportUrl(task.id, 'columns'), '_blank');
+                }}
+                className="flex-1 h-9 px-3 text-[13px] font-semibold rounded-xl bg-white border border-black/[0.1] text-[#1D1D1F] hover:bg-[#F5F5F7] cursor-pointer flex items-center justify-center gap-1.5"
+                title="导出全部页的文字（按列分行）"
+              >
+                <Download className="w-3.5 h-3.5" />
+                导出文字
+              </button>
+              <button
+                onClick={() => {
+                  window.open(ocrExportUrl(task.id, 'flow'), '_blank');
+                }}
+                className="h-9 px-3 text-[13px] font-semibold rounded-xl text-[#6E6E73] hover:text-[#1D1D1F] hover:bg-black/[0.04] cursor-pointer whitespace-nowrap"
+                title="导出全部页的文字（连续通读，不分列）"
+              >
+                导出（连读）
+              </button>
+            </div>
             <button
               disabled={!allConfirmed}
               onClick={() => setFinishDlg(true)}
@@ -664,48 +873,11 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
               {task.status === 'completed' ? '任务已完成' : '完成整本任务'}
             </button>
           </div>
-          )}
         </aside>
 
         {/* 中 + 右 */}
         <main className="flex-1 flex flex-col min-w-0 relative">
-          {/* 顶部模式切换 */}
-          <div className="h-12 px-4 flex items-center justify-between gap-3 border-b border-black/[0.06] bg-white/70 backdrop-blur shrink-0">
-            <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowList((v) => !v)}
-              className="w-8 h-8 rounded-lg flex items-center justify-center text-[#6E6E73] hover:text-[#1D1D1F] hover:bg-black/[0.05] cursor-pointer"
-              title={showList ? '收起页面列表，给图片留出更多空间' : '展开页面列表'}
-            >
-              {showList ? <PanelLeftClose className="w-4 h-4" /> : <PanelLeftOpen className="w-4 h-4" />}
-            </button>
-            <div className="flex items-center p-0.5 bg-[#E5E5EA]/70 rounded-full">
-              <button
-                onClick={() => void switchMode('review')}
-                className={`px-3.5 py-1 text-xs rounded-full transition-all cursor-pointer flex items-center gap-1.5 ${
-                  mode === 'review' ? 'bg-white text-[#1D1D1F] shadow-xs font-semibold' : 'text-[#6E6E73] hover:text-[#1D1D1F] font-medium'
-                }`}
-              >
-                <ScanText className="w-3.5 h-3.5 text-[#0071E3]" />
-                逐页核对
-              </button>
-              <button
-                onClick={() => void switchMode('overview')}
-                className={`px-3.5 py-1 text-xs rounded-full transition-all cursor-pointer flex items-center gap-1.5 ${
-                  mode === 'overview' ? 'bg-white text-[#1D1D1F] shadow-xs font-semibold' : 'text-[#6E6E73] hover:text-[#1D1D1F] font-medium'
-                }`}
-              >
-                <BookOpen className="w-3.5 h-3.5 text-[#0071E3]" />
-                全文总览
-              </button>
-            </div>
-            </div>
-            <div className="flex items-center gap-3 text-xs text-[#86868B]">
-              <span className="tabular-nums">
-                {saveState === 'saving' ? '保存中…' : saveState === 'saved' ? '修改已保存' : saveState === 'error' ? <span className="text-[#C62828]">保存失败，稍后重试</span> : ''}
-              </span>
-            </div>
-          </div>
+          {navSlot ? createPortal(navBar, navSlot) : null}
 
           {mode === 'overview' ? (
             <OcrOverview
@@ -748,65 +920,83 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
               />
 
               {/* 右：本页文字与操作 */}
-              <aside className="w-[320px] shrink-0 border-l border-black/[0.06] bg-white/70 backdrop-blur flex flex-col">
-                <div className="px-4 py-3 border-b border-black/[0.06]">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-[15px] font-semibold">第 {cur.pageNumber} 页</h3>
-                    <div className="flex items-center gap-1">
-                      <button
-                        disabled={curIdx <= 0}
-                        onClick={() => void gotoPage(pages[curIdx - 1].id)}
-                        className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-black/[0.05] disabled:opacity-30 cursor-pointer"
-                        title="上一页"
-                      >
-                        <ChevronLeft className="w-4 h-4" />
-                      </button>
-                      <button
-                        disabled={curIdx >= pages.length - 1}
-                        onClick={() => void gotoPage(pages[curIdx + 1].id)}
-                        className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-black/[0.05] disabled:opacity-30 cursor-pointer"
-                        title="下一页"
-                      >
-                        <ChevronRight className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                  <div className="text-[11px] text-[#86868B] mt-0.5 truncate" title={(cur.volumeName ? cur.volumeName + ' · ' : '') + cur.fileName}>
-                    {cur.volumeName ? <b className="font-semibold text-[#6E6E73]">{cur.volumeName} · </b> : null}
-                    {cur.fileName}
+              <aside className="w-[50%] min-w-[460px] shrink-0 border-l border-black/[0.06] bg-white flex flex-col">
+                {/* 顶部工具栏：常用操作一行，紧凑 */}
+                <div className="px-2 py-1.5 border-b border-black/[0.06] flex items-center gap-0.5 shrink-0 text-[12px] text-[#374151] select-none">
+                  <button
+                    type="button"
+                    disabled={busy || cur.status === 'processing'}
+                    onClick={() => setRerunDlg(true)}
+                    className="h-7 px-2 rounded-md hover:bg-black/[0.05] disabled:opacity-40 cursor-pointer flex items-center gap-1"
+                    title="重新识别本页"
+                  >
+                    <ScanText className="w-3.5 h-3.5 text-[#0071E3]" />
+                    重新识别
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!columns}
+                    onClick={() => void copyAllText()}
+                    className="h-7 px-2 rounded-md hover:bg-black/[0.05] disabled:opacity-40 cursor-pointer flex items-center gap-1"
+                    title="复制本页文字"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    复制
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void flushSave()}
+                    className="h-7 px-2 rounded-md hover:bg-black/[0.05] cursor-pointer flex items-center gap-1"
+                    title="保存修改"
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5 text-[#34C759]" />
+                    保存
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => window.open(ocrExportUrl(task.id, 'columns'), '_blank')}
+                    className="h-7 px-2 rounded-md hover:bg-black/[0.05] cursor-pointer flex items-center gap-1"
+                    title="导出文字"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    导出
+                  </button>
+                  <span className="mx-1 h-3.5 w-px bg-black/[0.08]" />
+                  <button
+                    type="button"
+                    onClick={() => setOnlyPending(!onlyPending)}
+                    className={`h-7 px-2 rounded-md cursor-pointer flex items-center gap-1 ${
+                      onlyPending ? 'bg-[#FF9500]/15 text-[#C93400] font-semibold' : 'hover:bg-black/[0.05]'
+                    }`}
+                    title="只突出待核对的字"
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    待核对 {columns ? countPending(columns) : 0}
+                  </button>
+                  <div className="ml-auto flex items-center gap-0.5">
+                    <span className="px-1 text-[11px] text-[#9CA3AF] tabular-nums">
+                      {cur.pageNumber}/{pages.length}
+                    </span>
+                    <button
+                      disabled={curIdx <= 0}
+                      onClick={() => void gotoPage(pages[curIdx - 1].id)}
+                      className="w-6 h-6 rounded flex items-center justify-center hover:bg-black/[0.05] disabled:opacity-25 cursor-pointer"
+                      title="上一页"
+                    >
+                      <ChevronLeft className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      disabled={curIdx >= pages.length - 1}
+                      onClick={() => void gotoPage(pages[curIdx + 1].id)}
+                      className="w-6 h-6 rounded flex items-center justify-center hover:bg-black/[0.05] disabled:opacity-25 cursor-pointer"
+                      title="下一页"
+                    >
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
                   </div>
                 </div>
 
-                <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
-                  {cur.imageRejected ? (
-                    <div className="rounded-2xl bg-[#FF3B30]/[0.07] border border-[#FF3B30]/20 p-3 text-[13px] text-[#C62828] leading-relaxed">
-                      这一页在「图片处理」里后来被标成了「未通过」，当前显示的是那边最新的图。建议回去重新确认后再核对文字。
-                    </div>
-                  ) : null}
-                  {cur.imageChanged && columns ? (
-                    <div className="rounded-2xl bg-[#FF9500]/10 border border-[#FF9500]/30 p-3 text-[13px] text-[#C93400] leading-relaxed">
-                      <p className="font-semibold">这一页的图片在「图片处理」里重新调整过</p>
-                      <p className="mt-1 text-[12px]">现在显示的是最新的图；下面的文字是按旧图识别的，字的位置可能对不上，字形也可能变了。</p>
-                      <div className="mt-2 flex flex-col gap-1.5">
-                        <button
-                          disabled={busy}
-                          onClick={realign}
-                          className="h-8 rounded-lg bg-[#FF9500] text-white text-xs font-semibold cursor-pointer disabled:opacity-60"
-                          title="文字、修改都保留，只按新图重新摆位置，免费"
-                        >
-                          按新图重新对位（文字不变，免费）
-                        </button>
-                        <button
-                          disabled={busy}
-                          onClick={() => setRerunDlg(true)}
-                          className="h-8 rounded-lg bg-white border border-[#FF9500]/40 text-[#C93400] text-xs font-semibold cursor-pointer disabled:opacity-60"
-                          title="用新图重新识别，会覆盖手工修改并产生费用"
-                        >
-                          用新图重新识别（会收费）
-                        </button>
-                      </div>
-                    </div>
-                  ) : null}
+                <div className="flex-1 overflow-y-auto px-3 py-2">
                   {cur.status === 'processing' ? (
                     <div className="rounded-2xl bg-[#0071E3]/[0.06] border border-[#0071E3]/15 p-3 text-[13px] text-[#0A4FA8] leading-relaxed flex items-start gap-2">
                       <Sparkles className="w-4 h-4 animate-spin shrink-0 mt-0.5" />
@@ -821,42 +1011,80 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                   ) : null}
 
                   {columns ? (
-                    <>
-                      <div className="grid grid-cols-3 gap-2 text-center">
-                        <Stat label="共" value={countChars(columns)} unit="字" />
-                        <Stat label="待核对" value={countPending(columns)} unit="处" warn={countPending(columns) > 0} />
-                        <Stat label="占位 □" value={countPlaceholder(columns)} unit="处" />
-                      </div>
-
-                      <div>
-                        <div className="text-xs font-semibold text-[#1D1D1F] mb-1.5">本页文字（从右到左，点字跳到图上位置）</div>
-                        <div className="rounded-2xl bg-[#F5F5F7] border border-black/[0.05] p-2.5 space-y-1.5 max-h-[300px] overflow-y-auto">
-                          {columns.map((c, ci) => (
-                            <div key={ci} className="group flex gap-2 items-start">
+                    <div className="divide-y divide-black/[0.04]">
+                      {columns.map((c, ci) => (
+                            <div
+                              key={ci}
+                              draggable
+                              onDragStart={(event) => {
+                                dragColRef.current = ci;
+                                event.dataTransfer.effectAllowed = 'move';
+                                event.dataTransfer.setData('text/plain', String(ci));
+                              }}
+                              onDragOver={(event) => {
+                                event.preventDefault();
+                                event.dataTransfer.dropEffect = 'move';
+                                if (dragOverCol !== ci) setDragOverCol(ci);
+                              }}
+                              onDragLeave={() => setDragOverCol((v) => (v === ci ? null : v))}
+                              onDragEnd={() => {
+                                dragColRef.current = null;
+                                setDragOverCol(null);
+                              }}
+                              onDrop={(event) => {
+                                event.preventDefault();
+                                const from = dragColRef.current ?? Number(event.dataTransfer.getData('text/plain'));
+                                dragColRef.current = null;
+                                setDragOverCol(null);
+                                if (Number.isFinite(from)) reorderColumns(from, ci);
+                              }}
+                              className={`group flex gap-2 items-start rounded-md cursor-grab px-2.5 py-2 hover:bg-[#FAFAFA] ${
+                                dragOverCol === ci ? 'bg-[#0071E3]/10 ring-1 ring-[#0071E3]/40' : ''
+                              }`}
+                            >
+                              <GripVertical className="w-3.5 h-3.5 text-[#C7C7CC] mt-1 shrink-0" />
                               <span className="text-[10px] text-[#86868B] tabular-nums w-5 pt-1 shrink-0 text-right">{ci + 1}</span>
-                              <div className="flex flex-wrap" style={{ fontFamily: FONT }}>
-                                {c.chars.map((ch, k) => {
-                                  const on = sel && sel.col === ci && sel.idx === k;
-                                  return (
-                                    <button
-                                      key={k}
-                                      onClick={() => setSel({ col: ci, idx: k })}
-                                      className={`min-w-[22px] h-6 px-0.5 text-[15px] leading-6 rounded cursor-pointer ${
-                                        on
-                                          ? 'bg-[#0071E3] text-white'
-                                          : ch.t === '□'
-                                            ? 'bg-[#FF3B30]/15 text-[#C62828]'
-                                            : isPending(ch)
-                                              ? 'bg-[#FF9500]/20 text-[#C93400]'
-                                              : ch.e === 1
-                                                ? 'text-[#248A3D]'
-                                                : 'hover:bg-black/[0.06]'
-                                      }`}
-                                    >
-                                      {ch.t}
-                                    </button>
-                                  );
-                                })}
+                              <div className="min-w-0 flex-1">
+                                {/* 每个字一组：上=图上原字，下=识别文字；同组一起换行，避免上下两行错位 */}
+                                <div className="flex flex-wrap items-start gap-x-[2px] gap-y-1">
+                                  {c.chars.map((ch, k) => {
+                                    const on = sel && sel.col === ci && sel.idx === k;
+                                    const w = charTileMetrics(ch.b, 28).width;
+                                    return (
+                                      <div key={k} className="flex flex-col items-center" style={{ width: w }}>
+                                        {cur.width > 0 && cur.height > 0 ? (
+                                          <span
+                                            onClick={() => setSel({ col: ci, idx: k })}
+                                            onMouseEnter={() => setHover({ col: ci, idx: k })}
+                                            onMouseLeave={() => setHover(null)}
+                                            title={`图上原字：${ch.t}`}
+                                            className={`rounded-[1px] bg-[#F7F7F8] border cursor-pointer ${on ? 'border-[#0071E3]' : 'border-[#E5E5EA]'}`}
+                                            style={{ ...charCropStyle(cur.imageUrl, cur.width, cur.height, ch.b, 28), width: w }}
+                                          />
+                                        ) : null}
+                                        <button
+                                          onClick={() => setSel({ col: ci, idx: k })}
+                                          onMouseEnter={() => setHover({ col: ci, idx: k })}
+                                          onMouseLeave={() => setHover(null)}
+                                          style={{ width: w, fontFamily: FONT }}
+                                          className={`h-8 text-[18px] leading-8 rounded cursor-pointer text-center ${
+                                            on
+                                              ? 'bg-[#0071E3] text-white'
+                                              : ch.t === '□'
+                                                ? 'bg-[#FF3B30]/15 text-[#C62828]'
+                                                : isPending(ch)
+                                                  ? 'bg-[#FF9500]/20 text-[#C93400]'
+                                                  : ch.e === 1
+                                                    ? 'text-[#248A3D]'
+                                                    : 'hover:bg-[#EFF6FF]'
+                                          }`}
+                                        >
+                                          {ch.t}
+                                        </button>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
                               </div>
                               <span className="ml-auto shrink-0 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
                                 <button
@@ -877,81 +1105,63 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                                 </button>
                               </span>
                             </div>
-                          ))}
-                        </div>
-                      </div>
-
-                      {countPending(columns) > 0 ? (
-                        <div>
-                          <div className="text-xs font-semibold text-[#1D1D1F] mb-1.5">待核对</div>
-                          <div className="space-y-1.5">
-                            {columns.flatMap((c, ci) =>
-                              c.chars.map((ch, k) => ({ ch, ci, k })).filter((x) => isPending(x.ch)),
-                            ).slice(0, 60).map(({ ch, ci, k }) => (
-                              <button
-                                key={ci + '-' + k}
-                                onClick={() => setSel({ col: ci, idx: k })}
-                                className="w-full text-left flex items-center gap-2 rounded-xl bg-white border border-black/[0.06] hover:border-[#FF9500]/50 px-2.5 py-1.5 cursor-pointer"
-                              >
-                                <span className="w-7 h-7 rounded-lg bg-[#FF9500]/15 text-[#C93400] flex items-center justify-center text-base shrink-0" style={{ fontFamily: FONT }}>
-                                  {ch.t}
-                                </span>
-                                <span className="min-w-0 text-[12px] text-[#6E6E73] truncate">
-                                  第 {ci + 1} 列第 {k + 1} 字{ch.alt?.length ? ` · 或「${ch.alt.join('、')}」` : ''}
-                                  {ch.r ? ` · ${ch.r}` : ''}
-                                </span>
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      ) : null}
-                    </>
+                      ))}
+                    </div>
                   ) : null}
                 </div>
 
-                <div className="p-3 border-t border-black/[0.06] space-y-2">
+                <div className="p-2.5 border-t border-black/[0.06] flex items-center gap-2">
                   {cur.status === 'confirmed' ? (
-                    <div className="flex items-center gap-2">
-                      <div className="flex-1 h-10 rounded-xl bg-[#34C759]/12 text-[#248A3D] text-sm font-semibold flex items-center justify-center gap-1.5">
+                    <>
+                      <div className="flex-1 h-9 rounded-lg bg-[#34C759]/12 text-[#248A3D] text-[13px] font-semibold flex items-center justify-center gap-1.5">
                         <CheckCircle2 className="w-4 h-4" />
                         本页已完成
                       </div>
                       <button
                         onClick={() => void reopen()}
                         disabled={busy}
-                        className="h-10 px-3 text-sm font-semibold rounded-xl bg-white border border-black/[0.1] hover:bg-[#F5F5F7] cursor-pointer disabled:opacity-50"
+                        className="h-9 px-3 text-[12px] font-semibold rounded-lg bg-white border border-black/[0.1] hover:bg-[#F5F5F7] cursor-pointer disabled:opacity-50"
                       >
                         继续修改
                       </button>
-                    </div>
+                    </>
                   ) : (
                     <button
                       disabled={busy || !columns}
                       onClick={requestConfirm}
-                      className="w-full h-11 text-sm font-semibold rounded-xl bg-[#0071E3] hover:bg-[#0077ED] text-white shadow-[0_2px_8px_rgba(0,113,227,0.28)] transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5 active:scale-[0.99]"
+                      className="flex-1 h-9 text-[13px] font-semibold rounded-lg bg-[#0071E3] hover:bg-[#0077ED] text-white cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5 active:scale-[0.99]"
                     >
                       <CheckCircle2 className="w-4 h-4" />
-                      {busy ? '处理中…' : '完成本页并看下一页'}
+                      {busy ? '处理中…' : '完成本页'}
                     </button>
                   )}
+                  {columns && cur.status !== 'processing' ? (
+                    <button
+                      disabled={busy}
+                      onClick={() => void realign()}
+                      title="按图重新对位（免费，文字和修改都保留）"
+                      className="w-9 h-9 rounded-lg bg-white border border-black/[0.1] text-[#1D1D1F] hover:bg-[#F5F5F7] cursor-pointer disabled:opacity-50 flex items-center justify-center"
+                    >
+                      <Crosshair className="w-4 h-4" />
+                    </button>
+                  ) : null}
                   {cur.hasPrev && cur.status !== 'processing' ? (
                     <button
                       disabled={busy}
                       onClick={() => void restorePrev()}
-                      className="w-full h-9 text-[13px] font-semibold rounded-xl bg-white border border-black/[0.1] text-[#1D1D1F] hover:bg-[#F5F5F7] cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5"
-                      title="恢复到重新识别之前的文字（含当时的修改），再点一次可换回"
+                      title="恢复上一版（重新识别前的文字）"
+                      className="w-9 h-9 rounded-lg bg-white border border-black/[0.1] text-[#1D1D1F] hover:bg-[#F5F5F7] cursor-pointer disabled:opacity-50 flex items-center justify-center"
                     >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      恢复上一版{cur.prevModelName ? `（${cur.prevModelName}）` : ''}
+                      <RotateCcw className="w-4 h-4" />
                     </button>
                   ) : null}
                   <button
                     disabled={busy || cur.status === 'processing'}
                     onClick={() => setRerunDlg(true)}
-                    className="w-full h-9 text-[13px] font-semibold rounded-xl text-[#6E6E73] hover:text-[#1D1D1F] hover:bg-black/[0.04] cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5"
+                    title={columns ? '重新识别本页' : '识别本页'}
+                    className="w-9 h-9 rounded-lg text-[#6E6E73] hover:text-[#1D1D1F] hover:bg-black/[0.04] cursor-pointer disabled:opacity-50 flex items-center justify-center"
                   >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    {busy ? '提交中…' : columns ? '重新识别本页' : '识别本页'}
+                    <ScanText className="w-4 h-4" />
                   </button>
                 </div>
               </aside>
@@ -1123,9 +1333,17 @@ const overlapCols = (cols: OcrColumn[] | null): Set<number> => {
     for (let j = i + 1; j < cols.length; j++) {
       const b = cols[j].box;
       if (!(b[2] > b[0] && b[3] > b[1])) continue;
+      // 「长子/次子/十世」这类短标签本身就压在长列开头，不是拆乱：文字太少的列不参与判断
+      if (Math.min(cols[i].chars.length, cols[j].chars.length) < 4) continue;
+      const ah = a[3] - a[1];
+      const bh = b[3] - b[1];
+      const contains = (x: [number, number, number, number], y: [number, number, number, number]) =>
+        x[0] <= y[0] + 2 && x[1] <= y[1] + 2 && x[2] >= y[2] - 2 && x[3] >= y[3] - 2;
+      // 一个小框整块落在另一个大框里（标签在列内），也不算拆乱
+      if ((contains(a, b) || contains(b, a)) && Math.min(ah, bh) < Math.max(ah, bh) * 0.6) continue;
       const ox = Math.min(a[2], b[2]) - Math.max(a[0], b[0]);
       const oy = Math.min(a[3], b[3]) - Math.max(a[1], b[1]);
-      if (ox > 0.6 * Math.min(a[2] - a[0], b[2] - b[0]) && oy > 0.5 * Math.min(a[3] - a[1], b[3] - b[1])) {
+      if (ox > 0.8 * Math.min(a[2] - a[0], b[2] - b[0]) && oy > 0.6 * Math.min(ah, bh)) {
         out.add(i);
         out.add(j);
       }
@@ -1181,7 +1399,8 @@ const PageCanvas: React.FC<CanvasProps> = ({
   const W = natural.w || page.width || 1000;
   const H = natural.h || page.height || 1400;
   // 对照模式下左边只放图，按宽度铺满更好认字
-  const fit = compare ? Math.min((size.w - 24) / W, (size.h - 24) / H * 1.6) : Math.min((size.w - 48) / W, (size.h - 48) / H);
+  // 图片模式：按容器宽高完整显示
+  const fit = Math.min((size.w - 48) / W, (size.h - 48) / H);
   const scale = Math.max(0.05, fit) * zoom;
   const dw = Math.round(W * scale);
   const dh = Math.round(H * scale);
@@ -1336,7 +1555,7 @@ const PageCanvas: React.FC<CanvasProps> = ({
                   ? ch.t === '□'
                     ? 'border-[#FF3B30]/70 bg-[#FF3B30]/10'
                     : 'border-[#FF9500]/80 bg-[#FF9500]/15'
-                  : 'border-transparent hover:border-[#0071E3]/40'
+                  : 'border-[#0071E3]/35 hover:border-[#0071E3]'
                 : ch.t === '□'
                   ? 'bg-[#FF3B30]/20 border-[#FF3B30]/60 text-[#C62828]'
                   : pending
@@ -1400,10 +1619,10 @@ const PageCanvas: React.FC<CanvasProps> = ({
             className={`px-3 py-1 text-xs rounded-full transition-all flex items-center gap-1.5 cursor-pointer ${
               compare ? 'bg-white text-[#1D1D1F] shadow-xs font-semibold' : 'text-[#6E6E73] hover:text-[#1D1D1F] font-medium'
             }`}
-            title="左边是识别用的图，右边是识别文字；鼠标移到文字上，图里对应的字会高亮"
+            title="只看图片：文字在右侧「逐字图文比对」里核对"
           >
             <Columns className="w-3 h-3 text-[#0071E3]" />
-            左图右文
+            只看图片
           </button>
           <button
             onClick={() => setLayoutMode('overlay')}
@@ -1469,23 +1688,7 @@ const PageCanvas: React.FC<CanvasProps> = ({
         </div>
       </div>
 
-      {compare ? (
-        <div className="flex-1 flex min-h-0">
-          {imagePane}
-          <TextReader
-            columns={columns}
-            hover={hover}
-            sel={sel}
-            onlyPending={onlyPending}
-            onHover={onHoverText}
-            onLeave={() => setHover(null)}
-            onPick={(s) => setSel(s)}
-            status={page.status}
-          />
-        </div>
-      ) : (
-        imagePane
-      )}
+      {imagePane}
 
       {/* 放大镜：鼠标指着（或选中）某个字时，左下角把这个字在图上的样子放大，和识别结果并排 */}
       {columns && active && activeChar ? <Loupe page={page} ch={activeChar} pos={`第 ${active.col + 1} 列 · 第 ${active.idx + 1} 字`} /> : null}

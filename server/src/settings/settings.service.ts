@@ -305,8 +305,39 @@ export class SettingsService implements OnModuleInit {
     return this.currencyOf(model) === 'USD' ? amount * this.usdRate : amount;
   }
 
-  async saveGeneral(body: Partial<GeneralConfig>) {
-    const cur = await this.getGeneral();
+  // ---------------- 版式识别（阅读顺序）模型 ----------------
+
+  private readonly LAYOUT_DEFAULT = { platform: 'siliconflow', model: 'Qwen/Qwen3-VL-32B-Instruct' };
+
+  async getLayoutModelConfig() {
+    const raw = await this.read<any>('layout_model', {});
+    const all = await this.readPlatforms();
+    const platform = String(raw.platform || this.LAYOUT_DEFAULT.platform);
+    const key = decryptSecret(all[platform]?.values?.apiKey || '');
+    return {
+      platform,
+      model: String(raw.model || this.LAYOUT_DEFAULT.model),
+      displayName: String(raw.displayName || ''),
+      updatedAt: raw.updatedAt || null,
+      configured: !!key,
+    };
+  }
+
+  async saveLayoutModelConfig(body: { platform?: string; model?: string; displayName?: string }) {
+    const cur = await this.getLayoutModelConfig();
+    const model = String(body.model ?? cur.model ?? '').trim();
+    if (!model) throw new BadRequestException('请选择版式识别模型');
+    const next = {
+      platform: String(body.platform || cur.platform || this.LAYOUT_DEFAULT.platform),
+      model,
+      displayName: String(body.displayName ?? cur.displayName ?? '').trim(),
+      updatedAt: new Date().toISOString(),
+    };
+    await this.write('layout_model', next);
+    return this.getLayoutModelConfig();
+  }
+
+  async saveGeneral(body: Partial<GeneralConfig>) {    const cur = await this.getGeneral();
     const publicBaseUrl = String(body.publicBaseUrl ?? cur.publicBaseUrl ?? '')
       .trim()
       .replace(/\/+$/, '');

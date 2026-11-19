@@ -1,6 +1,6 @@
 import { ScanItem, Task, User } from '../types';
 import { authImageUrl, viewImageUrl, viewThumbUrl } from './client';
-import type { OcrTask, OcrPage, OcrSourceTask, OcrTextPage } from '../types';
+import type { OcrTask, OcrPage, OcrProject, OcrTextPage } from '../types';
 import { DEFAULT_UI_PARAMS, nestToUiParams } from './params';
 
 /** Friendly duration: 320ms / 1.2s / 12.3s / 1分05秒; empty when missing */
@@ -171,13 +171,11 @@ export function mapOcrTask(raw: any): OcrTask {
   const pt = raw.processingTimeMs;
   return {
     id: String(raw.id),
-    name: raw.name || '未命名 OCR 任务',
-    sourceTaskId: String(raw.sourceTaskId ?? ''),
-    sourceTaskName: raw.sourceTaskName || '',
+    name: raw.name || '未命名 OCR 卷',
     projectId: raw.projectId != null ? Number(raw.projectId) : null,
     projectName: raw.projectName || null,
-    volumeCount: Number(raw.volumeCount) || 0,
-    newPageCount: Number(raw.newPageCount) || 0,
+    sourceFolder: raw.sourceFolder || null,
+    clientType: raw.clientType || 'web',
     status: (raw.status || 'pending') as OcrTask['status'],
     totalCount: Number(raw.totalCount) || 0,
     doneCount: Number(raw.doneCount) || 0,
@@ -192,7 +190,6 @@ export function mapOcrTask(raw: any): OcrTask {
     uncertainCount: Number(raw.uncertainCount) || 0,
     charCount: Number(raw.charCount) || 0,
     failedCount: Number(raw.failedCount) || 0,
-    staleCount: Number(raw.staleCount) || 0,
     modelUsable: raw.modelUsable !== false,
     processingPages: Array.isArray(raw.processingPages)
       ? raw.processingPages.map((p: any) => ({ pageNo: Number(p.pageNo) || 0, startedAt: Number(p.startedAt) || 0 }))
@@ -210,47 +207,38 @@ export function mapOcrPage(raw: any, taskId: string | number, pageNumber: number
     fileName: raw.fileName || `page_${pageNumber}`,
     status: (raw.status || 'pending') as OcrPage['status'],
     imageUrl: authImageUrl(raw.imageUrl),
+    sourcePath: raw.sourcePath || null,
     width: Number(raw.width) || 0,
     height: Number(raw.height) || 0,
     charCount: Number(raw.charCount) || 0,
     uncertainCount: Number(raw.uncertainCount) || 0,
     errorMessage: raw.errorMessage || null,
-    imageChanged: !!raw.imageChanged,
     modelName: raw.modelName || null,
     hasPrev: !!raw.hasPrev,
     prevModelName: raw.prevModelName || null,
-    imageRejected: !!raw.imageRejected,
     volumeName: raw.volumeName || null,
     volumeId: raw.volumeId != null ? Number(raw.volumeId) : null,
     columns: raw.data?.columns,
   };
 }
 
-export function mapOcrSource(raw: any): OcrSourceTask {
+/** OCR 项目（含卷/页进度聚合） */
+export function mapOcrProject(raw: any): OcrProject {
   return {
     id: String(raw.id),
-    name: raw.name || '',
+    name: raw.name || '未命名 OCR 项目',
     surname: raw.surname || undefined,
+    description: raw.description || null,
+    rootPath: raw.rootPath || null,
     volumeCount: Number(raw.volumeCount) || 0,
     totalCount: Number(raw.totalCount) || 0,
-    usableCount: Number(raw.usableCount) || 0,
-    volumes: Array.isArray(raw.volumes) ? raw.volumes.map((v: any) => ({
-        id: Number(v.id),
-        name: v.name || '',
-        usable: Number(v.usable) || 0,
-        passed: Number(v.passed) || 0,
-        total: Number(v.total) || 0,
-        status: v.status || '',
-        completed: !!v.completed,
-        excluded: !!v.excluded,
-        inTask: Number(v.inTask) || 0,
-        recognized: Number(v.recognized) || 0,
-        confirmed: Number(v.confirmed) || 0,
-        failed: Number(v.failed) || 0,
-      })) : [],
-    ocrTaskId: raw.ocrTaskId != null ? String(raw.ocrTaskId) : null,
-    ocrTaskName: raw.ocrTaskName || null,
-    updatedAt: formatTime(raw.updatedAt),
+    doneCount: Number(raw.doneCount) || 0,
+    confirmedCount: Number(raw.confirmedCount) || 0,
+    processingCount: Number(raw.processingCount) || 0,
+    pendingCount: Number(raw.pendingCount) || 0,
+    failedCount: Number(raw.failedCount) || 0,
+    createdAt: formatTime(raw.createdAt),
+    updatedAt: formatTime(raw.updatedAt || raw.createdAt),
   };
 }
 

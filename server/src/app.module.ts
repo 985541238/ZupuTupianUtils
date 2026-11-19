@@ -1,4 +1,4 @@
-﻿import { Module } from '@nestjs/common';
+import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
@@ -12,6 +12,7 @@ import { Project } from './tasks/project.entity';
 import { Setting } from './settings/setting.entity';
 import { AiModel } from './settings/ai-model.entity';
 import { OcrModule } from './ocr/ocr.module';
+import { OcrProject } from './ocr/ocr-project.entity';
 import { OcrTask } from './ocr/ocr-task.entity';
 import { OcrPage } from './ocr/ocr-page.entity';
 import { AiUsageRecord } from './usage/ai-usage-record.entity';
@@ -26,7 +27,7 @@ import { UsageModule } from './usage/usage.module';
       username: process.env.DB_USER || 'zupu',
       password: process.env.DB_PASS || 'zupu123',
       database: process.env.DB_NAME || 'zupu_scan',
-      entities: [User, Task, TaskImage, Project, Setting, AiModel, OcrTask, OcrPage, AiUsageRecord],
+      entities: [User, Task, TaskImage, Project, Setting, AiModel, OcrProject, OcrTask, OcrPage, AiUsageRecord],
       synchronize: false,
       charset: 'utf8mb4',
     }),

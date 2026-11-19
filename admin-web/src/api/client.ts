@@ -335,25 +335,44 @@ export const api = {
     }),
   getDefaultFolder: () => request<{ path: string }>('/files/default-folder'),
 
-  // ---- OCR 识别任务 ----
-  getOcrTasks: () => request<any[]>('/ocr-tasks'),
-  getOcrSources: () => request<any[]>('/ocr-tasks/sources'),
-  syncOcrTask: (id: string | number) => request<{ added: number; task: any }>('/ocr-tasks/' + id + '/sync', { method: 'POST', body: '{}' }),
-  /** 从 OCR 项目里移除某个卷的识别内容（图片处理结果不受影响） */
-  removeOcrVolume: (taskId: string | number, volumeId: string | number) =>
-    request<any>(`/ocr-tasks/${taskId}/volumes/${volumeId}`, { method: 'DELETE' }),
-  /** 重新并入之前移除的卷 */
-  restoreOcrVolume: (taskId: string | number, volumeId: string | number) =>
-    request<any>(`/ocr-tasks/${taskId}/volumes/${volumeId}/restore`, { method: 'POST', body: '{}' }),
-  createOcrTask: (data: { name?: string; projectId: number | string; ocrModelId?: number | null }) =>
+  // ---- OCR 识别（独立功能：OCR 项目 → OCR 卷 → 页）----
+  /** OCR 项目列表（含卷数/页数/进度聚合） */
+  getOcrProjects: () => request<any[]>('/ocr-projects'),
+  createOcrProject: (data: { name: string; surname?: string; description?: string; rootPath?: string; autoStart?: boolean }) =>
+    request<any>('/ocr-projects', { method: 'POST', body: JSON.stringify(data) }),
+  renameOcrProject: (id: string | number, data: { name?: string; surname?: string; description?: string }) =>
+    request<any>('/ocr-projects/' + id, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteOcrProject: (id: string | number) => request<any>('/ocr-projects/' + id, { method: 'DELETE' }),
+  /** 项目根目录下的一级子目录（每个子目录可建一个卷，不自动建卷） */
+  getOcrProjectRootDirs: (id: string | number) => request<any>('/ocr-projects/' + id + '/root-dirs'),
+  rescanOcrProject: (id: string | number, autoStart = true) =>
+    request<{ projectId: number; createdVolumeIds: number[]; addedImages: number }>(`/ocr-projects/${id}/rescan`, {
+      method: 'POST',
+      body: JSON.stringify({ autoStart }),
+    }),
+  /** OCR 卷列表；不传 projectId 返回全部 */
+  getOcrTasks: (projectId?: number | string | null) =>
+    request<any[]>('/ocr-tasks' + (projectId != null && projectId !== '' ? `?projectId=${encodeURIComponent(String(projectId))}` : '')),
+  /** 建 OCR 卷：sourceFolder 为服务器上的图片目录（上传会话目录或桌面本机目录） */
+  createOcrTask: (data: { projectId: number | string; name: string; sourceFolder: string; autoStart?: boolean; clientType?: string }) =>
     request<any>('/ocr-tasks', { method: 'POST', body: JSON.stringify(data) }),
+  renameOcrTask: (id: string | number, data: { name: string }) =>
+    request<any>('/ocr-tasks/' + id, { method: 'PUT', body: JSON.stringify(data) }),
+  rescanOcrTask: (id: string | number, autoStart = true, sourceFolder?: string) =>
+    request<{ taskId: number; addedImages: number }>(`/ocr-tasks/${id}/rescan`, {
+      method: 'POST',
+      body: JSON.stringify({ autoStart, sourceFolder }),
+    }),
   getOcrTask: (id: string | number) => request<any>('/ocr-tasks/' + id),
   deleteOcrTask: (id: string | number) => request<any>('/ocr-tasks/' + id, { method: 'DELETE' }),
-  startOcrTask: (id: string | number, modelId?: number | null, volumeId?: number | null) =>
-    request<any>('/ocr-tasks/' + id + '/start', {
-      method: 'POST',
-      body: JSON.stringify({ ...(modelId ? { modelId } : {}), ...(volumeId ? { volumeId } : {}) }),
-    }),
+  startOcrTask: (id: string | number) =>
+    request<any>('/ocr-tasks/' + id + '/start', { method: 'POST', body: '{}' }),
+  /** 往卷里加一张图片：从上传会话取文件，insertAt = 插到第几页之前（默认末尾） */
+  appendOcrPage: (id: string | number, data: { uploadSessionId: string; fileName: string; insertAt?: number }) =>
+    request<{ page: any; task: any }>(`/ocr-tasks/${id}/pages/append`, { method: 'POST', body: JSON.stringify(data) }),
+  /** 拖拽调整页顺序：pageIds = 完整新顺序 */
+  reorderOcrPages: (id: string | number, pageIds: Array<string | number>) =>
+    request<{ ok: boolean; order: number[] }>(`/ocr-tasks/${id}/pages/order`, { method: 'PUT', body: JSON.stringify({ pageIds }) }),
   getOcrPages: (id: string | number) => request<any[]>('/ocr-tasks/' + id + '/pages'),
   getOcrPage: (id: string | number, pageId: string | number) => request<any>(`/ocr-tasks/${id}/pages/${pageId}`),
   saveOcrPage: (id: string | number, pageId: string | number, columns: any[]) =>
@@ -404,6 +423,13 @@ export const api = {
     request<{ apiKey: string; secretKey: string; apiKeyMasked: string; secretKeyMasked: string; configured: boolean; price: number | null }>('/settings/baidu-ocr'),
   saveBaiduOcrConfig: (body: { apiKey?: string; secretKey?: string; price?: number | string | null }) =>
     request<{ apiKey: string; secretKey: string; apiKeyMasked: string; secretKeyMasked: string; configured: boolean; price: number | null }>('/settings/baidu-ocr', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  getLayoutModelConfig: () =>
+    request<{ platform: string; model: string; displayName: string; configured: boolean; updatedAt: string | null }>('/settings/layout-model'),
+  saveLayoutModelConfig: (body: { platform?: string; model?: string; displayName?: string }) =>
+    request<{ platform: string; model: string; displayName: string; configured: boolean; updatedAt: string | null }>('/settings/layout-model', {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
@@ -518,6 +544,6 @@ export async function previewFastBlob(
   return res.blob();
 }
 
-export function ocrExportUrl(taskId: string | number, mode: 'columns' | 'flow' = 'columns', volumeId?: number | null): string {
-  return `${BASE}/ocr-tasks/${taskId}/export?mode=${mode}${volumeId ? '&volumeId=' + volumeId : ''}&access_token=${encodeURIComponent(getToken())}`;
+export function ocrExportUrl(taskId: string | number, mode: 'columns' | 'flow' = 'columns'): string {
+  return `${BASE}/ocr-tasks/${taskId}/export?mode=${mode}&access_token=${encodeURIComponent(getToken())}`;
 }

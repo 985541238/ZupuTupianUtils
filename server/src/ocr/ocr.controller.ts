@@ -3,25 +3,22 @@ import { Response } from 'express';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { OcrService } from './ocr.service';
 
+/** OCR 卷 / 页：OCR 独立功能，页的图片来自 OCR 自己导入的原图。 */
 @Controller('ocr-tasks')
 @UseGuards(JwtAuthGuard)
 export class OcrController {
   constructor(private readonly ocr: OcrService) {}
 
+  /** 卷列表；可带 ?projectId= 只列某个 OCR 项目下的卷 */
   @Get()
-  list(@Req() req: any) {
-    return this.ocr.list(req.user.id);
+  list(@Req() req: any, @Query('projectId') projectId?: string) {
+    return this.ocr.list(req.user.id, Number(projectId) || undefined);
   }
 
-  /** 可用来建 OCR 任务的图片处理任务（已完成，且有通过审核的页面） */
-  @Get('sources')
-  sources(@Req() req: any) {
-    return this.ocr.sources(req.user.id);
-  }
-
+  /** 建卷：sourceFolder 为服务器上的图片目录（上传会话目录或桌面本机目录） */
   @Post()
   create(@Req() req: any, @Body() body: any) {
-    return this.ocr.create(req.user.id, body || {});
+    return this.ocr.createVolume(req.user.id, body || {});
   }
 
   @Get(':id')
@@ -29,39 +26,46 @@ export class OcrController {
     return this.ocr.getView(req.user.id, id);
   }
 
+  @Put(':id')
+  rename(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Body() body: { name?: string }) {
+    return this.ocr.renameVolume(req.user.id, id, body?.name);
+  }
+
   @Delete(':id')
   remove(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
-    return this.ocr.remove(req.user.id, id);
+    return this.ocr.deleteVolume(req.user.id, id);
   }
 
-  /** 从 OCR 项目里移除某个卷的识别内容（图片处理结果不受影响） */
-  @Delete(':id/volumes/:volumeId')
-  removeVolume(
-    @Req() req: any,
-    @Param('id', ParseIntPipe) id: number,
-    @Param('volumeId', ParseIntPipe) volumeId: number,
-  ) {
-    return this.ocr.removeVolume(req.user.id, id, volumeId);
-  }
-
-  /** 重新并入之前移除的卷 */
-  @Post(':id/volumes/:volumeId/restore')
-  restoreVolume(
-    @Req() req: any,
-    @Param('id', ParseIntPipe) id: number,
-    @Param('volumeId', ParseIntPipe) volumeId: number,
-  ) {
-    return this.ocr.restoreVolume(req.user.id, id, volumeId);
+  /** 重新扫描卷目录：只登记新图片（同名/同内容自动跳过） */
+  @Post(':id/rescan')
+  rescan(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Body() body: { autoStart?: boolean; sourceFolder?: string }) {
+    return this.ocr.rescanVolume(req.user.id, id, body?.autoStart !== false, body?.sourceFolder);
   }
 
   @Post(':id/start')
-  start(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Body() body: any) {
-    return this.ocr.start(req.user.id, id, body || {});
+  start(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
+    return this.ocr.start(req.user.id, id);
   }
 
   @Get(':id/pages')
   pages(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
     return this.ocr.listPages(req.user.id, id);
+  }
+
+  /** 往卷里加一张图片（从上传会话目录取文件；insertAt = 插入到第几页之前，默认末尾） */
+  @Post(':id/pages/append')
+  appendPage(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: { uploadSessionId?: string; fileName?: string; insertAt?: number },
+  ) {
+    return this.ocr.appendPage(req.user.id, id, body || {});
+  }
+
+  /** 拖拽调整页顺序：pageIds 为完整的新顺序 */
+  @Put(':id/pages/order')
+  reorderPages(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Body() body: { pageIds?: number[] }) {
+    return this.ocr.reorderPages(req.user.id, id, body?.pageIds || []);
   }
 
   @Get(':id/pages/:pageId')
@@ -129,12 +133,6 @@ export class OcrController {
     return this.ocr.recognizePage(req.user.id, id, pageId, body || {});
   }
 
-  /** 把项目里新通过的页补进这个 OCR 任务 */
-  @Post(':id/sync')
-  sync(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
-    return this.ocr.sync(req.user.id, id);
-  }
-
   @Post(':id/confirm')
   confirmAll(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
     return this.ocr.confirmAll(req.user.id, id);
@@ -147,8 +145,8 @@ export class OcrController {
   }
 
   @Get(':id/export')
-  async export(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Query('mode') mode: string, @Query('volumeId') volumeId: string, @Res() res: Response) {
-    const r = await this.ocr.exportText(req.user.id, id, mode === 'flow' ? 'flow' : 'columns', Number(volumeId) || undefined);
+  async export(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Query('mode') mode: string, @Res() res: Response) {
+    const r = await this.ocr.exportText(req.user.id, id, mode === 'flow' ? 'flow' : 'columns');
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(r.fileName)}`);
     res.send(r.text);
