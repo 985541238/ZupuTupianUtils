@@ -5,8 +5,9 @@ export class AiModel {
   @PrimaryGeneratedColumn({ type: 'bigint', unsigned: true })
   id: number;
 
+  /** ocr=能看图整理阅读顺序；clean=图片处理；analyze=只处理纯文字（整卷分析） */
   @Column({ length: 16 })
-  purpose: 'ocr' | 'clean';
+  purpose: 'ocr' | 'clean' | 'analyze';
 
   @Column({ name: 'display_name', length: 64 })
   displayName: string;

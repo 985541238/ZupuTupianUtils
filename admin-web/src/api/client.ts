@@ -445,6 +445,8 @@ export const api = {
   testModel: (body: { id?: number; purpose?: 'ocr' | 'clean'; platform?: string; baseUrl?: string; apiKey?: string; model?: string }) =>
     request<any>('/settings/models/test', { method: 'POST', body: JSON.stringify(body || {}) }),
   listOcrModels: () => request<any[]>('/settings/models/ocr'),
+  /** 整卷分析可选的纯文字模型（能看图的识别模型排几万字会漏人） */
+  listAnalyzeModels: () => request<any[]>('/settings/models/analyze'),
   getBaiduOcrConfig: () =>
     request<{ apiKey: string; secretKey: string; apiKeyMasked: string; secretKeyMasked: string; configured: boolean; price: number | null }>('/settings/baidu-ocr'),
   saveBaiduOcrConfig: (body: { apiKey?: string; secretKey?: string; price?: number | string | null }) =>

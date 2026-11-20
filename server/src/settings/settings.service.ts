@@ -527,6 +527,28 @@ export class SettingsService implements OnModuleInit {
     return rows.find((m) => m.platform !== 'baidu' && !/baidu/i.test(m.model || '')) || null;
   }
 
+  /**
+   * 整卷分析用的模型：只吃文字，不吃图。
+   * 逐页整理要能看图（OCR 漏了名字得从图上读回来），整卷分析是纯文本长文，
+   * 用视觉小模型去排几万字，它会漏人、会自己编世次——这两件事得分开选模型。
+   */
+  async analyzeModel(): Promise<AiModel | null> {
+    const rows = await this.models.find({
+      where: { purpose: 'analyze', enabled: 1 },
+      order: { isDefault: 'DESC', id: 'ASC' },
+    });
+    return rows[0] || (await this.visionOcrModel());
+  }
+
+  async listAnalyzeModels() {
+    const rows = await this.models.find({
+      where: { purpose: 'analyze', enabled: 1 },
+      order: { isDefault: 'DESC', id: 'ASC' },
+    });
+    const keyed = await this.platformsWithKey();
+    return rows.map((m) => this.toPublicModel(m, keyed));
+  }
+
   async saveModel(id: number | null, body: Partial<AiModel>) {
     const existing = id ? await this.models.findOne({ where: { id } }) : null;
     if (id && !existing) throw new NotFoundException('模型不存在');

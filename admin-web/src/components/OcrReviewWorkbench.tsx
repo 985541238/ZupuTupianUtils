@@ -3395,6 +3395,12 @@ const OcrToc: React.FC<{ taskId: string; pages: OcrPage[]; onJump: (pageId: stri
   /** 整卷分析结果：一次把整卷文字交给模型，排出全卷结构与世系 */
   const [vol, setVol] = useState<VolumeToc | null>(() => loadVolumeToc(taskId));
   const [analyzing, setAnalyzing] = useState(false);
+  /** 整卷分析用哪个模型：视觉模型排几万字会漏人，这里单独给纯文字模型 */
+  const [analyzeModels, setAnalyzeModels] = useState<Array<{ id: number; displayName: string; model: string }>>([]);
+  const [analyzeModelId, setAnalyzeModelId] = useState<number | null>(() => {
+    const v = Number(localStorage.getItem('ocr-analyze-model') || 0);
+    return v > 0 ? v : null;
+  });
   /** 左栏显示 AI 排的篇目，还是原来的全书文字 */
   const [leftView, setLeftView] = useState<'ai' | 'text'>(() => (loadVolumeToc(taskId) ? 'ai' : 'text'));
 
@@ -3530,16 +3536,35 @@ const OcrToc: React.FC<{ taskId: string; pages: OcrPage[]; onJump: (pageId: stri
   const chartPersons = aiPersons.length ? aiPersons : gen?.persons || [];
   const selected = chartPersons.find((p) => p.key === sel) || null;
 
+  useEffect(() => {
+    let alive = true;
+    api
+      .listAnalyzeModels()
+      .then((list) => {
+        if (!alive) return;
+        const rows = (Array.isArray(list) ? list : []).map((m: any) => ({
+          id: Number(m.id),
+          displayName: String(m.displayName || m.model || ''),
+          model: String(m.model || ''),
+        }));
+        setAnalyzeModels(rows);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   /** 整卷分析：整卷文字一次发给模型，让它通篇排一遍——一页一页发看不全上下文，排出来就断 */
   const analyze = useCallback(async () => {
     if (analyzing) return;
     const ok = await appConfirm(
-      `把整卷文字（约 ${totalChars} 字）一次发给模型通篇排篇目。\n\n不重新识别，只花一次对话模型的钱，通常几十秒到两三分钟。排完会替换掉左栏现在按规则拼的版本（随时可以再分析一次）。`,
+      `把整卷文字（约 ${totalChars} 字）交给「${analyzeModels.find((m) => m.id === analyzeModelId)?.displayName || analyzeModels[0]?.displayName || '默认模型'}」通篇排篇目。\n\n不重新识别，只花对话模型的钱，通常一两分钟。排完会替换掉左栏现在按规则拼的版本（随时可以再分析一次）。`,
     );
     if (!ok) return;
     setAnalyzing(true);
     try {
-      const r = await api.analyzeOcrVolume(taskId);
+      const r = await api.analyzeOcrVolume(taskId, analyzeModelId);
       const next: VolumeToc = {
         summary: String(r?.summary || ''),
         sections: Array.isArray(r?.sections) ? r.sections : [],
@@ -3557,7 +3582,7 @@ const OcrToc: React.FC<{ taskId: string; pages: OcrPage[]; onJump: (pageId: stri
     } finally {
       setAnalyzing(false);
     }
-  }, [analyzing, taskId, totalChars]);
+  }, [analyzing, taskId, totalChars, analyzeModelId]);
 
   /** 按页号跳到校对页 */
   const jumpPageNo = useCallback(
@@ -3711,6 +3736,25 @@ const OcrToc: React.FC<{ taskId: string; pages: OcrPage[]; onJump: (pageId: stri
             placeholder="搜文字 / 页号"
             className="h-8 w-44 px-3 rounded-lg bg-white border border-black/[0.08] text-[12px] focus:outline-none focus:border-[#0071E3]"
           />
+          {analyzeModels.length ? (
+            <select
+              value={analyzeModelId ?? analyzeModels[0]?.id ?? ''}
+              onChange={(e) => {
+                const id = Number(e.target.value) || null;
+                setAnalyzeModelId(id);
+                if (id) localStorage.setItem('ocr-analyze-model', String(id));
+                else localStorage.removeItem('ocr-analyze-model');
+              }}
+              title="整卷分析用哪个模型：这几个是纯文字的长文模型，比能看图的小模型更适合通篇排世系"
+              className="h-8 max-w-[180px] px-2 rounded-lg bg-white border border-black/[0.08] text-[11px] text-[#1D1D1F] focus:outline-none focus:border-[#0071E3] cursor-pointer"
+            >
+              {analyzeModels.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.displayName}
+                </option>
+              ))}
+            </select>
+          ) : null}
           <button
             onClick={() => void analyze()}
             disabled={analyzing || loading || !pages.length}

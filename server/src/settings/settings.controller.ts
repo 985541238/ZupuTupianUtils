@@ -190,6 +190,11 @@ export class SettingsController {
     return [this.settings.toPublicModel(m)];
   }
 
+  @Get('models/analyze')
+  analyzeModels() {
+    return this.settings.listAnalyzeModels();
+  }
+
   @Get('baidu-ocr')
   baiduOcrConfig() {
     return this.settings.getBaiduOcrConfig();

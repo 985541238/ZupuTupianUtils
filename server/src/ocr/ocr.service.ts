@@ -2901,7 +2901,7 @@ export class OcrService implements OnModuleInit {
     });
     if (!parts.length) throw new BadRequestException('这一卷还没有识别出文字。先到「校对」把页识别完，再来分析。');
 
-    const model = body?.modelId ? await this.settings.getModel(Number(body.modelId)) : await this.settings.visionOcrModel();
+    const model = body?.modelId ? await this.settings.getModel(Number(body.modelId)) : await this.settings.analyzeModel();
     if (!model) throw new BadRequestException('没有可用的对话模型。请在「模型」里启用一个非百度的模型。');
     try {
       await this.aliyun.assertReady(model);
