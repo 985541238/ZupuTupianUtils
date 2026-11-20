@@ -112,6 +112,17 @@ export class OcrController {
     return this.ocr.recognizeColumn(req.user.id, id, pageId, col, body || {});
   }
 
+  /** 手动框选补认：{ box: [x1,y1,x2,y2] }（原图像素），只识别这一小块并补进这一页 */
+  @Post(':id/pages/:pageId/area-recognize')
+  recognizeArea(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('pageId', ParseIntPipe) pageId: number,
+    @Body() body: any,
+  ) {
+    return this.ocr.recognizeArea(req.user.id, id, pageId, body || {});
+  }
+
   @Post(':id/pages/:pageId/restore')
   restore(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Param('pageId', ParseIntPipe) pageId: number) {
     return this.ocr.restorePage(req.user.id, id, pageId);
@@ -122,10 +133,15 @@ export class OcrController {
     return this.ocr.reopenPage(req.user.id, id, pageId);
   }
 
-  /** 把这一页的图和识别文字交给能看图的模型，按书的读法只整理这一页 */
+  /** 把这一页的图和识别文字交给能看图的模型，按书的读法只整理这一页；可带上一页结果做衔接 */
   @Post(':id/pages/:pageId/reading')
-  reading(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Param('pageId', ParseIntPipe) pageId: number) {
-    return this.ocr.orderPageReading(req.user.id, id, pageId);
+  reading(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('pageId', ParseIntPipe) pageId: number,
+    @Body() body: any,
+  ) {
+    return this.ocr.orderPageReading(req.user.id, id, pageId, body || {});
   }
 
   /** 单页重新识别（会再次产生费用，覆盖人工修改） */
@@ -154,6 +170,12 @@ export class OcrController {
   @Get(':id/genealogy')
   genealogy(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
     return this.ocr.genealogy(req.user.id, id);
+  }
+
+  /** 整卷分析：把整卷识别文字一次交给对话模型，排出全卷结构与世系（不重新识别） */
+  @Post(':id/toc-analyze')
+  analyzeVolume(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Body() body: any) {
+    return this.ocr.analyzeVolume(req.user.id, id, body || {});
   }
 
   @Get(':id/export')

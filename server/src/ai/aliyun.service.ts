@@ -17,6 +17,8 @@ export interface OcrColumn {
   box: [number, number, number, number] | null;
   /** 每个字的 0~1000 相对坐标（百度等带字位置的引擎才有），和 text 逐字对应 */
   charBoxes?: [number, number, number, number][];
+  /** 每个字的置信度 0~1，和 text 逐字对应（百度 char_probability） */
+  charProbs?: number[];
 }
 
 export interface OcrUncertain {
@@ -38,6 +40,50 @@ export interface Usage {
   tokensIn: number;
   tokensOut: number;
   images: number;
+}
+
+/** 单字置信度低于它就算「没把握」，界面上标黄让人核 */
+const LOW_CHAR_PROB = 0.6;
+/** 拿不到单字置信度时退回整行判断（比以前 0.85 更保守，免得一行几十字全标红） */
+const LOW_LINE_PROB = 0.75;
+
+/**
+ * 标出需要人核的字：有单字置信度就一个字一个字判，
+ * 没有才退回整行——否则「一行平均 0.96、里面藏着一个 0.33」这种情况根本抓不到。
+ */
+function markUncertain(
+  out: OcrUncertain[],
+  col: number,
+  text: string,
+  charProbs?: number[],
+  lineProb?: number,
+) {
+  const chars = Array.from(text || '');
+  if (charProbs && charProbs.length === chars.length) {
+    chars.forEach((ch, idx) => {
+      const p = charProbs[idx];
+      if (p == null || p >= LOW_CHAR_PROB) return;
+      out.push({
+        col,
+        index: idx,
+        char: ch,
+        candidates: [],
+        reason: `这个字把握不大（置信度 ${Math.round(p * 100)}%），对图核一下`,
+      });
+    });
+    return;
+  }
+  if (lineProb != null && lineProb < LOW_LINE_PROB) {
+    chars.forEach((ch, idx) =>
+      out.push({
+        col,
+        index: idx,
+        char: ch,
+        candidates: [],
+        reason: `这一列整体把握不大（置信度 ${Math.round(lineProb * 100)}%）`,
+      }),
+    );
+  }
 }
 
 /**
@@ -266,18 +312,17 @@ export class AliyunService {
     const k = await this.baiduOcrKeys();
     const usage: Usage = { tokensIn: 0, tokensOut: 0, images: 1 };
 
-    // 族谱/表格页：先按「表格行带」切块识别，能拿到结果就不走整页（整页会把同 x 的跨代列合成一行）
-    if (opts.blocks !== false) {
+    // 只用「通用文字识别（高精度含位置版）」整页识别。
+    // 表格识别 V2 的行带边界常常压在字上，按行带裁图会把边上的字切掉一半
+    // （实测「生子三華一華二華三」被切成「華一華二華」），而且白费一份额度。
+    // 跨代同 x 列的问题交给 readingOrder 的几何排序处理，不再靠切行带。
+    if (opts.blocks === true) {
       try {
         const blockColumns = await baiduBlocksOcr(imagePath, k.apiKey, k.secretKey);
         if (blockColumns && blockColumns.length) {
-          const columns: OcrColumn[] = blockColumns.map((c) => ({ text: c.text, box: c.box, charBoxes: c.charBoxes }));
+          const columns: OcrColumn[] = blockColumns.map((c) => ({ text: c.text, box: c.box, charBoxes: c.charBoxes, charProbs: c.charProbs }));
           const uncertain: OcrUncertain[] = [];
-          blockColumns.forEach((c, ci) => {
-            if (c.prob != null && c.prob < 0.85) {
-              Array.from(c.text).forEach((ch, idx) => uncertain.push({ col: ci, index: idx, char: ch, candidates: [], reason: `这一列整体把握不大（置信度 ${Math.round(c.prob! * 100)}%）` }));
-            }
-          });
+          blockColumns.forEach((c, ci) => markUncertain(uncertain, ci, c.text, c.charProbs, c.prob));
           return { result: { columns, uncertain }, usage, raw: JSON.stringify({ mode: 'blocks', columns: columns.length }) };
         }
       } catch (e) {
@@ -297,14 +342,10 @@ export class AliyunService {
       }
       throw e;
     }
-    const columns: OcrColumn[] = out.columns.map((c) => ({ text: c.text, box: c.box, charBoxes: c.charBoxes }));
+    const columns: OcrColumn[] = out.columns.map((c) => ({ text: c.text, box: c.box, charBoxes: c.charBoxes, charProbs: c.charProbs }));
     // 百度给的是整行置信度：偏低的整行标成待核对
     const uncertain: OcrUncertain[] = [];
-    out.columns.forEach((c, ci) => {
-      if (c.prob != null && c.prob < 0.85) {
-        Array.from(c.text).forEach((ch, idx) => uncertain.push({ col: ci, index: idx, char: ch, candidates: [], reason: `这一列整体把握不大（置信度 ${Math.round(c.prob! * 100)}%）` }));
-      }
-    });
+    out.columns.forEach((c, ci) => markUncertain(uncertain, ci, c.text, c.charProbs, c.prob));
     if (!columns.length) throw new OcrParseError('百度文字识别没有识别出任何文字（图片可能太淡或是空白）。', usage, out.raw);
     return { result: { columns, uncertain }, usage, raw: out.raw };
   }
@@ -349,6 +390,35 @@ export class AliyunService {
       ...(!cfg.platform || cfg.platform === 'aliyun' ? { enable_thinking: false } : {}),
     });
     return { ok: true, ms: Date.now() - t, reply: content.slice(0, 50), usage };
+  }
+
+  /**
+   * 纯文字对话（不带图）。整卷谱文的整理分析用它：
+   * 一页一页发图又贵又慢，整卷文字才几万字，一次发完让模型通篇看，比逐页拼接准得多。
+   */
+  async textChat(
+    model: AiModel,
+    prompt: string,
+    opts: { system?: string; maxTokens?: number; idleMs?: number } = {},
+  ): Promise<{ content: string; usage: Usage; finish: string | null }> {
+    if (this.mock) return { content: '{"generations":[],"issues":[]}', usage: { tokensIn: 0, tokensOut: 0, images: 0 }, finish: 'stop' };
+    if (isBaiduOcrModel(model)) throw new AiConfigError('百度文字识别只会出字，不能做整卷分析。请在模型里选一个对话模型。', 'model', 'baidu');
+    const cfg = await this.assertReady(model);
+    const body: any = {
+      model: model.model,
+      // 整卷整理要求严守原文，不发挥
+      temperature: 0,
+      max_tokens: opts.maxTokens ?? 8192,
+      messages: [
+        ...(opts.system ? [{ role: 'system', content: opts.system }] : []),
+        { role: 'user', content: prompt },
+      ],
+      stream: true,
+      stream_options: { include_usage: true },
+    };
+    if (!cfg.platform || cfg.platform === 'aliyun') body.enable_thinking = false;
+    const { content, usage, finish } = await this.streamChat(cfg, body, { idleMs: opts.idleMs ?? 180_000 });
+    return { content, usage, finish };
   }
 
   private async streamChat(

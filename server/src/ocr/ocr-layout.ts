@@ -6,6 +6,8 @@ export interface LayoutInputColumn {
   box: [number, number, number, number] | null;
   /** 引擎给出的每个字的位置（0~1000），与 text 逐字对应；有就直接用，不再自己切格子 */
   charBoxes?: [number, number, number, number][];
+  /** 引擎给出的每个字的置信度 0~1，与 text 逐字对应 */
+  charProbs?: number[];
 }
 
 export interface LayoutChar {
@@ -13,6 +15,8 @@ export interface LayoutChar {
   t: string;
   /** 在图片上的像素位置 [x1,y1,x2,y2] */
   b: [number, number, number, number];
+  /** 引擎给的置信度 0~1；缺省表示没有这个信息（不是 0） */
+  p?: number;
   /** 1 = 模型没把握 / □，需要人看 */
   u?: 0 | 1;
   /** 1 = 人工改过 */
@@ -218,16 +222,20 @@ interface FlatChar {
   cx: number;
   cy: number;
   h: number;
+  /** 原始字对象：重排后要原样带回去，别把置信度 p / 改动标记 e / 空白标记 z 丢掉 */
+  src: LayoutChar;
+  /** 来自第几列（重排时用来带回这一列的字数估算） */
+  from: number;
 }
 
 function flattenChars(cols: LayoutColumn[]): FlatChar[] {
   const out: FlatChar[] = [];
-  for (const c of cols) {
+  cols.forEach((c, ci) => {
     for (const ch of c.chars || []) {
       const h = ch.b[3] - ch.b[1];
-      out.push({ t: ch.t, b: ch.b, cx: (ch.b[0] + ch.b[2]) / 2, cy: (ch.b[1] + ch.b[3]) / 2, h });
+      out.push({ t: ch.t, b: ch.b, cx: (ch.b[0] + ch.b[2]) / 2, cy: (ch.b[1] + ch.b[3]) / 2, h, src: ch, from: ci });
     }
-  }
+  });
   return out;
 }
 
@@ -441,7 +449,15 @@ export function arrangeReadingColumns(cols: LayoutColumn[]): LayoutColumn[] {
   const groups = clusterByX(chars, 42);
   const columns: LayoutColumn[] = groups.map((g) => {
     const sorted = [...g].sort((a, b) => a.cy - b.cy);
-    return { id: 0, box: unionBox(sorted.map((c) => ({ t: c.t, b: c.b }))), chars: sorted.map((c) => ({ t: c.t, b: c.b })) };
+    // 字原样带回去（置信度、改动标记、空白标记都在里面），只按新的上下顺序排
+    const col: LayoutColumn = { id: 0, box: unionBox(sorted.map((c) => ({ t: c.t, b: c.b }))), chars: sorted.map((c) => ({ ...c.src })) };
+    // 这一簇刚好来自原来的一列 → 把「按墨迹估的字数」带过来，前端才能提示漏字/并字
+    const from = new Set(sorted.map((c) => c.from));
+    if (from.size === 1) {
+      const est = src[[...from][0]]?.x;
+      if (est) col.x = est;
+    }
+    return col;
   });
   columns.sort((a, b) => b.box[0] - a.box[0] || a.box[1] - b.box[1]);
   return columns.map((c, i) => ({ ...c, id: i }));
@@ -637,6 +653,9 @@ export async function layoutPage(
       chars: chars.map((ch, k) => {
         const hit = un.find((u) => u.index === k);
         const item: LayoutChar = { t: ch, b: scaleBox(cells[k], 1 / s, W, H) };
+        // 引擎的单字置信度：只记下来，标不标黄由前端按阈值决定
+        const cp = c.charProbs?.[k];
+        if (cp != null && Number.isFinite(cp)) item.p = Math.max(0, Math.min(1, cp));
         // 这一格在图上几乎没有笔画 → 空白处，不能当成这个字的位置，要让人看到
         if (ch !== '□' && inkDensity(ink, w, h, cells[k]) < 0.012) {
           item.z = 1;

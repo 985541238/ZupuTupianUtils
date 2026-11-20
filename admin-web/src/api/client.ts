@@ -375,14 +375,24 @@ export const api = {
     request<{ ok: boolean; order: number[] }>(`/ocr-tasks/${id}/pages/order`, { method: 'PUT', body: JSON.stringify({ pageIds }) }),
   getOcrPages: (id: string | number) => request<any[]>('/ocr-tasks/' + id + '/pages'),
   getOcrPage: (id: string | number, pageId: string | number) => request<any>(`/ocr-tasks/${id}/pages/${pageId}`),
-  orderOcrPage: (id: string | number, pageId: string | number) =>
+  /** 整理一页的阅读顺序；传 prev（上一页的人）就让模型接着上一页往下读，跨页的注文和世次才接得上 */
+  orderOcrPage: (
+    id: string | number,
+    pageId: string | number,
+    prev?: { pageNo?: number; people?: Array<{ gen?: string; order?: string; name?: string; text?: string }> },
+  ) =>
     request<{
       pageId: string;
       model: string;
       note?: string;
       suspect?: boolean;
       people: Array<{ gen: string; order: string; name: string; text: string }>;
-    }>(`/ocr-tasks/${id}/pages/${pageId}/reading`, { method: 'POST', body: '{}' }),
+      /** 上一页某人的注文在这一页接着写 */
+      continues?: Array<{ of: string; text: string }>;
+    }>(`/ocr-tasks/${id}/pages/${pageId}/reading`, {
+      method: 'POST',
+      body: JSON.stringify(prev && (prev.people?.length || prev.pageNo) ? { prev } : {}),
+    }),
   saveOcrPage: (id: string | number, pageId: string | number, columns: any[]) =>
     request<any>(`/ocr-tasks/${id}/pages/${pageId}`, { method: 'PUT', body: JSON.stringify({ columns }) }),
   confirmOcrPage: (id: string | number, pageId: string | number, columns?: any[]) =>
@@ -398,9 +408,15 @@ export const api = {
     }),
   recognizeOcrColumn: (id: string | number, pageId: string | number, col: number, modelId?: number | null) =>
     request<any>(`/ocr-tasks/${id}/pages/${pageId}/columns/${col}/recognize`, { method: 'POST', body: JSON.stringify(modelId ? { modelId } : {}) }),
+  /** 手动框选补认：box 是原图像素 [x1,y1,x2,y2]，只识别这一小块 */
+  recognizeOcrArea: (id: string | number, pageId: string | number, box: number[]) =>
+    request<any>(`/ocr-tasks/${id}/pages/${pageId}/area-recognize`, { method: 'POST', body: JSON.stringify({ box }) }),
   restoreOcrPage: (id: string | number, pageId: string | number) =>
     request<any>(`/ocr-tasks/${id}/pages/${pageId}/restore`, { method: 'POST', body: '{}' }),
   confirmOcrTask: (id: string | number) => request<any>('/ocr-tasks/' + id + '/confirm', { method: 'POST', body: '{}' }),
+  /** 整卷分析：把整卷识别文字一次交给对话模型，排出全卷结构与世系（不重新识别） */
+  analyzeOcrVolume: (id: string | number, modelId?: number | null) =>
+    request<any>(`/ocr-tasks/${id}/toc-analyze`, { method: 'POST', body: JSON.stringify(modelId ? { modelId } : {}) }),
   getOcrText: (id: string | number) => request<any>('/ocr-tasks/' + id + '/text'),
   /** 从识别结果里抽族谱世系（人名 / 世次 / 父子线），不重新识别 */
   getOcrGenealogy: (id: string | number) => request<any>('/ocr-tasks/' + id + '/genealogy'),

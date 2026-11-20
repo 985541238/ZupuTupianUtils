@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { OcrTask, OcrPage, OcrColumn, OcrChar, OcrTextPage } from '../types';
+import { OcrTask, OcrPage, OcrColumn, OcrChar, OcrTextPage, ColumnPerson } from '../types';
 import { orderColumnsLeftToRight } from '../readingOrder';
 import { ReadingRow, charsOutsideRows, loadReading, readRowColumns, rowsForPage, writeRows } from '../readingRows';
 import { api, ocrExportUrl, viewThumbUrl } from '../api/client';
@@ -32,6 +32,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Crosshair,
+  SquareDashed,
   GripVertical,
 } from 'lucide-react';
 
@@ -118,8 +119,199 @@ export function savePageReadings(taskId: string, map: Record<string, PagePerson[
   } catch {}
 }
 
+// ---------------------------------------------------------------------------
+// 整卷分析（一次把整卷文字交给模型，排出全卷结构与世系）
+// ---------------------------------------------------------------------------
+
+export type VolumePerson = {
+  name: string;
+  order: string;
+  father: string;
+  courtesy: string;
+  spouse: string;
+  sons: string[];
+  note: string;
+  pages: number[];
+};
+
+export type VolumeToc = {
+  summary: string;
+  sections: Array<{ title: string; pages: number[] }>;
+  generations: Array<{ gen: string; persons: VolumePerson[] }>;
+  issues: Array<{ page: number; text: string; why: string }>;
+  /** 输出被模型的长度上限截断了：尾部可能少几个人 */
+  truncated?: boolean;
+  /** 哪个模型排的、什么时候排的 */
+  model?: string;
+  at?: number;
+};
+
+const volumeStoreKey = (taskId: string) => `ocr-volume-toc:${taskId}`;
+
+export function loadVolumeToc(taskId: string): VolumeToc | null {
+  try {
+    const raw = localStorage.getItem(volumeStoreKey(taskId));
+    if (!raw) return null;
+    const v = JSON.parse(raw);
+    if (!v || !Array.isArray(v.generations) || !v.generations.length) return null;
+    return {
+      summary: String(v.summary || ''),
+      sections: Array.isArray(v.sections) ? v.sections : [],
+      generations: v.generations,
+      issues: Array.isArray(v.issues) ? v.issues : [],
+      truncated: !!v.truncated,
+      model: v.model,
+      at: Number(v.at) || 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function saveVolumeToc(taskId: string, v: VolumeToc | null) {
+  try {
+    if (!v) localStorage.removeItem(volumeStoreKey(taskId));
+    else localStorage.setItem(volumeStoreKey(taskId), JSON.stringify(v));
+  } catch {}
+}
+
+const CN_DIGIT: Record<string, number> = { 〇: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+
+/** 「一世」「十二世」「二十世」→ 数字 */
+export function genNumberOf(label: string): number | null {
+  const m = String(label || '').match(/([〇一二三四五六七八九十]{1,3})\s*世/);
+  const t = (m ? m[1] : String(label || '').trim()).replace(/\s/g, '');
+  if (!t) return null;
+  if (t === '十') return 10;
+  const m2 = t.match(/^([一二三四五六七八九])?十([一二三四五六七八九])?$/);
+  if (m2) return (m2[1] ? CN_DIGIT[m2[1]] : 1) * 10 + (m2[2] ? CN_DIGIT[m2[2]] : 0);
+  if (t.length === 1) return CN_DIGIT[t] ?? null;
+  if (t.length === 2 && CN_DIGIT[t[0]] != null && CN_DIGIT[t[1]] != null && CN_DIGIT[t[0]] > 0 && CN_DIGIT[t[1]] < 10 && t[1] !== '十') {
+    // 十四 = 14 这种已经在上面的 m2 处理；到这里是「二三」这类怪写法，放弃
+    return null;
+  }
+  return null;
+}
+
+/** 「長子」「次子」「三子」→ 1/2/3 */
+export function birthOrderOf(order: string): number | null {
+  const m = String(order || '').match(/(長|长|次|三|四|五|六|七|八|九|十|一|二)子/);
+  if (!m) return null;
+  const map: Record<string, number> = { 長: 1, 长: 1, 一: 1, 次: 2, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+  return map[m[1]] ?? null;
+}
+
 /**
- * 通读：一个人一段，抬头是「世次 排行 名」，后面直接跟这一格按图上顺序连好的文字。
+ * 子嗣顺序按原文来：注文里「生子三 甲、乙、丙」是书上的次序，AI 常排乱（元仲、元季、元伯 这种）。
+ * 拿注文最后那段「生子…」出现的位置给已有名字排序，名字本身就是原文里的，只是调整先后。
+ */
+export function orderSonsByNote(note: string, sons: string[]): string[] {
+  if (!sons.length || !note) return sons;
+  const at = Math.max(note.lastIndexOf('生子'), note.lastIndexOf('子一'), note.lastIndexOf('子二'), note.lastIndexOf('子三'));
+  const tail = at >= 0 ? note.slice(at) : note;
+  const pos = sons.map((s, i) => ({ s, i, p: tail.indexOf(s) }));
+  if (!pos.some((x) => x.p >= 0)) return sons;
+  return pos
+    .sort((a, b) => (a.p < 0 ? 1e9 : a.p) - (b.p < 0 ? 1e9 : b.p) || a.i - b.i)
+    .map((x) => x.s);
+}
+
+/**
+ * 用「逐页整理」的结果把篇目里的注文补全。
+ * 整卷分析是一个请求排整卷，模型抄到后半段容易越抄越简（甚至把同一段糊给好几个人）；
+ * 逐页整理每次只看一页，原文抄得全。所以谁在逐页结果里有更长的正文，就用那段替换。
+ */
+export function fillNotesFromReadings(
+  v: VolumeToc | null,
+  readings: Record<string, PagePerson[]>,
+  pages: OcrPage[],
+): VolumeToc | null {
+  if (!v) return null;
+  const bare = (s: string) => String(s || '').replace(/\s/g, '').replace(/公$/, '');
+  const pageIdOfNo = new Map<number, string>();
+  pages.forEach((p) => pageIdOfNo.set(p.pageNumber, p.id));
+  const all: Array<{ key: string; text: string }> = [];
+  for (const list of Object.values(readings)) {
+    for (const p of list) {
+      const key = bare(p.name);
+      if (key && p.text) all.push({ key, text: p.text });
+    }
+  }
+  if (!all.length) return v;
+  const generations = v.generations.map((g) => ({
+    ...g,
+    persons: g.persons.map((p) => {
+      const key = bare(p.name);
+      if (!key) return p;
+      const ownIds = p.pages.map((no) => pageIdOfNo.get(no)).filter(Boolean) as string[];
+      const own: string[] = [];
+      for (const id of ownIds) {
+        for (const q of readings[id] || []) if (bare(q.name) === key && q.text) own.push(q.text);
+      }
+      const pool = own.length ? own : all.filter((x) => x.key === key).map((x) => x.text);
+      if (!pool.length) return p;
+      const best = pool.sort((a, b) => b.length - a.length)[0];
+      // 逐页原文比篇目里的那条长出一截才替换，短的不动（原文更全才叫补）
+      if (best.length <= (p.note || '').length + 8) return p;
+      return { ...p, note: best.slice(0, 240) };
+    }),
+  }));
+  return { ...v, generations };
+}
+
+/**
+ * 把 AI 排出来的整卷篇目转成谱系图能用的形状（按世次分行、父子连线都靠 father 名字对）。
+ * 页码位置在图上是没有的（AI 只给页号），所以 box 一律给 0，排序退化成按世次和排行。
+ */
+export function volumeToPersons(v: VolumeToc | null, pages: OcrPage[]): any[] {
+  if (!v) return [];
+  const byName = new Map<string, any>();
+  const out: any[] = [];
+  const bare = (s: string) => String(s || '').replace(/\s/g, '').replace(/公$/, '');
+  const pageOf = (no: number) => pages.find((x) => x.pageNumber === no);
+  v.generations.forEach((g, gi) => {
+    g.persons.forEach((p, pi) => {
+      const nos = Array.from(new Set(p.pages.filter((n) => n > 0))).slice(0, 6);
+      const key = `v${gi}-${pi}-${p.name || 'x'}`;
+      const person: any = {
+        key,
+        name: p.name || '（無名）',
+        gen: genNumberOf(g.gen),
+        refs: nos
+          .map((no) => {
+            const hit = pageOf(no);
+            return hit ? { pageId: hit.id, pageNo: no, box: [0, 0, 0, 0] } : null;
+          })
+          .filter(Boolean),
+        pageNo: nos[0] || 0,
+        pageId: (nos[0] && pageOf(nos[0])?.id) || '',
+        box: [0, 0, 0, 0],
+        note: p.note || [p.courtesy, p.spouse].filter(Boolean).join(' · '),
+        fatherName: p.father || null,
+        birthOrder: birthOrderOf(p.order),
+        sonNames: orderSonsByNote(p.note, p.sons || []),
+        fatherKey: null,
+        childKeys: [] as string[],
+      };
+      out.push(person);
+      const b = bare(p.name);
+      if (b && !byName.has(b)) byName.set(b, person);
+    });
+  });
+  for (const p of out) {
+    if (!p.fatherName) continue;
+    const f = byName.get(bare(p.fatherName));
+    if (f && f.key !== p.key) {
+      p.fatherKey = f.key;
+      f.childKeys.push(p.key);
+    }
+  }
+  return out;
+}
+
+/**
+ * 通读：一个人一段，抬头只给「排行 名」，**不带世次**——单页整理看不见上下文，模型给的世次基本靠猜，
+ * 摆出来只会误导人；世次只在「整卷分析」的 AI 篇目里显示。后面直接跟这一格按图上顺序连好的文字。
  * 校对页和篇目共用——用户要的是「按书上的顺序读一遍」，不是把字段拆出来。
  * 传了 columns 就能一段一段展开逐字对照：模型给的 text 和原始列是同一个阅读顺序，
  * 拿头尾几个字在列里对齐，就知道这一格落在哪几列上。
@@ -167,11 +359,8 @@ const PersonReading: React.FC<{
               className={`${compact ? 'text-[14px] leading-[1.9]' : 'text-[15px] leading-[1.95]'} text-[#1D1D1F] break-all select-text`}
               style={{ fontFamily: FONT }}
             >
-              {p.gen || p.order ? (
-                <span className="text-[12px] font-semibold text-[#0071E3] mr-1">
-                  {[p.gen, p.order].filter(Boolean).join(' · ')}
-                </span>
-              ) : null}
+              {/* 世次只在整卷分析里显示：单页看不到上下文，模型给的世次基本靠猜，别摆出来误导人 */}
+              {p.order ? <span className="text-[12px] font-semibold text-[#0071E3] mr-1">{p.order}</span> : null}
               {p.name ? <span className="font-semibold">{p.name}</span> : null}
               {p.text ? (
                 <span>
@@ -221,6 +410,102 @@ const PersonReading: React.FC<{
       })}
       {model ? (
         <div className="text-[10px] text-[#B0B0B6] text-right pt-1">由 {model} 按这一页的图通读</div>
+      ) : null}
+    </div>
+  );
+};
+
+/**
+ * 按 OCR 原文切出来的一页：一个字都不改，只把「谁是谁的那一段」按图上的列分好。
+ * 校对页默认显示这一份——AI 排的那份会漏字、会改字，只能当参考，所以折在下面按需展开。
+ */
+const ColumnReading: React.FC<{
+  people: ColumnPerson[];
+  ai: PagePerson[];
+  aiModel?: string;
+  aiNote?: string;
+  columns?: OcrColumn[];
+}> = ({ people, ai, aiModel, aiNote, columns }) => {
+  const [openRow, setOpenRow] = useState<number | null>(null);
+  const [openAi, setOpenAi] = useState(false);
+  const showAi = openAi || !people.length; // 没有原文分段时，只能把 AI 那份直接摊开
+  return (
+    <div className="space-y-2">
+      {people.length ? (
+        <div className="rounded-xl bg-[#0071E3]/[0.06] border border-[#0071E3]/15 px-3 py-2 text-[12px] text-[#0A4FA8] leading-relaxed">
+          这一页按识别出来的原文切成 {people.length} 个人：名字、排行、后面的字都是 OCR 原文，没改一个字。
+          AI 排的那份会漏字改字，折在最下面，只当参考。想逐字改就切「看原始列」。
+        </div>
+      ) : null}
+      <div className="space-y-1.5">
+        {people.map((p, i) => (
+          <div key={i}>
+            <p
+              className="text-[14px] leading-[1.9] text-[#1D1D1F] break-all select-text"
+              style={{ fontFamily: FONT }}
+            >
+              {p.order ? <span className="text-[12px] font-semibold text-[#0071E3] mr-1">{p.order}</span> : null}
+              {p.name ? <span className="font-semibold">{p.name}</span> : null}
+              {p.text ? (
+                <span>
+                  {p.name ? ' ' : ''}
+                  {p.text}
+                </span>
+              ) : null}
+              {p.cols?.length ? (
+                <button
+                  type="button"
+                  onClick={() => setOpenRow(openRow === i ? null : i)}
+                  className="ml-1.5 align-baseline text-[10.5px] font-medium text-[#0071E3] hover:underline"
+                >
+                  {openRow === i ? '收起' : `原文 ${p.cols.length} 列`}
+                </button>
+              ) : null}
+            </p>
+            {openRow === i ? (
+              <div className="mt-1 mb-1.5 ml-1 space-y-0.5 border-l-2 border-[#0071E3]/30 pl-2">
+                {p.cols.map((c, k) => (
+                  <div key={k} className="flex items-start gap-1.5">
+                    <span className="w-6 shrink-0 pt-px text-right text-[9px] text-[#B0B0B6] tabular-nums">{k + 1}</span>
+                    <span
+                      className="text-[13px] leading-[1.7] break-all text-[#3A3A3C]"
+                      style={{ fontFamily: FONT }}
+                    >
+                      {c.replace(/〔[^〕]*〕/g, '')}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ))}
+      </div>
+      {ai.length ? (
+        <div className="pt-1">
+          {people.length ? (
+            <button
+              type="button"
+              onClick={() => setOpenAi(!openAi)}
+              className="text-[11.5px] font-medium text-[#6E6E73] hover:text-[#1D1D1F] cursor-pointer"
+            >
+              {openAi ? '收起 AI 整理' : `看 AI 整理（参考）· ${ai.length} 个人`}
+            </button>
+          ) : null}
+          {showAi ? (
+            <div className="mt-1.5 space-y-2">
+              <p className="text-[11.5px] text-[#8A4B00] leading-relaxed">
+                AI 只看图，不保证字全，也不保证顺序对——当参考看，别当原文。
+              </p>
+              <PersonReading people={ai} compact model={aiModel} columns={columns} />
+              {aiNote ? (
+                <div className="rounded-lg bg-[#FF9500]/10 border border-[#FF9500]/25 px-3 py-1.5 text-[11.5px] text-[#8A4B00] leading-relaxed flex items-start gap-1.5">
+                  <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" />
+                  <span>{aiNote}</span>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
       ) : null}
     </div>
   );
@@ -295,7 +580,10 @@ function charCropStyle(
 }
 
 const isPending = (c: OcrChar) => (c.u === 1 && c.e !== 1) || c.t === '□';
+/** 引擎给的置信度偏低（百度 char_probability）：没到「待核对」但值得看一眼 */
+const isLowProb = (c: OcrChar) => c.p != null && c.p < 0.6 && !isPending(c) && c.e !== 1;
 const countPending = (cols?: OcrColumn[]) => (cols || []).reduce((a, c) => a + c.chars.filter(isPending).length, 0);
+const countLowProb = (cols?: OcrColumn[]) => (cols || []).reduce((a, c) => a + c.chars.filter(isLowProb).length, 0);
 const countPlaceholder = (cols?: OcrColumn[]) => (cols || []).reduce((a, c) => a + c.chars.filter((x) => x.t === '□').length, 0);
 const countChars = (cols?: OcrColumn[]) => (cols || []).reduce((a, c) => a + c.chars.length, 0);
 
@@ -385,12 +673,18 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
   const [loadingList, setLoadingList] = useState(true);
   const [curId, setCurId] = useState<string | null>(null);
   const [columns, setColumns] = useState<OcrColumn[] | null>(null);
+  /** 按 OCR 原文切好的人和列（服务端切，画面上以它为准，AI 整理只作参考） */
+  const [columnPeople, setColumnPeople] = useState<ColumnPerson[] | null>(null);
   const [loadingPage, setLoadingPage] = useState(false);
   const [sel, setSel] = useState<Sel>(null);
   const [showText, setShowText] = useState(true);
   const [onlyPending, setOnlyPending] = useState(false);
   /** 划行：用户在图上框出每一行，本卷后面的页沿用同一套框 */
   const [editRows, setEditRows] = useState(false);
+  /** 框选补认：整页识别漏掉的字，自己在图上框一块单独识一次 */
+  const [pickArea, setPickArea] = useState(false);
+  const [areaBox, setAreaBox] = useState<[number, number, number, number] | null>(null);
+  const [areaBusy, setAreaBusy] = useState(false);
   const [pageOnly, setPageOnly] = useState(false);
   const [readingRows, setReadingRows] = useState<ReadingRow[]>([]);
   /** 大模型按这一页图整理出的阅读顺序，只含这一页上的人 */
@@ -451,6 +745,12 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
     setReadingRows(hit.rows);
     setPageOnly(hit.pageOnly);
   }, [curId, task.id]);
+
+  // 换页就把框选补认的框和状态清干净，免得上页的框带到下一页上
+  useEffect(() => {
+    setAreaBox(null);
+    setPickArea(false);
+  }, [curId]);
 
   const commitRows = useCallback(
     (next: ReadingRow[], only = pageOnly) => {
@@ -655,6 +955,8 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
 
   // ---------- 单页数据与自动保存 ----------
   const cache = useRef<Map<string, OcrColumn[]>>(new Map());
+  /** 服务端切好的「原文分段」也一起缓存，来回翻页不用重算 */
+  const peopleCache = useRef<Map<string, ColumnPerson[]>>(new Map());
   const dirty = useRef<{ pageId: string; columns: OcrColumn[] } | null>(null);
   const saveTimer = useRef<number | null>(null);
 
@@ -718,6 +1020,7 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
     // 还没有识别结果的页：等识别完成（状态变化时本 effect 会重新执行）
     if ((curStatus === 'pending' || curStatus === 'processing' || curStatus === 'failed') && !cache.current.has(curId)) {
       setColumns(null);
+      setColumnPeople(null);
       setLoadingPage(false);
       return;
     }
@@ -726,11 +1029,13 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
     const hit = cache.current.get(curId);
     if (hit) {
       setColumns(hit);
+      setColumnPeople(peopleCache.current.get(curId) || null);
       return;
     }
     let off = false;
     setLoadingPage(true);
     setColumns(null);
+    setColumnPeople(null);
     api
       .getOcrPage(task.id, curId)
       .then((raw) => {
@@ -739,6 +1044,9 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
         const ordered = cols ? orderColumnsLeftToRight(cols) : undefined;
         if (ordered) cache.current.set(curId, ordered);
         setColumns(ordered || null);
+        const cp = (raw as any)?.columnPeople as ColumnPerson[] | undefined;
+        if (cp?.length) peopleCache.current.set(curId, cp);
+        setColumnPeople(cp?.length ? cp : null);
       })
       .catch((e) => !off && showToast(e?.message || '加载本页失败'))
       .finally(() => !off && setLoadingPage(false));
@@ -947,6 +1255,11 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
         cache.current.set(cur.id, ordered);
         setColumns(ordered);
       }
+      const cp = (raw as any)?.columnPeople as ColumnPerson[] | undefined;
+      if (cp?.length) {
+        peopleCache.current.set(cur.id, cp);
+        setColumnPeople(cp);
+      }
       patchPage(cur.id, {
         imageUrl: mapOcrPage(raw, task.id, cur.pageNumber).imageUrl,
         width: Number(raw.width) || cur.width,
@@ -993,6 +1306,44 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
       showToast(e?.message || '这一列识别失败，原来的内容没有改动');
     } finally {
       setColBusy(null);
+    }
+  };
+
+  /**
+   * 框选补认：整页识别会漏掉被表格线夹住的孤立矮格（p132 的「三子」「華三」），
+   * 框住那一块单独认一次，只补这一块，不动别的列；旧的一版仍然可以「恢复上一版」。
+   */
+  const recognizeArea = async (box: number[]) => {
+    if (!cur) return;
+    setAreaBusy(true);
+    try {
+      if (saveTimer.current) window.clearTimeout(saveTimer.current);
+      await flushSave();
+      const raw = await api.recognizeOcrArea(task.id, cur.id, box);
+      const cols: OcrColumn[] | undefined = raw?.data?.columns;
+      const ordered = cols ? orderColumnsLeftToRight(cols) : undefined;
+      if (ordered) {
+        cache.current.set(cur.id, ordered);
+        setColumns(ordered);
+      }
+      patchPage(cur.id, {
+        status: 'ready',
+        modelName: raw.modelName || null,
+        prevModelName: raw.prevModelName || null,
+        hasPrev: !!raw.hasPrev,
+        charCount: Number(raw.charCount) || 0,
+        uncertainCount: Number(raw.uncertainCount) || 0,
+        errorMessage: null,
+      });
+      setSel(null);
+      setAreaBox(null);
+      setPickArea(false);
+      onTaskChanged?.();
+      showToast(`补上 ${Number(raw.added) || 0} 个字：${String(raw.areaText || '')}`);
+    } catch (e: any) {
+      showToast(e?.message || '这一块没认出来，原来的内容没有改动');
+    } finally {
+      setAreaBusy(false);
     }
   };
 
@@ -1049,7 +1400,9 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
       await api.recognizeOcrPage(task.id, cur.id, modelId, setDefault);
       // 后台识别：先把这页标成「识别中」，列表轮询会在完成后自动更新
       cache.current.delete(cur.id);
+      peopleCache.current.delete(cur.id);
       setColumns(null);
+      setColumnPeople(null);
       patchPage(cur.id, { status: 'processing', errorMessage: null, hasPrev: columns ? true : cur.hasPrev });
       showToast(`第 ${cur.pageNumber} 页开始识别，完成后会自动显示${columns ? '（旧的这一版会保留，可随时恢复）' : ''}`);
     } catch (e: any) {
@@ -1253,6 +1606,12 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                 readingRows={readingRows}
                 onAddRow={(row) => commitRows([...readingRows, row])}
                 onDeleteRow={(id) => commitRows(readingRows.filter((r) => r.id !== id))}
+                pickArea={pickArea}
+                areaBox={areaBox}
+                areaBusy={areaBusy}
+                onPickArea={(b) => setAreaBox(b)}
+                onConfirmArea={() => areaBox && void recognizeArea(areaBox)}
+                onCancelArea={() => setAreaBox(null)}
               />
 
               {/* 右：本页文字与操作 */}
@@ -1336,14 +1695,23 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                     className={`h-7 px-2 rounded-md cursor-pointer flex items-center gap-1 ${
                       onlyPending ? 'bg-[#FF9500]/15 text-[#C93400] font-semibold' : 'hover:bg-black/[0.05]'
                     }`}
-                    title="只突出待核对的字"
+                    title="只突出待核对的字（虚线底色的字是引擎自己说没把握的）"
                   >
                     <AlertTriangle className="w-3.5 h-3.5" />
                     待核对 {columns ? countPending(columns) : 0}
+                    {columns && countLowProb(columns) ? (
+                      <span className="ml-0.5 rounded bg-[#FFCC00]/30 px-1 text-[10px] font-semibold text-[#8A4B00]">
+                        低置信 {countLowProb(columns)}
+                      </span>
+                    ) : null}
                   </button>
                   <button
                     type="button"
-                    onClick={() => setEditRows((v) => !v)}
+                    onClick={() => {
+                      setPickArea(false);
+                      setAreaBox(null);
+                      setEditRows((v) => !v);
+                    }}
                     className={`h-7 px-2 rounded-md cursor-pointer flex items-center gap-1 ${
                       editRows ? 'bg-[#0071E3] text-white font-semibold' : 'hover:bg-black/[0.05]'
                     }`}
@@ -1351,6 +1719,22 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                   >
                     <Crosshair className="w-3.5 h-3.5" />
                     划行
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!columns || cur.status === 'processing' || areaBusy}
+                    onClick={() => {
+                      setEditRows(false);
+                      setAreaBox(null);
+                      setPickArea((v) => !v);
+                    }}
+                    className={`h-7 px-2 rounded-md cursor-pointer flex items-center gap-1 disabled:opacity-40 ${
+                      pickArea ? 'bg-[#FF9500] text-white font-semibold' : 'hover:bg-black/[0.05]'
+                    }`}
+                    title="图上有字没框出来（漏字）时，在图上拖一个框把它圈住，只识别这一块——正常页不用，不额外花钱"
+                  >
+                    <SquareDashed className="w-3.5 h-3.5" />
+                    {areaBusy ? '补认中…' : '框选补认'}
                   </button>
                   <div className="ml-auto flex items-center gap-0.5">
                     <span className="px-1 text-[11px] text-[#9CA3AF] tabular-nums">
@@ -1389,6 +1773,13 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                     <div className="rounded-2xl bg-[#FF9500]/10 border border-[#FF9500]/25 p-3 text-[13px] text-[#C93400] leading-relaxed">{cur.errorMessage}</div>
                   ) : null}
 
+                  {pickArea ? (
+                    <div className="mb-2 rounded-xl bg-[#FF9500]/10 border border-[#FF9500]/25 px-3 py-2 text-[12px] text-[#8A4B00] leading-relaxed">
+                      <p>在左边图上按住拖一个框，把「图上有字、但没框出来」的地方圈住（框大一点，把字整个圈进去），松手后点「识别这块」。</p>
+                      <p className="mt-1 text-[#A25B00]">只认框里的这一块，补进本页，别的列不动。会花一次识别费用，所以只在真的漏字时用。</p>
+                    </div>
+                  ) : null}
+
                   {editRows ? (
                     <div className="mb-2 rounded-xl bg-[#0071E3]/[0.06] border border-[#0071E3]/15 px-3 py-2 text-[12px] text-[#0A4FA8] leading-relaxed">
                       <p>在左边图上按住拖出一行。先框的是第 1 行，右侧按这个顺序排。框里从右往左、字从上往下。</p>
@@ -1417,28 +1808,14 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                     </div>
                   ) : null}
 
-                  {pageReadings[cur.id]?.length && !showRawCols ? (
-                    <div className="space-y-2">
-                      <div className="rounded-xl bg-[#0071E3]/[0.06] border border-[#0071E3]/15 px-3 py-2 text-[12px] text-[#0A4FA8] leading-relaxed flex items-start gap-2">
-                        <Sparkles className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                        <span>
-                          这一页是按图重新排的（{pageReadings[cur.id].length} 个人）。顺序和文字都不是逐字坐标，要对照原图核一眼；
-                          想改单字就切「看原始列」。
-                        </span>
-                      </div>
-                      <PersonReading
-                        people={pageReadings[cur.id]}
-                        compact
-                        model={readingModels[cur.id]}
-                        columns={columns}
-                      />
-                      {readingNotes[cur.id] ? (
-                        <div className="rounded-lg bg-[#FF9500]/10 border border-[#FF9500]/25 px-3 py-1.5 text-[11.5px] text-[#8A4B00] leading-relaxed flex items-start gap-1.5">
-                          <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" />
-                          <span>{readingNotes[cur.id]}。切「看原始列」逐字核一遍再确认。</span>
-                        </div>
-                      ) : null}
-                    </div>
+                  {!showRawCols && (columnPeople?.length || pageReadings[cur.id]?.length) ? (
+                    <ColumnReading
+                      people={columnPeople || []}
+                      ai={pageReadings[cur.id] || []}
+                      aiModel={readingModels[cur.id]}
+                      aiNote={readingNotes[cur.id]}
+                      columns={columns}
+                    />
                   ) : columns && readingRows.length > 0 && cur ? (
                     <ReadingRowList
                       rows={readingRows}
@@ -1516,6 +1893,11 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                                           onClick={() => setSel({ col: ci, idx: k })}
                                           onMouseEnter={() => setHover({ col: ci, idx: k })}
                                           onMouseLeave={() => setHover(null)}
+                                          title={
+                                            ch.p != null
+                                              ? `${ch.t} · 识别置信度 ${Math.round(ch.p * 100)}%${ch.p < 0.45 ? '（低，八成认错了）' : ch.p < 0.6 ? '（偏低，对图核一下）' : ''}`
+                                              : ch.t
+                                          }
                                           style={{ width: w, fontFamily: FONT }}
                                           className={`h-8 text-[18px] leading-8 rounded cursor-pointer text-center ${
                                             on
@@ -1524,9 +1906,13 @@ export const OcrReviewWorkbench: React.FC<Props> = ({ task, onFinishTask, onTask
                                                 ? 'bg-[#FF3B30]/15 text-[#C62828]'
                                                 : isPending(ch)
                                                   ? 'bg-[#FF9500]/20 text-[#C93400]'
-                                                  : ch.e === 1
-                                                    ? 'text-[#248A3D]'
-                                                    : 'hover:bg-[#EFF6FF]'
+                                                  : isLowProb(ch)
+                                                    ? ch.p! < 0.45
+                                                      ? 'bg-[#FF3B30]/10 text-[#C62828] underline decoration-dotted decoration-[#FF3B30]/60'
+                                                      : 'bg-[#FFCC00]/20 text-[#8A4B00] underline decoration-dotted decoration-[#FF9500]/60'
+                                                    : ch.e === 1
+                                                      ? 'text-[#248A3D]'
+                                                      : 'hover:bg-[#EFF6FF]'
                                           }`}
                                         >
                                           {ch.t}
@@ -1834,6 +2220,13 @@ interface CanvasProps {
   readingRows: ReadingRow[];
   onAddRow: (row: ReadingRow) => void;
   onDeleteRow: (id: string) => void;
+  /** 框选补认：在图上拖一块，只认这一块 */
+  pickArea: boolean;
+  areaBox: [number, number, number, number] | null;
+  areaBusy: boolean;
+  onPickArea: (box: [number, number, number, number]) => void;
+  onConfirmArea: () => void;
+  onCancelArea: () => void;
 }
 
 /** 这一列的字数和图上对不上（模型漏字或几个字并成一个） */
@@ -1898,12 +2291,21 @@ const PageCanvas: React.FC<CanvasProps> = ({
   readingRows,
   onAddRow,
   onDeleteRow,
+  pickArea,
+  areaBox,
+  areaBusy,
+  onPickArea,
+  onConfirmArea,
+  onCancelArea,
 }) => {
   const boxRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 800, h: 600 });
   const [natural, setNatural] = useState({ w: page.width || 0, h: page.height || 0 });
   const drawRef = useRef<{ x: number; y: number } | null>(null);
   const [draft, setDraft] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  /** 框选补认的拖拽（和划行互斥，各自一套状态，免得互相踩） */
+  const pickRef = useRef<{ x: number; y: number } | null>(null);
+  const [pickDraft, setPickDraft] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   /** 高亮是从哪一侧触发的：从文字侧移上去时，图要自动滚到对应位置；从图上移时，文字侧滚到对应字 */
   const hoverFrom = useRef<'img' | 'text'>('img');
   const compare = layoutMode === 'compare';
@@ -2011,13 +2413,54 @@ const PageCanvas: React.FC<CanvasProps> = ({
     });
   };
 
+  // 框选补认：拖出来的框按原图像素交给后端裁图
+  const onPickStart = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    const p = pointOf(e);
+    pickRef.current = p;
+    setPickDraft({ x: p.x, y: p.y, w: 0, h: 0 });
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* 个别环境不支持捕获，拖动仍然按移动事件完成 */
+    }
+  };
+  const onPickMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const start = pickRef.current;
+    if (!start) return;
+    const p = pointOf(e);
+    setPickDraft({ x: Math.min(start.x, p.x), y: Math.min(start.y, p.y), w: Math.abs(p.x - start.x), h: Math.abs(p.y - start.y) });
+  };
+  const onPickEnd = (e: React.PointerEvent<HTMLDivElement>) => {
+    const start = pickRef.current;
+    pickRef.current = null;
+    if (!start) return;
+    const p = pointOf(e);
+    setPickDraft(null);
+    const x1 = Math.min(start.x, p.x);
+    const y1 = Math.min(start.y, p.y);
+    const x2 = Math.max(start.x, p.x);
+    const y2 = Math.max(start.y, p.y);
+    if ((x2 - x1) * scale < 8 || (y2 - y1) * scale < 8) return;
+    onPickArea([Math.round(x1), Math.round(y1), Math.round(x2), Math.round(y2)]);
+  };
+  /** 框在屏幕上的位置（原图坐标 → 显示坐标），确认条跟着框走 */
+  const areaRect = areaBox
+    ? {
+        left: areaBox[0] * scale,
+        top: areaBox[1] * scale,
+        width: Math.max(2, (areaBox[2] - areaBox[0]) * scale),
+        height: Math.max(2, (areaBox[3] - areaBox[1]) * scale),
+      }
+    : null;
+
   const imagePane = (
     <div ref={boxRef} className="flex-1 overflow-auto relative min-w-0">
       <div
         className="relative mx-auto bg-white shadow-[0_8px_40px_rgba(0,0,0,0.12)] rounded-sm"
         style={{ width: dw, height: dh, marginTop: compare ? 56 : Math.max(56, (size.h - dh) / 2), marginBottom: 32 }}
         onClick={() => {
-          if (!editRows) setSel(null);
+          if (!editRows && !pickArea) setSel(null);
         }}
       >
         <img
@@ -2120,14 +2563,22 @@ const PageCanvas: React.FC<CanvasProps> = ({
                   ? ch.t === '□'
                     ? 'border-[#FF3B30]/70 bg-[#FF3B30]/10'
                     : 'border-[#FF9500]/80 bg-[#FF9500]/15'
-                  : 'border-[#0071E3]/35 hover:border-[#0071E3]'
+                  : isLowProb(ch)
+                    ? ch.p! < 0.45
+                      ? 'border-[#FF3B30]/80 bg-[#FF3B30]/10'
+                      : 'border-[#FFCC00] bg-[#FFCC00]/15'
+                    : 'border-[#0071E3]/35 hover:border-[#0071E3]'
                 : ch.t === '□'
                   ? 'bg-[#FF3B30]/20 border-[#FF3B30]/60 text-[#C62828]'
                   : pending
                     ? 'bg-[#FF9500]/25 border-[#FF9500]/70 text-[#B45309]'
-                    : ch.e === 1
-                      ? 'bg-[#34C759]/18 border-[#34C759]/55 text-[#166534]'
-                      : 'bg-[#0071E3]/12 border-[#0071E3]/35 text-[#0A4FA8]';
+                    : isLowProb(ch)
+                      ? ch.p! < 0.45
+                        ? 'bg-[#FF3B30]/18 border-[#FF3B30]/70 text-[#C62828]'
+                        : 'bg-[#FFCC00]/30 border-[#FFCC00]/90 text-[#8A4B00]'
+                      : ch.e === 1
+                        ? 'bg-[#34C759]/18 border-[#34C759]/55 text-[#166534]'
+                        : 'bg-[#0071E3]/12 border-[#0071E3]/35 text-[#0A4FA8]';
               return (
                 <div
                   key={ci + '-' + k}
@@ -2137,11 +2588,21 @@ const PageCanvas: React.FC<CanvasProps> = ({
                   }}
                   onMouseEnter={() => onHoverImg({ col: ci, idx: k })}
                   onMouseLeave={() => setHover(null)}
-                  className={`absolute border rounded-[3px] flex items-center justify-center transition-colors ${editRows ? 'pointer-events-none' : 'cursor-pointer'} ${tone} ${
+                  className={`absolute border rounded-[3px] flex items-center justify-center transition-colors ${editRows || pickArea ? 'pointer-events-none' : 'cursor-pointer'} ${tone} ${
                     isSel ? 'ring-2 ring-[#0071E3] z-10 !bg-[#0071E3]/25' : ''
                   } ${isHover ? '!bg-[#FFD60A]/45 !border-[#FF9500] ring-2 ring-[#FF9500] z-20' : ''} ${dim ? 'opacity-25' : ''}`}
                   style={{ left: x1 * scale, top: y1 * scale, width: w, height: h }}
-                  title={blank ? '图上这里是空白：可能是多给的字。点击后可删除或修改' : pending ? ch.r || '待核对：点击修改' : '点击修改'}
+                  title={
+                    blank
+                      ? '图上这里是空白：可能是多给的字。点击后可删除或修改'
+                      : pending
+                        ? ch.r || '待核对：点击修改'
+                        : ch.p != null && ch.p < 0.6
+                          ? `「${ch.t}」识别置信度只有 ${Math.round(ch.p * 100)}%，对图核一下`
+                          : ch.p != null
+                            ? `「${ch.t}」置信度 ${Math.round(ch.p * 100)}%`
+                            : '点击修改'
+                  }
                 >
                   {textOn ? (
                     <span style={{ fontFamily: FONT, fontSize: Math.max(8, Math.min(w, h) * 0.82), lineHeight: 1, fontWeight: 600, opacity: blank ? 0.45 : textOpacity }}>
@@ -2174,6 +2635,66 @@ const PageCanvas: React.FC<CanvasProps> = ({
             </span>
           </div>
         ))}
+
+        {/* 框选补认：拖一个框，就地确认只认这一块 */}
+        {pickArea ? (
+          <>
+            <div
+              className="absolute inset-0 z-30 cursor-crosshair touch-none"
+              onPointerDown={onPickStart}
+              onPointerMove={onPickMove}
+              onPointerUp={onPickEnd}
+              onPointerCancel={() => {
+                pickRef.current = null;
+                setPickDraft(null);
+              }}
+            />
+            {pickDraft && pickDraft.w > 0 && pickDraft.h > 0 ? (
+              <div
+                className="absolute z-30 border-2 border-dashed border-[#0071E3] bg-[#0071E3]/10 pointer-events-none"
+                style={{ left: pickDraft.x * scale, top: pickDraft.y * scale, width: pickDraft.w * scale, height: pickDraft.h * scale }}
+              />
+            ) : null}
+            {areaRect ? (
+              <>
+                <div className="absolute z-30 border-2 border-dashed border-[#FF9500] bg-[#FF9500]/10 pointer-events-none" style={areaRect} />
+                <div
+                  className="absolute z-40 flex items-center gap-1.5 rounded-lg bg-white/95 border border-black/[0.08] shadow-lg px-2 py-1.5"
+                  style={{
+                    left: Math.max(0, Math.min(Math.max(0, dw - 230), areaRect.left)),
+                    top: Math.max(0, Math.min(Math.max(0, dh - 46), areaRect.top + areaRect.height + 8)),
+                  }}
+                >
+                  <button
+                    type="button"
+                    disabled={areaBusy}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onConfirmArea();
+                    }}
+                    className="h-7 px-2.5 rounded-md bg-[#FF9500] text-white text-[12px] font-semibold cursor-pointer disabled:opacity-60"
+                  >
+                    {areaBusy ? '识别中…' : '识别这块'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={areaBusy}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onCancelArea();
+                    }}
+                    className="h-7 px-2 rounded-md text-[12px] text-[#6E6E73] hover:bg-black/[0.05] cursor-pointer disabled:opacity-60"
+                  >
+                    重框
+                  </button>
+                  <span className="text-[11px] text-[#9CA3AF] whitespace-nowrap tabular-nums">
+                    {areaBox ? `${areaBox[2] - areaBox[0]}×${areaBox[3] - areaBox[1]}` : ''}
+                  </span>
+                </div>
+              </>
+            ) : null}
+          </>
+        ) : null}
 
         {editRows ? (
           <div
@@ -2696,7 +3217,7 @@ const GenChart: React.FC<{ persons: GenPerson[]; selected: string | null; onSele
     const maxG = known.length ? Math.max(...known.map((p) => p.gen as number)) : 1;
 
     const pos = new Map<string, { x: number; y: number; p: GenPerson }>();
-    const rowsOut: Array<{ gen: number | null; y: number }> = [];
+    const rowsOut: Array<{ gen: number | null; y: number; count: number }> = [];
     let cols = 1;
     const xFor = (i: number) => LEFT + i * (NW + GAP);
 
@@ -2712,13 +3233,13 @@ const GenChart: React.FC<{ persons: GenPerson[]; selected: string | null; onSele
       const y = 28 + (g - minG) * ROWH;
       arr.forEach((p, i) => pos.set(p.key, { x: xFor(i), y, p }));
       cols = Math.max(cols, arr.length);
-      rowsOut.push({ gen: g, y });
+      rowsOut.push({ gen: g, y, count: arr.length });
     }
     if (unknown.length) {
       const y = 28 + (maxG - minG + 1) * ROWH;
       unknown.forEach((p, i) => pos.set(p.key, { x: xFor(i), y, p }));
       cols = Math.max(cols, unknown.length);
-      rowsOut.push({ gen: null, y });
+      rowsOut.push({ gen: null, y, count: unknown.length });
     }
 
     const segs: string[] = [];
@@ -2770,6 +3291,22 @@ const GenChart: React.FC<{ persons: GenPerson[]; selected: string | null; onSele
             <text x={10} y={r.y + NH / 2} fontSize={11} fill="#86868B" dominantBaseline="central">
               {r.gen != null ? GEN_LABEL(r.gen) + '世' : '未定'}
             </text>
+            {/* 这一世一个都没抽出来（书上断代，或者整段没识别出来）：留个虚框，别让人以为漏了一行 */}
+            {r.count === 0 ? (
+              <g>
+                <rect x={LEFT} y={r.y} width={96} height={NH} rx={8} fill="#FFFFFF" stroke="#C7C7CC" strokeDasharray="4 3" />
+                <text
+                  x={LEFT + 48}
+                  y={r.y + NH / 2}
+                  textAnchor="middle"
+                  dominantBaseline="central"
+                  fontSize={11}
+                  fill="#B0B0B6"
+                >
+                  这一世没有记录
+                </text>
+              </g>
+            ) : null}
           </g>
         ))}
 
@@ -2817,6 +3354,25 @@ const GenChart: React.FC<{ persons: GenPerson[]; selected: string | null; onSele
   );
 };
 
+/**
+ * 跨页续写：模型说「这段是接着上一页某某写的」，就把这段接到那个人身上。
+ * 对不上人就单列一段（不带名字），一个字都不丢。
+ */
+const applyContinues = (list: PagePerson[], continues?: Array<{ of: string; text: string }>): PagePerson[] => {
+  if (!continues?.length) return list;
+  const out = list.map((p) => ({ ...p }));
+  for (const c of continues) {
+    const of = String(c?.of || '').replace(/\s+/g, '').replace(/公$/, '');
+    const bare = (s: string) => String(s || '').replace(/\s+/g, '').replace(/公$/, '');
+    const hit = of ? out.find((p) => p.name && (bare(p.name) === of || bare(p.name).includes(of) || of.includes(bare(p.name)))) : undefined;
+    const text = String(c?.text || '').trim();
+    if (!text) continue;
+    if (hit) hit.text = [hit.text, text].filter(Boolean).join('');
+    else out.push({ gen: '', order: '', name: '', text });
+  }
+  return out;
+};
+
 const OcrToc: React.FC<{ taskId: string; pages: OcrPage[]; onJump: (pageId: string) => void }> = ({
   taskId,
   pages,
@@ -2833,6 +3389,14 @@ const OcrToc: React.FC<{ taskId: string; pages: OcrPage[]; onJump: (pageId: stri
   /** 大模型按图整理的每页结果，和校对页共用同一份 */
   const [readings, setReadings] = useState<Record<string, PagePerson[]>>(() => loadPageReadings(taskId));
   const [busyPage, setBusyPage] = useState<string | null>(null);
+  /** 串着整理：从第一页一页一页往下接，每页都带着上一页的结果 */
+  const [chain, setChain] = useState<{ running: boolean; done: number; total: number; pageNo: number } | null>(null);
+  const chainStop = useRef(false);
+  /** 整卷分析结果：一次把整卷文字交给模型，排出全卷结构与世系 */
+  const [vol, setVol] = useState<VolumeToc | null>(() => loadVolumeToc(taskId));
+  const [analyzing, setAnalyzing] = useState(false);
+  /** 左栏显示 AI 排的篇目，还是原来的全书文字 */
+  const [leftView, setLeftView] = useState<'ai' | 'text'>(() => (loadVolumeToc(taskId) ? 'ai' : 'text'));
 
   const orderOne = useCallback(
     async (pageId: string) => {
@@ -2857,6 +3421,67 @@ const OcrToc: React.FC<{ taskId: string; pages: OcrPage[]; onJump: (pageId: stri
     [taskId],
   );
 
+  /**
+   * 串着整理（整本按页接力）：
+   * 第 1 页 图 + OCR 文字 → 人物条目；第 2 页再带上第 1 页的结果接着读；一页一页到最后一页。
+   * 单页整理时模型看不到上一页，跨页的「生子三：某某」「注文后半段」就容易断、容易重复，这样接才连得上。
+   */
+  const runChain = useCallback(
+    async (fromPageId?: string) => {
+      // 没识别出文字的页没法读（模型只看到图也没有可对的列），跳过
+      const list = pages.filter((p) => p.status === 'ready' || p.status === 'confirmed');
+      if (!list.length) {
+        void appAlert('这一卷还没有识别好的页。先到「校对」把页面识别完，再来串着整理。');
+        return;
+      }
+      const at = fromPageId ? list.findIndex((p) => p.id === fromPageId) : 0;
+      const start = at > 0 ? at : 0;
+      const todo = list.slice(start);
+      const all: Record<string, PagePerson[]> = { ...loadPageReadings(taskId) };
+      const commit = () => {
+        setReadings({ ...all });
+        savePageReadings(taskId, all);
+      };
+      const skipped = pages.length - list.length;
+      chainStop.current = false;
+      let prevPeople: PagePerson[] = start > 0 ? all[list[start - 1].id] || [] : [];
+      let prevId = start > 0 ? list[start - 1].id : '';
+      let prevNo = start > 0 ? list[start - 1].pageNumber : 0;
+      const fails: string[] = [];
+      setChain({ running: true, done: 0, total: todo.length, pageNo: todo[0]?.pageNumber || 0 });
+      for (let i = 0; i < todo.length; i += 1) {
+        if (chainStop.current) break;
+        const pg = todo[i];
+        setChain({ running: true, done: i, total: todo.length, pageNo: pg.pageNumber });
+        try {
+          const r = await api.orderOcrPage(taskId, pg.id, prevPeople.length ? { pageNo: prevNo, people: prevPeople } : undefined);
+          // 上一页那个人没写完的注文，接回他身上
+          if (r?.continues?.length && prevId) all[prevId] = applyContinues(all[prevId] || [], r.continues);
+          if (r?.people?.length) all[pg.id] = r.people;
+          commit();
+          prevPeople = all[pg.id] || [];
+          prevId = pg.id;
+          prevNo = pg.pageNumber;
+        } catch (e: any) {
+          fails.push(`第 ${pg.pageNumber} 页：${e?.message || '整理失败'}`);
+        }
+      }
+      setChain(null);
+      if (chainStop.current) {
+        const done = todo.filter((p) => all[p.id]?.length).length;
+        void appAlert(`已停下。这一卷现在整理好 ${done} 页${fails.length ? `，${fails.length} 页失败` : ''}。`);
+        return;
+      }
+      const lines = [
+        `串着整理完成：${todo.length} 页${skipped ? `（另有 ${skipped} 页还没识别，跳过了）` : ''}。`,
+        fails.length ? `\n失败的页：\n${fails.slice(0, 8).join('\n')}` : '',
+        '\n整理结果已按页存好，左栏按世次排；点页号可以回「校对」逐字核。',
+      ];
+      void appAlert(lines.join(''));
+    },
+    [pages, taskId],
+  );
+
   const load = useCallback(() => {
     setError('');
     setLoading(true);
@@ -2878,7 +3503,70 @@ const OcrToc: React.FC<{ taskId: string; pages: OcrPage[]; onJump: (pageId: stri
   useEffect(() => load(), [load]);
 
   const totalChars = (texts || []).reduce((a, p) => a + p.charCount, 0);
-  const selected = (gen?.persons || []).find((p) => p.key === sel) || null;
+  /** 注文用逐页整理的那份补一遍：整卷分析一次排太多人，后半段会越抄越简 */
+  /** 按 OCR 原文切好的人（每页一份，服务端切好带过来）。篇目和谱系一律以它为准，AI 的只作参考。 */
+  const ocrPeople = useMemo(() => {
+    const m = new Map<string, PagePerson[]>();
+    for (const p of texts || []) {
+      if (!p.columnPeople?.length) continue;
+      m.set(
+        p.pageId,
+        p.columnPeople.map((x) => ({ gen: x.gen, order: x.order, name: x.name, text: x.text })),
+      );
+    }
+    return m;
+  }, [texts]);
+
+  /** 注文优先取原文：先 OCR 列切的，再逐页 AI 的，最后才是整卷 AI 那条 */
+  const noteSource = useMemo(() => {
+    const m: Record<string, PagePerson[]> = { ...readings };
+    for (const [pid, list] of ocrPeople) m[pid] = list;
+    return m;
+  }, [readings, ocrPeople]);
+
+  const volView = useMemo(() => fillNotesFromReadings(vol, noteSource, pages), [vol, noteSource, pages]);
+  /** 有整卷分析结果就用 AI 排的人画谱系，没有还按规则抽的那份 */
+  const aiPersons = useMemo(() => volumeToPersons(volView, pages), [volView, pages]);
+  const chartPersons = aiPersons.length ? aiPersons : gen?.persons || [];
+  const selected = chartPersons.find((p) => p.key === sel) || null;
+
+  /** 整卷分析：整卷文字一次发给模型，让它通篇排一遍——一页一页发看不全上下文，排出来就断 */
+  const analyze = useCallback(async () => {
+    if (analyzing) return;
+    const ok = await appConfirm(
+      `把整卷文字（约 ${totalChars} 字）一次发给模型通篇排篇目。\n\n不重新识别，只花一次对话模型的钱，通常几十秒到两三分钟。排完会替换掉左栏现在按规则拼的版本（随时可以再分析一次）。`,
+    );
+    if (!ok) return;
+    setAnalyzing(true);
+    try {
+      const r = await api.analyzeOcrVolume(taskId);
+      const next: VolumeToc = {
+        summary: String(r?.summary || ''),
+        sections: Array.isArray(r?.sections) ? r.sections : [],
+        generations: Array.isArray(r?.generations) ? r.generations : [],
+        issues: Array.isArray(r?.issues) ? r.issues : [],
+        truncated: !!r?.truncated,
+        model: r?.model,
+        at: Date.now(),
+      };
+      setVol(next);
+      saveVolumeToc(taskId, next);
+      setLeftView('ai');
+    } catch (e: any) {
+      void appAlert(e?.message || '整卷分析失败');
+    } finally {
+      setAnalyzing(false);
+    }
+  }, [analyzing, taskId, totalChars]);
+
+  /** 按页号跳到校对页 */
+  const jumpPageNo = useCallback(
+    (no: number) => {
+      const hit = pages.find((p) => p.pageNumber === no);
+      if (hit) onJump(hit.id);
+    },
+    [pages, onJump],
+  );
 
   const kw = q.trim();
   const shownPages = useMemo(() => {
@@ -2901,6 +3589,10 @@ const OcrToc: React.FC<{ taskId: string; pages: OcrPage[]; onJump: (pageId: stri
   }, [spans, kw]);
 
   /**
+   * 按 OCR 原文切好的人（每页一份，服务端切好带过来）。篇目按页看的时候优先用它——
+   * 一个字都没改过，比 AI 重排的那份可信。
+   */
+  /**
    * 一页可能同时属于几个「世」（跨代的页），整理出来的人也分属不同世。
    * 按世次把人物分回各自的段落，同一页就不会在几个段落里各贴一遍；
    * 世次为空或者对不上任何段落的，挂在这一页第一次出现的地方，保证不漏。
@@ -2917,7 +3609,7 @@ const OcrToc: React.FC<{ taskId: string; pages: OcrPage[]; onJump: (pageId: stri
     const placed = new Set<string>();
     return shownSpans.map((span) => {
       const parts = span.parts.map((part) => {
-        const all = readings[part.pageId] || [];
+        const all = ocrPeople.get(part.pageId) || readings[part.pageId] || [];
         const own = all.filter((p) => p.gen && p.gen === span.label);
         const labels = labelsOfPage.get(part.pageId) || new Set<string>();
         const loose = placed.has(part.pageId) ? [] : all.filter((p) => !p.gen || !labels.has(p.gen));
@@ -2927,7 +3619,7 @@ const OcrToc: React.FC<{ taskId: string; pages: OcrPage[]; onJump: (pageId: stri
       // 这一页的文字归别的世管，这里就不重复贴
       return { key: `${span.gen ?? 'x'}-${span.label}`, label: span.label, parts: parts.filter((p) => !p.hasReading || p.people.length) };
     });
-  }, [shownSpans, readings]);
+  }, [shownSpans, readings, ocrPeople]);
 
   const fullText = useMemo(() => {
     if (spans && spans.length) {
@@ -2962,7 +3654,32 @@ const OcrToc: React.FC<{ taskId: string; pages: OcrPage[]; onJump: (pageId: stri
     ));
   };
 
-  const st = gen?.stats;
+  const st = aiPersons.length
+    ? {
+        names: aiPersons.length,
+        linked: aiPersons.filter((p: any) => p.fatherKey).length,
+        minGen: (() => {
+          const gs = aiPersons.map((p: any) => p.gen).filter((g: any) => typeof g === 'number') as number[];
+          return gs.length ? Math.min(...gs) : null;
+        })(),
+        maxGen: (() => {
+          const gs = aiPersons.map((p: any) => p.gen).filter((g: any) => typeof g === 'number') as number[];
+          return gs.length ? Math.max(...gs) : null;
+        })(),
+        pages: 0,
+        pagesWithNames: 0,
+        dupMerged: 0,
+      }
+    : gen?.stats;
+
+  // 从第 1 页往后第一个还没整理过的页 —— 「接着上次」从它开始，前面整理过的不再花钱
+  const firstUnread = useMemo(() => {
+    const ready = pages.filter((p) => p.status === 'ready' || p.status === 'confirmed');
+    const hit = ready.find((p) => !(readings[p.id] || []).length);
+    return hit ? { id: hit.id, pageNo: hit.pageNumber } : null;
+  }, [pages, readings]);
+  const firstUnreadPageId = firstUnread?.id || '';
+  const firstUnreadPageNo = firstUnread?.pageNo || 0;
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
@@ -2973,7 +3690,11 @@ const OcrToc: React.FC<{ taskId: string; pages: OcrPage[]; onJump: (pageId: stri
           <b className="tabular-nums">{totalChars}</b> 字
         </div>
         <div className="text-[13px] text-[#1D1D1F]">
-          {gen?.layoutLabel ? <span className="text-[#86868B]">按{gen.layoutLabel}抽取 · </span> : null}
+          {aiPersons.length ? (
+            <span className="text-[#86868B]">整卷 AI 排出 · </span>
+          ) : gen?.layoutLabel ? (
+            <span className="text-[#86868B]">按{gen.layoutLabel}抽取 · </span>
+          ) : null}
           谱系 <b className="tabular-nums">{st?.names ?? 0}</b> 人 ·{' '}
           <b className="tabular-nums">{st?.linked ?? 0}</b> 条父子线
           {st?.minGen != null && st?.maxGen != null ? (
@@ -2990,6 +3711,43 @@ const OcrToc: React.FC<{ taskId: string; pages: OcrPage[]; onJump: (pageId: stri
             placeholder="搜文字 / 页号"
             className="h-8 w-44 px-3 rounded-lg bg-white border border-black/[0.08] text-[12px] focus:outline-none focus:border-[#0071E3]"
           />
+          <button
+            onClick={() => void analyze()}
+            disabled={analyzing || loading || !pages.length}
+            className="h-8 px-3 text-xs font-semibold rounded-lg bg-[#0071E3] text-white hover:bg-[#0077ED] cursor-pointer flex items-center gap-1.5 disabled:opacity-60"
+            title="把整卷的识别文字一次交给模型，通篇排出全卷结构和世系（不重新识别，只花一次对话模型的钱）"
+          >
+            <Sparkles className={`w-3.5 h-3.5 ${analyzing ? 'animate-spin' : ''}`} />
+            {analyzing ? '整卷分析中…' : vol ? '重新分析整卷' : '整卷分析'}
+          </button>
+          <button
+            onClick={() => void runChain()}
+            disabled={!!chain?.running || loading || analyzing}
+            className="h-8 px-3 text-xs font-semibold rounded-lg bg-white border border-black/[0.08] hover:bg-[#F5F5F7] cursor-pointer flex items-center gap-1.5 disabled:opacity-60"
+            title="从第 1 页开始一页一页接着整理：每页都把上一页整理出的人一起发给模型，跨页的注文和世次才接得上。每页算一次模型调用。"
+          >
+            <Sparkles className={`w-3.5 h-3.5 ${chain?.running ? 'animate-spin' : ''}`} />
+            {chain?.running ? `第 ${chain.pageNo} 页 ${chain.done}/${chain.total}` : '串着整理'}
+          </button>
+          {!chain?.running && !loading && firstUnreadPageId ? (
+            <button
+              onClick={() => void runChain(firstUnreadPageId)}
+              className="h-8 px-3 text-xs font-semibold rounded-lg bg-white border border-black/[0.08] hover:bg-[#F5F5F7] cursor-pointer"
+              title={`从第 ${firstUnreadPageNo} 页接着往下整理（前面已经整理过的页不再花钱）`}
+            >
+              接着第 {firstUnreadPageNo} 页
+            </button>
+          ) : null}
+          {chain?.running ? (
+            <button
+              onClick={() => {
+                chainStop.current = true;
+              }}
+              className="h-8 px-3 text-xs font-semibold rounded-lg bg-white border border-black/[0.08] hover:bg-[#F5F5F7] cursor-pointer"
+            >
+              停
+            </button>
+          ) : null}
           <button
             onClick={load}
             className="h-8 px-3 text-xs font-semibold rounded-lg bg-white border border-black/[0.08] hover:bg-[#F5F5F7] cursor-pointer"
@@ -3011,14 +3769,134 @@ const OcrToc: React.FC<{ taskId: string; pages: OcrPage[]; onJump: (pageId: stri
       <div className="flex-1 flex min-h-0">
         {/* 左：全书文字合集 */}
         <section className="w-[46%] min-w-[360px] flex flex-col border-r border-black/[0.06] bg-white">
-          <header className="h-8 px-4 border-b border-black/[0.05] flex items-center shrink-0">
-            <span className="text-[12px] font-semibold text-[#1D1D1F]">全书文字</span>
-            <span className="ml-2 text-[11px] text-[#86868B] tabular-nums">
-              {kw ? `${shownPages.length} / ${pages.length} 页命中` : `${pages.length} 页`}
+          <header className="h-8 px-3 border-b border-black/[0.05] flex items-center shrink-0 gap-2">
+            <div className="flex items-center rounded-md bg-black/[0.04] p-0.5">
+              <button
+                onClick={() => setLeftView('ai')}
+                disabled={!vol}
+                className={`h-6 px-2 text-[11.5px] rounded cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+                  leftView === 'ai' && vol ? 'bg-white shadow-sm font-semibold text-[#1D1D1F]' : 'text-[#6E6E73]'
+                }`}
+                title={vol ? 'AI 通读整卷后排出来的篇目' : '还没有整卷分析结果：点右上角「整卷分析」'}
+              >
+                AI 篇目
+              </button>
+              <button
+                onClick={() => setLeftView('text')}
+                className={`h-6 px-2 text-[11.5px] rounded cursor-pointer ${
+                  leftView === 'text' || !vol ? 'bg-white shadow-sm font-semibold text-[#1D1D1F]' : 'text-[#6E6E73]'
+                }`}
+                title="OCR 的原始文字，按世代接到下一页"
+              >
+                全书文字
+              </button>
+            </div>
+            <span className="text-[11px] text-[#86868B] tabular-nums">
+              {leftView === 'ai' && volView
+                ? `${volView.generations.length} 世 · ${volView.generations.reduce((a, g) => a + g.persons.length, 0)} 人`
+                : kw
+                  ? `${shownPages.length} / ${pages.length} 页命中`
+                  : `${pages.length} 页`}
             </span>
-            <span className="ml-auto text-[11px] text-[#B0B0B6]">{spans?.length ? '按世代接到下一页' : '按页连续通读'}</span>
+            <span className="ml-auto text-[11px] text-[#B0B0B6]">
+              {leftView === 'ai' && volView ? 'AI 通读整卷排出' : spans?.length ? '按世代接到下一页' : '按页连续通读'}
+            </span>
           </header>
-          <div className="flex-1 overflow-y-auto px-4 py-3 select-text">
+          {leftView === 'ai' && volView ? (
+            <div className="flex-1 overflow-y-auto px-4 py-3">
+              {volView.summary ? (
+                <p className="text-[12.5px] text-[#6E6E73] leading-relaxed mb-2">{volView.summary}</p>
+              ) : null}
+              {volView.truncated ? (
+                <p className="mb-2 text-[11.5px] text-[#8A4B00] bg-[#FF9500]/10 border border-[#FF9500]/25 rounded-lg px-2 py-1 leading-relaxed">
+                  模型的输出被长度上限截断了，最后几页可能没排全。可以再点一次「整卷分析」重排，或到「模型」换一个上下文更长的对话模型。
+                </p>
+              ) : null}
+              {volView.sections.length ? (
+                <div className="flex flex-wrap gap-1.5 mb-3">
+                  {volView.sections.map((s, i) => (
+                    <button
+                      key={i}
+                      onClick={() => s.pages[0] && jumpPageNo(s.pages[0])}
+                      className="text-[11px] px-1.5 py-0.5 rounded bg-black/[0.04] hover:bg-[#0071E3]/10 cursor-pointer"
+                      title={s.pages.length ? `第 ${s.pages.join('、')} 页` : ''}
+                    >
+                      <span className="font-semibold text-[#1D1D1F]">{s.title}</span>
+                      {s.pages.length ? <span className="ml-1 text-[#9CA3AF] tabular-nums">P{s.pages.join('/')}</span> : null}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+
+              {volView.generations.map((g, gi) => (
+                <article key={gi} className="mb-4">
+                  <div className="text-[12px] font-semibold text-[#1D1D1F] mb-1">
+                    {g.gen || '世次不明'}
+                    <span className="ml-1.5 font-normal text-[#9CA3AF]">{g.persons.length} 人</span>
+                  </div>
+                  {g.persons.map((p, pi) => (
+                    <div key={pi} className="mb-1.5">
+                      <p className="text-[14px] leading-[1.85] text-[#1D1D1F] break-all" style={{ fontFamily: FONT }}>
+                        {p.order ? <span className="text-[11px] font-semibold text-[#0071E3] mr-1">{p.order}</span> : null}
+                        {p.name ? <span className="font-semibold">{p.name}</span> : null}
+                        {p.father ? <span className="text-[12px] text-[#6E6E73]"> · 父 {p.father}</span> : null}
+                        {p.courtesy ? <span className="text-[12px] text-[#6E6E73]"> · {p.courtesy}</span> : null}
+                        {p.spouse ? <span className="text-[12px] text-[#6E6E73]"> · {p.spouse}</span> : null}
+                        {p.sons.length ? <span className="text-[12px] text-[#6E6E73]"> · 子 {orderSonsByNote(p.note, p.sons).join('、')}</span> : null}
+                      </p>
+                      {p.note ? (
+                        <p className="text-[12.5px] leading-[1.8] text-[#3A3A3C] break-all" style={{ fontFamily: FONT }}>
+                          {p.note}
+                        </p>
+                      ) : null}
+                      {p.pages.length ? (
+                        <div className="flex flex-wrap gap-1 mt-0.5">
+                          {p.pages.map((n) => (
+                            <button
+                              key={n}
+                              onClick={() => jumpPageNo(n)}
+                              className="text-[10.5px] text-[#0071E3] hover:text-[#0077ED] cursor-pointer tabular-nums"
+                            >
+                              P{n}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+                </article>
+              ))}
+
+              {volView.issues.length ? (
+                <div className="mt-4 rounded-xl bg-[#FF9500]/10 border border-[#FF9500]/25 px-3 py-2">
+                  <p className="text-[12px] font-semibold text-[#8A4B00] flex items-center gap-1">
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    AI 说这几处对不上（{volView.issues.length}）
+                  </p>
+                  <ul className="mt-1 space-y-1">
+                    {volView.issues.map((it, i) => (
+                      <li key={i} className="text-[11.5px] text-[#8A4B00] leading-relaxed">
+                        {it.page ? (
+                          <button onClick={() => jumpPageNo(it.page)} className="font-semibold text-[#0071E3] cursor-pointer mr-1">
+                            第 {it.page} 页
+                          </button>
+                        ) : null}
+                        {it.why}
+                        {it.text ? <span className="text-[#A25B00]">（原文：{it.text}）</span> : null}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              <p className="mt-4 text-[11px] text-[#B0B0B6]">
+                {volView.model ? `${volView.model} 排的` : 'AI 排的'}
+                {volView.at ? ` · ${new Date(volView.at).toLocaleString()}` : ''} · 想重排就再点一次「整卷分析」
+              </p>
+            </div>
+          ) : null}
+
+          <div className={`flex-1 overflow-y-auto px-4 py-3 select-text ${leftView === 'ai' && volView ? 'hidden' : ''}`}>
             {loading && !texts ? (
               <div className="text-[13px] text-[#86868B]">加载中…</div>
             ) : null}
@@ -3108,7 +3986,7 @@ const OcrToc: React.FC<{ taskId: string; pages: OcrPage[]; onJump: (pageId: stri
             ) : null}
           </header>
 
-          <GenChart persons={gen?.persons || []} selected={sel} onSelect={setSel} />
+          <GenChart persons={chartPersons} selected={sel} onSelect={setSel} />
 
           {selected ? (
             <div className="border-t border-black/[0.08] bg-white px-4 py-3 shrink-0 max-h-[38%] overflow-y-auto">
@@ -3156,7 +4034,7 @@ const OcrToc: React.FC<{ taskId: string; pages: OcrPage[]; onJump: (pageId: stri
                 <div className="mt-2 flex items-center gap-1.5 flex-wrap text-[11px] text-[#6E6E73]">
                   <span>子：</span>
                   {selected.childKeys.map((k) => {
-                    const c = (gen?.persons || []).find((x) => x.key === k);
+                    const c = chartPersons.find((x) => x.key === k);
                     return c ? (
                       <button
                         key={k}

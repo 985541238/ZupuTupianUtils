@@ -135,6 +135,8 @@ export interface OcrChar {
   z?: 0 | 1;
   t: string;
   b: [number, number, number, number];
+  /** 引擎给的置信度 0~1（百度 char_probability）；没有这个字段表示引擎没给，不是 0 */
+  p?: number;
   /** 1 = 模型没把握 / 占位符，需要人看 */
   u?: 0 | 1;
   /** 1 = 人工改过 */
@@ -233,6 +235,17 @@ export interface OcrPage {
   volumeId?: number | null;
   /** 只有单页详情接口才带 */
   columns?: OcrColumn[];
+  /** 纯按 OCR 列切出来的人（不经过模型），校对页以这份为准 */
+  columnPeople?: ColumnPerson[];
+}
+
+/** 按 OCR 列直接切出来的一格：名字、排行、原文、参与拼成它的那几列 */
+export interface ColumnPerson {
+  name: string;
+  order: string;
+  gen: string;
+  text: string;
+  cols: string[];
 }
 
 export interface OcrTextPage {
@@ -243,4 +256,6 @@ export interface OcrTextPage {
   uncertainCount: number;
   charCount: number;
   columns: string[];
+  /** 纯按 OCR 列切出来的人（不经模型） */
+  columnPeople?: ColumnPerson[];
 }

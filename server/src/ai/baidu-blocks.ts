@@ -1,5 +1,5 @@
 import sharp from 'sharp';
-import { BaiduColumn, BaiduOcrError, getBaiduToken } from './baidu-ocr';
+import { BaiduColumn, BaiduOcrError, alignChars, getBaiduToken } from './baidu-ocr';
 
 /**
  * 族谱/表格页的块识别：
@@ -69,8 +69,10 @@ interface RawLine {
   text: string;
   /** 原图像素坐标 */
   box: [number, number, number, number];
-  chars: { c: string; b: [number, number, number, number] }[];
+  chars: { c: string; b: [number, number, number, number]; p?: number }[];
   prob?: number;
+  /** 行内最低的单字置信度 */
+  probMin?: number;
 }
 
 function toRawLines(words: any[], sx: number, sy: number, ox: number, oy: number): RawLine[] {
@@ -87,14 +89,30 @@ function toRawLines(words: any[], sx: number, sy: number, ox: number, oy: number
       const t = String(c?.char ?? '').replace(/\s+/g, '');
       const cl = c?.location;
       if (!t || !cl) continue;
+      const cp = c?.char_prob == null ? undefined : Number(c.char_prob);
       chars.push({
         c: Array.from(t)[0],
         b: [ox + Number(cl.left) / sx, oy + Number(cl.top) / sy, ox + (Number(cl.left) + Number(cl.width)) / sx, oy + (Number(cl.top) + Number(cl.height)) / sy],
+        p: cp == null ? undefined : cp > 1 ? Math.min(1, cp / 100) : Math.max(0, cp),
       });
     }
-    const text = chars.length ? chars.map((c) => c.c).join('') : String(l.words || '').replace(/\s+/g, '');
+    // 整行 words 是完整的，逐字偶尔缺几个：以整行为准，缺的字用插值位置补上
+    const wordsText = String(l.words || '').replace(/\s+/g, '');
+    let text = wordsText;
+    if (wordsText && chars.length) {
+      const aligned = alignChars(wordsText, chars);
+      chars.splice(0, chars.length, ...aligned.chars);
+    } else if (!wordsText) {
+      text = chars.map((c) => c.c).join('');
+    }
     if (!text) continue;
-    out.push({ text, box: [x1, y1, x2, y2], chars, prob: l.probability?.average != null ? Number(l.probability.average) : undefined });
+    out.push({
+      text,
+      box: [x1, y1, x2, y2],
+      chars,
+      prob: l.probability?.average != null ? Number(l.probability.average) : undefined,
+      probMin: l.probability?.min != null ? Number(l.probability.min) : undefined,
+    });
   }
   return out;
 }
@@ -104,6 +122,7 @@ async function callAccurate(token: string, image: Buffer): Promise<any[]> {
     image: image.toString('base64'),
     recognize_granularity: 'small',
     probability: 'true',
+    char_probability: 'true',
     detect_direction: 'false',
     language_type: 'CHN_ENG',
   });
@@ -182,8 +201,11 @@ export async function baiduBlocksOcr(imagePath: string, apiKey: string, secretKe
 
   const columns: BaiduColumn[] = [];
   const seen = new Set<string>();
+  // 行带边界是百度按表格线给的，常常正好压在字上：只留 1px 会把边上的字切成两半，
+  // 切掉的那半百度就认不出来了（「生子三華一華二華三」变成「華一華二華」就是这原因）。
+  // 上下各留约一个字高，重叠部分靠下面的 seen 去重。
+  const pad = Math.max(12, Math.round(H * 0.022));
   for (const band of bands) {
-    const pad = 1;
     const y1 = Math.max(0, band.y1 - pad);
     const y2 = Math.min(H, band.y2 + pad);
     const height = y2 - y1;
@@ -219,12 +241,99 @@ export async function baiduBlocksOcr(imagePath: string, apiKey: string, secretKe
           text: l.text,
           box: [clamp01(l.box[0], W), clamp01(l.box[1], H), clamp01(l.box[2], W), clamp01(l.box[3], H)],
           charBoxes: ok ? l.chars.map((c) => [clamp01(c.b[0], W), clamp01(c.b[1], H), clamp01(c.b[2], W), clamp01(c.b[3], H)] as [number, number, number, number]) : undefined,
+          charProbs: ok ? l.chars.map((c) => c.p ?? 0) : undefined,
           prob: l.prob,
+          probMin: l.probMin,
         });
       }
     }
   }
-  return columns.length ? orderByRows(columns) : null;
+  return columns.length ? orderByRows(mergeVertical(columns)) : null;
+}
+
+/**
+ * 行带重叠区里同一个字会被两遍都认出来，位置几乎重合。
+ * 按「同字 + 竖直中心差不到半个字高」判重，正常的连写同字（世世、明明）位置是错开的，不会被误删。
+ */
+function dedupeSameSpot<T extends { ch: string; b: [number, number, number, number] }>(pairs: T[]): T[] {
+  const out: T[] = [];
+  for (const x of pairs) {
+    const prev = out[out.length - 1];
+    if (prev) {
+      const h = Math.min(x.b[3] - x.b[1], prev.b[3] - prev.b[1]);
+      const cy = (x.b[1] + x.b[3]) / 2;
+      const pcy = (prev.b[1] + prev.b[3]) / 2;
+      if (x.ch === prev.ch && Math.abs(cy - pcy) < h * 0.5) continue;
+    }
+    out.push(x);
+  }
+  return out;
+}
+
+/**
+ * 行带留了余量之后，相邻两个行带会在重叠区把同一列各认一遍，
+ * 于是「生子三華一華二華三」被拆成「生子三華」+「華一華二華三」两列。
+ * 这里把「横向范围基本重合、上下挨着」的列合并回一列。
+ */
+function mergeVertical(cols: BaiduColumn[]): BaiduColumn[] {
+  const used = new Array(cols.length).fill(false);
+  const order = cols.map((_, i) => i).sort((a, b) => cols[a].box[1] - cols[b].box[1]);
+  const out: BaiduColumn[] = [];
+  for (const i of order) {
+    if (used[i]) continue;
+    used[i] = true;
+    let cur: BaiduColumn = {
+      ...cols[i],
+      charBoxes: cols[i].charBoxes ? [...cols[i].charBoxes] : undefined,
+      charProbs: cols[i].charProbs ? [...cols[i].charProbs] : undefined,
+    };
+    for (let again = true; again; ) {
+      again = false;
+      for (const j of order) {
+        if (used[j]) continue;
+        const o = cols[j];
+        const [cx1, cy1, cx2, cy2] = cur.box;
+        const [ox1, oy1, ox2, oy2] = o.box;
+        const ow = Math.min(cx2, ox2) - Math.max(cx1, ox1);
+        const w = Math.min(cx2 - cx1, ox2 - ox1);
+        if (w <= 0 || ow <= 0.7 * w) continue; // 横向不重叠
+        if (oy1 < cy1 - 2) continue; // 只往下接，避免来回合
+        const gap = oy1 - cy2;
+        const h = Math.min(cy2 - cy1, oy2 - oy1);
+        if (gap > h * 0.6) continue; // 中间隔着大半个字高，是下一段文字，不是同一列
+        used[j] = true;
+        const canBoxes = cur.charBoxes && o.charBoxes && cur.charBoxes.length === Array.from(cur.text).length && o.charBoxes.length === Array.from(o.text).length;
+        if (canBoxes) {
+          const pairs = dedupeSameSpot(
+            [
+              ...Array.from(cur.text).map((ch, k) => ({ ch, b: cur.charBoxes![k], p: cur.charProbs?.[k] })),
+              ...Array.from(o.text).map((ch, k) => ({ ch, b: o.charBoxes![k], p: o.charProbs?.[k] })),
+            ].sort((a, b) => (a.b[1] + a.b[3]) / 2 - (b.b[1] + b.b[3]) / 2),
+          );
+          cur = {
+            ...cur,
+            text: pairs.map((x) => x.ch).join(''),
+            box: [Math.min(cx1, ox1), Math.min(cy1, oy1), Math.max(cx2, ox2), Math.max(cy2, oy2)],
+            charBoxes: pairs.map((x) => x.b),
+            charProbs: cur.charProbs && o.charProbs ? pairs.map((x) => x.p ?? 0) : undefined,
+            probMin: cur.probMin == null ? o.probMin : o.probMin == null ? cur.probMin : Math.min(cur.probMin, o.probMin),
+          };
+        } else {
+          cur = {
+            ...cur,
+            text: cur.text + o.text,
+            box: [Math.min(cx1, ox1), Math.min(cy1, oy1), Math.max(cx2, ox2), Math.max(cy2, oy2)],
+            charBoxes: undefined,
+            charProbs: undefined,
+            probMin: cur.probMin == null ? o.probMin : o.probMin == null ? cur.probMin : Math.min(cur.probMin, o.probMin),
+          };
+        }
+        again = true;
+      }
+    }
+    out.push(cur);
+  }
+  return out;
 }
 
 /**

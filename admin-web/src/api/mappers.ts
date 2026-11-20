@@ -219,6 +219,7 @@ export function mapOcrPage(raw: any, taskId: string | number, pageNumber: number
     volumeName: raw.volumeName || null,
     volumeId: raw.volumeId != null ? Number(raw.volumeId) : null,
     columns: raw.data?.columns,
+    columnPeople: raw.columnPeople,
   };
 }
 
@@ -253,5 +254,6 @@ export function mapOcrTextPage(raw: any): OcrTextPage {
     uncertainCount: Number(raw.uncertainCount) || 0,
     charCount: Number(raw.charCount) || 0,
     columns: Array.isArray(raw.columns) ? raw.columns : [],
+    columnPeople: Array.isArray(raw.columnPeople) ? raw.columnPeople : undefined,
   };
 }
